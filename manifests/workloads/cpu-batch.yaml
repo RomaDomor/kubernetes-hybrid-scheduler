@@ -1,0 +1,43 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cpu-batch
+  labels:
+    app: cpu-batch
+  annotations:
+    slo.class: "batch"
+    slo.deadline.ms: "300000"           # 5 min
+    slo.max-offload-penalty.ms: "500"   # tolerate up to 0.5s extra
+spec:
+  completions: 1
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: cpu-batch
+      annotations:
+        slo.class: "batch"
+        slo.deadline.ms: "300000"
+        slo.max-offload-penalty.ms: "500"
+    spec:
+      restartPolicy: Never
+      dnsPolicy: ClusterFirst
+      containers:
+        - name: worker
+          image: docker.io/library/debian:bookworm-slim
+          command:
+            - bash
+            - -lc
+            - |
+              set -euo pipefail
+              apt-get update -y
+              apt-get install -y --no-install-recommends stress-ng ca-certificates
+              update-ca-certificates
+              stress-ng --cpu 2 --cpu-load 80 --timeout 120s --metrics-brief
+          resources:
+            requests:
+              cpu: "1"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "512Mi"

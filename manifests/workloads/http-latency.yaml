@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-latency
+  labels:
+    app: http-latency
+  annotations:
+    slo.class: "latency"
+    slo.latency.ms: "120"
+    slo.max-offload-penalty.ms: "40"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: http-latency
+  template:
+    metadata:
+      labels:
+        app: http-latency
+    spec:
+      containers:
+        - name: nginx
+          image: openresty/openresty:1.21.4.1-0-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /usr/local/openresty/nginx/conf/nginx.conf
+              subPath: nginx.conf
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 80
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 1
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: http-latency-nginx
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: http-latency-nginx
+data:
+  nginx.conf: |
+    worker_processes  1;
+    events { worker_connections  1024; }
+    http {
+      lua_shared_dict metrics 10m;
+      server {
+        listen 80;
+        location = /ping { return 200 "ok"; }
+        location / {
+          # emulate small compute time + jitter (set via env or fixed)
+          content_by_lua_block {
+            local t0 = os.clock()
+            -- ~5-10ms compute imitation
+            for i=1,2e5 do local x = math.sin(i) end
+            ngx.say("ok")
+          }
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-latency
+  labels:
+    app: http-latency
+spec:
+  selector:
+    app: http-latency
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP
+  type: ClusterIP

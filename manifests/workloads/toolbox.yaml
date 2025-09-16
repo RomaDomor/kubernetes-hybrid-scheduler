@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: toolbox
+  labels:
+    app: toolbox
+spec:
+  dnsPolicy: ClusterFirst
+  containers:
+    - name: hey
+      image: docker.io/williamyeh/hey:latest
+      command: ["sleep","36000"]
+      # hey binary is at /hey in this image
+      resources:
+        requests:
+          cpu: "20m"
+          memory: "64Mi"
+
+# kubectl exec -it toolbox -- /bin/sh -lc 'hey -z 30s -q 20 -c 20 http://http-latency.default.svc.cluster.local/'

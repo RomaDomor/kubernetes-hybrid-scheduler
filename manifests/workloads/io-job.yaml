@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: io-job
+  labels:
+    app: io-job
+  annotations:
+    slo.class: "batch"
+    slo.deadline.ms: "90000"
+    slo.max-offload-penalty.ms: "1200"   # tolerant to WAN overhead
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: io
+          image: alpine:3.19
+          command:
+            - sh
+            - -lc
+            - |
+              apk add --no-cache curl
+              curl -L -o /tmp/blob.bin https://speed.hetzner.de/10MB.bin
+              sha256sum /tmp/blob.bin
+              sleep 1
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

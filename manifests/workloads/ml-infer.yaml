@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ml-infer
+  labels:
+    app: ml-infer
+  annotations:
+    slo.class: "ml"
+    slo.latency.ms: "250"
+    slo.deadline.ms: "60000"
+    slo.max-offload-penalty.ms: "60"
+spec:
+  completions: 1
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: ml-infer
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: infer
+          image: python:3.11-slim
+          command:
+            - bash
+            - -lc
+            - |
+              set -e
+              pip install --no-cache-dir numpy
+              python -c 'import time, numpy as np; t0=time.time(); [ (np.random.rand(200,200)@np.random.rand(200,200)).sum() for _ in range(3) ]; time.sleep(0.1); print("done in", round(time.time()-t0,3), "s")'
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "1Gi"
+            limits:
+              cpu: "1500m"
+              memory: "2Gi"
