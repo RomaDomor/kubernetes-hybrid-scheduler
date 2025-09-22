@@ -2,31 +2,51 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: io-job
-  labels:
-    app: io-job
+  labels: { app: io-job }
   annotations:
     slo.class: "batch"
-    slo.deadline.ms: "90000"
-    slo.max-offload-penalty.ms: "1200"   # tolerant to WAN overhead
+    slo.deadline.ms: "180000"          # from 90000 to allow variability
+    slo.max-offload-penalty.ms: "1200"
 spec:
+  backoffLimit: 0
   template:
     spec:
       restartPolicy: Never
       containers:
         - name: io
           image: alpine:3.19
+          env:
+            - name: BYTES_MB
+              value: "100"             # total size to fetch/generate
+            - name: WR_COPIES
+              value: "3"               # copies to write
           command:
             - sh
-            - -lc
+            - -c
             - |
-              apk add --no-cache curl
-              curl -L -o /tmp/blob.bin https://speed.hetzner.de/10MB.bin
-              sha256sum /tmp/blob.bin
+              set -e
+              apk add --no-cache wget coreutils || true
+              mkdir -p /work
+              # Try 100MB test; fallback to synthetic
+              wget -O /work/blob.bin http://speedtest.tele2.net/100MB.zip || \
+              wget -O /work/blob.bin https://speed.hetzner.de/100MB.bin || \
+              dd if=/dev/urandom of=/work/blob.bin bs=1M count=${BYTES_MB}
+              sha256sum /work/blob.bin || true
+              # Write copies with direct I/O to stress disk
+              i=1
+              while [ $i -le ${WR_COPIES} ]; do
+                dd if=/work/blob.bin of=/work/copy_${i}.bin bs=4M oflag=direct status=none
+                i=$((i+1))
+              done
+              # Read back to stress page cache
+              cat /work/copy_*.bin >/dev/null 2>&1 || true
               sleep 1
           resources:
-            requests:
-              cpu: "200m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "256Mi"
+            requests: { cpu: "300m", memory: "256Mi" }
+            limits:   { cpu: "800m", memory: "512Mi" }
+          volumeMounts:
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: work
+          emptyDir: {}

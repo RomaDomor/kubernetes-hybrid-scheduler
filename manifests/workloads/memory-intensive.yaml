@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: memory-intensive
+  labels: { app: memory-intensive }
+  annotations:
+    slo.class: "batch"
+    slo.deadline.ms: "150000"          # from 180000
+    slo.max-offload-penalty.ms: "800"
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: { app: memory-intensive }
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: memory-worker
+          image: python:3.11-slim
+          env:
+            - name: CHUNK_MB
+              value: "128"
+            - name: CHUNKS
+              value: "8"
+            - name: CHURN_SEC
+              value: "60"
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir numpy psutil
+              python - <<'PY'
+              import numpy as np, psutil, time, gc, os
+              CM=int(os.getenv("CHUNK_MB","128"))*1024*1024//4
+              N=int(os.getenv("CHUNKS","8"))
+              CHURN=int(os.getenv("CHURN_SEC","60"))
+              print("Starting memory test. Available MB:", psutil.virtual_memory().available//2**20)
+              arrays=[]; t0=time.time()
+              print("Phase 1: allocate")
+              for i in range(N):
+                  arr = np.random.rand(CM).astype(np.float32)
+                  arrays.append(arr)
+                  print(f"  chunk {i+1}/{N} RSS={psutil.Process().memory_info().rss//2**20} MB"); time.sleep(0.1)
+              print("Phase 2: process")
+              res=[]
+              for i,a in enumerate(arrays):
+                  s=np.mean(a.reshape(-1,1024),axis=1)
+                  res.append(float(np.convolve(s, np.ones(100)/100, mode='valid').sum()))
+                  if (i+1)%2==0: print(f"  processed {i+1}/{N}")
+              print("Phase 3: churn")
+              end=time.time()+CHURN
+              k=0
+              while time.time()<end:
+                  if arrays:
+                      arrays.pop(0)
+                  arrays.append(np.random.rand(CM//2).astype(np.float32))
+                  k+=1
+                  if k%10==0: print("  churn step",k,"RSS",psutil.Process().memory_info().rss//2**20,"MB")
+                  time.sleep(0.2)
+              peak=psutil.Process().memory_info().rss//2**20
+              print("Done in", round(time.time()-t0,2),"s")
+              print("Peak memory usage:",peak,"MB")
+              del arrays,res; gc.collect()
+              PY
+          resources:
+            requests: { cpu: "800m", memory: "1850Mi" }
+            limits:   { cpu: "1500m", memory: "2300Mi" }

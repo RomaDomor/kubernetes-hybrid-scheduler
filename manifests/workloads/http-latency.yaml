@@ -6,8 +6,8 @@ metadata:
     app: http-latency
   annotations:
     slo.class: "latency"
-    slo.latency.ms: "120"
-    slo.max-offload-penalty.ms: "40"
+    slo.latency.ms: "80"               # tightened from 120
+    slo.max-offload-penalty.ms: "25"
 spec:
   replicas: 1
   selector:
@@ -23,6 +23,9 @@ spec:
           image: openresty/openresty:1.21.4.1-0-alpine
           ports:
             - containerPort: 80
+          env:
+            - name: CPU_SPIN_ITERS
+              value: "200000"          # tune compute in Lua loop
           volumeMounts:
             - name: nginx-conf
               mountPath: /usr/local/openresty/nginx/conf/nginx.conf
@@ -36,8 +39,8 @@ spec:
             timeoutSeconds: 1
           resources:
             requests:
-              cpu: "200m"
-              memory: "128Mi"
+              cpu: "300m"
+              memory: "160Mi"
             limits:
               cpu: "500m"
               memory: "256Mi"
@@ -60,11 +63,9 @@ data:
         listen 80;
         location = /ping { return 200 "ok"; }
         location / {
-          # emulate small compute time + jitter (set via env or fixed)
           content_by_lua_block {
-            local t0 = os.clock()
-            -- ~5-10ms compute imitation
-            for i=1,2e5 do local x = math.sin(i) end
+            local iters = tonumber(os.getenv("CPU_SPIN_ITERS") or "200000")
+            for i=1,iters do local x = math.sin(i) end
             ngx.say("ok")
           }
         }

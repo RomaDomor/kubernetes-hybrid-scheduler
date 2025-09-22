@@ -10,28 +10,52 @@ metadata:
     slo.deadline.ms: "60000"
     slo.max-offload-penalty.ms: "60"
 spec:
-  completions: 1
   backoffLimit: 0
   template:
-    metadata:
-      labels:
-        app: ml-infer
     spec:
       restartPolicy: Never
       containers:
         - name: infer
           image: python:3.11-slim
+          env:
+            - name: MAT          # matrix size
+              value: "600"
+            - name: REPS         # number of inferences
+              value: "8"
+            - name: MODEL_MB     # simulate model load size
+              value: "200"
+            - name: THREADS      # control BLAS threads if present
+              value: "1"
           command:
             - bash
-            - -lc
+            - -c
             - |
-              set -e
+              set -euo pipefail
               pip install --no-cache-dir numpy
-              python -c 'import time, numpy as np; t0=time.time(); [ (np.random.rand(200,200)@np.random.rand(200,200)).sum() for _ in range(3) ]; time.sleep(0.1); print("done in", round(time.time()-t0,3), "s")'
+              # Simulate model load I/O and residency
+              head -c $((MODEL_MB*1024*1024)) </dev/urandom >/tmp/model.bin
+              python - <<'PY'
+              import os, time, numpy as np, mmap
+              MAT=int(os.getenv("MAT","600")); REPS=int(os.getenv("REPS","8"))
+              THREADS=os.getenv("THREADS","1")
+              os.environ["OPENBLAS_NUM_THREADS"]=THREADS
+              os.environ["OMP_NUM_THREADS"]=THREADS
+              # mmap the "model"
+              with open("/tmp/model.bin","rb") as f:
+                  mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+                  # touch some bytes to simulate parse
+                  _ = sum(mm[:1024])
+              t0=time.time()
+              for i in range(REPS):
+                  a=np.random.rand(MAT,MAT); b=np.random.rand(MAT,MAT)
+                  _=(a@b).sum()
+              dt=time.time()-t0
+              print(f"mat={MAT} reps={REPS} threads={THREADS} time={dt:.3f}s per_infer={dt/REPS:.3f}s")
+              PY
           resources:
             requests:
               cpu: "1000m"
               memory: "1Gi"
             limits:
-              cpu: "1500m"
+              cpu: "2000m"
               memory: "2Gi"

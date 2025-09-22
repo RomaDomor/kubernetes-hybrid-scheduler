@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: build-job
+  labels: { app: build-job }
+  annotations:
+    slo.class: "batch"
+    slo.deadline.ms: "300000"          # 5 min
+    slo.max-offload-penalty.ms: "800"
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: builder
+          image: golang:1.24
+          env:
+            - name: REPO
+              value: "https://github.com/golang/example.git"
+            - name: BUILD_CMD
+              value: "go build ./..."
+            - name: GOMAXPROCS
+              value: "4"
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              apt-get update -y && apt-get install -y --no-install-recommends git ca-certificates
+              update-ca-certificates
+              git clone --depth 1 ${REPO} /src
+              cd /src
+              export GOMAXPROCS=${GOMAXPROCS}
+              time sh -c "${BUILD_CMD}"
+          resources:
+            requests: { cpu: "1000m", memory: "1Gi" }
+            limits:   { cpu: "3000m", memory: "2Gi" }
+          volumeMounts:
+            - name: buildcache
+              mountPath: /root/.cache/go-build
+      volumes:
+        - name: buildcache
+          emptyDir: {}
