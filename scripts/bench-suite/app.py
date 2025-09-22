@@ -16,53 +16,6 @@ from kubernetes.client import ApiException
 from kubernetes.stream import stream
 
 
-# -------------------- Defaults (env overridable) --------------------
-def env(name, default):
-    return os.environ.get(name, default)
-
-
-NAMESPACE = env("NAMESPACE", "default")
-CTX = env("CTX", "")
-KCFG_PATH = env("KUBECONFIG_PATH", "~/.kube/cluster")
-REPO_ROOT = env("REPO_ROOT", ".")
-MANIFESTS_DIR = env("MANIFESTS_DIR", f"{REPO_ROOT}/manifests/workloads")
-RESULTS_ROOT = env("RESULTS_ROOT", f"{REPO_ROOT}/results")
-RESULTS_DIR = env(
-    "RESULTS_DIR", f"{RESULTS_ROOT}/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-)
-
-HTTP_LATENCY_FILE = env("HTTP_LATENCY_FILE", "http-latency.yaml")
-TOOLBOX_FILE = env("TOOLBOX_FILE", "toolbox.yaml")
-CPU_BATCH_FILE = env("CPU_BATCH_FILE", "cpu-batch.yaml")
-ML_INFER_FILE = env("ML_INFER_FILE", "ml-infer.yaml")
-IO_JOB_FILE = env("IO_JOB_FILE", "io-job.yaml")
-MEMORY_INTENSIVE_FILE = env("MEMORY_INTENSIVE_FILE", "memory-intensive.yaml")
-STREAM_PROCESSOR_FILE = env("STREAM_PROCESSOR_FILE", "stream-processor.yaml")
-BUILD_JOB_FILE = env("BUILD_JOB_FILE", "build-job.yaml")
-
-STREAM_SVC_URL = env(
-    "STREAM_SVC_URL",
-    f"http://stream-processor.{NAMESPACE}.svc.cluster.local:8080",
-)
-STREAM_WARMUP_SEC = int(env("STREAM_WARMUP_SEC", "5"))
-STREAM_TEST_SEC = int(env("STREAM_TEST_SEC", "120"))
-
-HTTP_SVC_URL = env(
-    "HTTP_SVC_URL", f"http://http-latency.{NAMESPACE}.svc.cluster.local/"
-)
-HTTP_WARMUP_SEC = int(env("HTTP_WARMUP_SEC", "10"))
-HTTP_TEST_SEC = int(env("HTTP_TEST_SEC", "30"))
-HTTP_QPS = int(env("HTTP_QPS", "20"))
-HTTP_CONC = int(env("HTTP_CONC", "20"))
-
-TIMEOUT_JOB_SEC = int(env("TIMEOUT_JOB_SEC", "900"))
-CLEANUP = env("CLEANUP", "true").lower() == "true"
-CLEANUP_NAMESPACE = env("CLEANUP_NAMESPACE", "false").lower() == "true"
-
-# SLO policy: which metric to compare for latency class (p95 by default)
-LATENCY_POLICY_METRIC = env("LATENCY_POLICY_METRIC", "p95")  # p50|p95|p99|avg
-
-
 # -------------------- Utilities --------------------
 def log(msg: str):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -112,12 +65,12 @@ def to_int(val: Optional[str]) -> Optional[int]:
 
 
 # -------------------- K8s helpers --------------------
-def kube_init():
+def kube_init(context: str, kubeconfig_path: str):
     try:
-        if CTX:
-            config.load_kube_config(context=CTX)
+        if context:
+            config.load_kube_config(context=context)
         else:
-            config.load_kube_config(config_file=KCFG_PATH)
+            config.load_kube_config(config_file=kubeconfig_path)
     except Exception:
         config.load_incluster_config()
 
@@ -356,9 +309,11 @@ def detect_virtual_node(v1: client.CoreV1Api) -> str:
 
 
 # -------------------- Catalog (SLOs) --------------------
-def build_catalog_from_manifests(ns: str, manifests_dir: Path, files: List[str]) -> List[Dict[str, Any]]:
+def build_catalog_from_manifests(
+        ns: str, manifests_dir: Path, manifest_files: List[str]
+) -> List[Dict[str, Any]]:
     catalog: List[Dict[str, Any]] = []
-    for name in files:
+    for name in manifest_files:
         p = manifests_dir / name
         if not file_exists(p):
             continue
@@ -413,23 +368,33 @@ def save_catalog(catalog: List[Dict[str, Any]], results_dir: Path):
 
 
 # -------------------- Measurement --------------------
-def measure_http(v1: client.CoreV1Api, ns: str, results_dir: Path) -> Dict[str, Any]:
+def measure_http(
+        v1: client.CoreV1Api,
+        ns: str,
+        results_dir: Path,
+        args: argparse.Namespace,
+        http_svc_url: str,
+) -> Dict[str, Any]:
     # warmup
-    log(f"HTTP warmup {HTTP_WARMUP_SEC}s @ {HTTP_SVC_URL}")
+    log(f"HTTP warmup {args.http_warmup_sec}s @ {http_svc_url}")
     try:
         toolbox_exec(
-            v1, ns,
-            f"/hey -z {HTTP_WARMUP_SEC}s -q {HTTP_QPS} -c {HTTP_CONC} {HTTP_SVC_URL}",
+            v1,
+            ns,
+            f"/hey -z {args.http_warmup_sec}s -q {args.http_qps} -c {args.http_conc} {http_svc_url}",
             check=False,
         )
     except Exception:
         pass
 
     # run
-    log(f"HTTP benchmark {HTTP_TEST_SEC}s, qps={HTTP_QPS}, conc={HTTP_CONC}")
+    log(
+        f"HTTP benchmark {args.http_test_sec}s, qps={args.http_qps}, conc={args.http_conc}"
+    )
     out = toolbox_exec(
-        v1, ns,
-        f"/hey -z {HTTP_TEST_SEC}s -q {HTTP_QPS} -c {HTTP_CONC} {HTTP_SVC_URL}",
+        v1,
+        ns,
+        f"/hey -z {args.http_test_sec}s -q {args.http_qps} -c {args.http_conc} {http_svc_url}",
         check=False,
     )
     (results_dir / "http_benchmark.txt").write_text(out)
@@ -471,7 +436,14 @@ def measure_http(v1: client.CoreV1Api, ns: str, results_dir: Path) -> Dict[str, 
     return measures
 
 
-def measure_stream(apps_v1: client.AppsV1Api, v1: client.CoreV1Api, ns: str, results_dir: Path) -> Dict[str, Any]:
+def measure_stream(
+        apps_v1: client.AppsV1Api,
+        v1: client.CoreV1Api,
+        ns: str,
+        results_dir: Path,
+        stream_svc_url: str,
+        warmup_sec: int,
+) -> Dict[str, Any]:
     # verify deployment exists
     try:
         apps_v1.read_namespaced_deployment(name="stream-processor", namespace=ns)
@@ -481,9 +453,9 @@ def measure_stream(apps_v1: client.AppsV1Api, v1: client.CoreV1Api, ns: str, res
             return {}
         raise
 
-    log(f"Stream processor warmup {STREAM_WARMUP_SEC}s @ {STREAM_SVC_URL}/health")
+    log(f"Stream processor warmup {warmup_sec}s @ {stream_svc_url}/health")
     try:
-        toolbox_exec(v1, ns, f"curl -sf {STREAM_SVC_URL}/health", check=False)
+        toolbox_exec(v1, ns, f"curl -sf {stream_svc_url}/health", check=False)
     except Exception:
         pass
 
@@ -548,10 +520,11 @@ def evaluate_slos(
         catalog: List[Dict[str, Any]],
         measures: Dict[str, Any],
         results_dir: Path,
+        latency_policy_metric: str,
 ) -> Dict[str, Any]:
     rows = ["workload,kind,class,slo_target_ms,measure_ms,metric,pass"]
     report_lines: List[str] = []
-    summary: Dict[str, Any] = {"items": [], "policy": {"latency_metric": LATENCY_POLICY_METRIC}}
+    summary: Dict[str, Any] = {"items": [], "policy": {"latency_metric": latency_policy_metric}}
 
     def add(workload, kind, klass, slo_ms, meas_ms, metric, passed):
         rows.append(f"{workload},{kind},{klass},{slo_ms},{meas_ms},{metric},{str(passed).lower()}")
@@ -577,7 +550,7 @@ def evaluate_slos(
     if http_cat:
         klass = (http_cat["slo"] or {}).get("class")
         slo_lat = (http_cat["slo"] or {}).get("latency_ms")
-        metric = LATENCY_POLICY_METRIC
+        metric = latency_policy_metric
         meas_ms = None
         if metric == "p50":
             meas_ms = http_meas.get("p50_ms")
@@ -640,12 +613,12 @@ def evaluate_slos(
 
 
 # -------------------- Orchestration --------------------
-def deploy_and_wait(ns: str, manifests_dir: Path):
+def deploy_and_wait(ns: str, manifests_dir: Path, args: argparse.Namespace):
     v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
 
     # Toolbox
-    toolbox_path = manifests_dir / TOOLBOX_FILE
+    toolbox_path = manifests_dir / args.toolbox_file
     if not file_exists(toolbox_path):
         sys.exit(f"Required file not found: {toolbox_path}")
     log(f"Deploying toolbox pod from {toolbox_path} ...")
@@ -654,7 +627,7 @@ def deploy_and_wait(ns: str, manifests_dir: Path):
     wait_pod_ready(v1, ns, "toolbox", 180)
 
     # http-latency
-    http_path = manifests_dir / HTTP_LATENCY_FILE
+    http_path = manifests_dir / args.http_latency_file
     if not file_exists(http_path):
         sys.exit(f"Required file not found: {http_path}")
     log(f"Deploying http-latency from {http_path} ...")
@@ -662,34 +635,34 @@ def deploy_and_wait(ns: str, manifests_dir: Path):
     wait_deployment_ready(apps_v1, ns, "http-latency", 240)
 
     # Jobs
-    cpu_path = manifests_dir / CPU_BATCH_FILE
+    cpu_path = manifests_dir / args.cpu_batch_file
     if not file_exists(cpu_path):
         sys.exit(f"Required file not found: {cpu_path}")
     log(f"Applying CPU batch job from {cpu_path} ...")
     k_apply(ns, cpu_path)
 
-    ml_path = manifests_dir / ML_INFER_FILE
+    ml_path = manifests_dir / args.ml_infer_file
     if file_exists(ml_path):
         log(f"Applying ML infer job from {ml_path} ...")
         k_apply(ns, ml_path)
     else:
         log(f"ML infer manifest not found (optional): {ml_path}")
 
-    io_path = manifests_dir / IO_JOB_FILE
+    io_path = manifests_dir / args.io_job_file
     if file_exists(io_path):
         log(f"Applying IO job from {io_path} ...")
         k_apply(ns, io_path)
     else:
         log(f"IO job manifest not found (optional): {io_path}")
 
-    mem_path = manifests_dir / MEMORY_INTENSIVE_FILE
+    mem_path = manifests_dir / args.memory_intensive_file
     if file_exists(mem_path):
         log(f"Applying memory-intensive job from {mem_path} ...")
         k_apply(ns, mem_path)
     else:
         log(f"Memory-intensive manifest not found (optional): {mem_path}")
 
-    stream_path = manifests_dir / STREAM_PROCESSOR_FILE
+    stream_path = manifests_dir / args.stream_processor_file
     if file_exists(stream_path):
         log(f"Deploying stream processor from {stream_path} ...")
         k_apply(ns, stream_path)
@@ -697,16 +670,22 @@ def deploy_and_wait(ns: str, manifests_dir: Path):
     else:
         log(f"Stream processor manifest not found (optional): {stream_path}")
 
-    build_path = manifests_dir / BUILD_JOB_FILE
+    build_path = manifests_dir / args.build_job_file
     if file_exists(build_path):
         log(f"Applying build job from {build_path} ...")
         k_apply(ns, build_path)
-        manifests_dir / TOOLBOX_FILE,
     else:
         log(f"Build job manifest not found (optional): {build_path}")
 
 
-def record_job(batch_v1: client.BatchV1Api, v1: client.CoreV1Api, ns: str, results_dir: Path, name: str):
+def record_job(
+        batch_v1: client.BatchV1Api,
+        v1: client.CoreV1Api,
+        ns: str,
+        results_dir: Path,
+        name: str,
+        timeout_sec: int,
+):
     # Check if job exists
     try:
         batch_v1.read_namespaced_job(name=name, namespace=ns)
@@ -716,7 +695,7 @@ def record_job(batch_v1: client.BatchV1Api, v1: client.CoreV1Api, ns: str, resul
             return
         raise
 
-    dur = wait_job_complete(batch_v1, ns, name, TIMEOUT_JOB_SEC)
+    dur = wait_job_complete(batch_v1, ns, name, timeout_sec)
     with (results_dir / "jobs_durations.csv").open("a") as f:
         f.write(f"{name},duration_sec,{dur}\n")
 
@@ -812,17 +791,17 @@ def get_nodes_info(v1: client.CoreV1Api) -> str:
         return f"Error getting nodes: {e}"
 
 
-def cleanup_workloads(ns: str, manifests_dir: Path):
+def cleanup_workloads(ns: str, manifests_dir: Path, args: argparse.Namespace):
     log(f"Cleaning up workloads in namespace {ns}...")
     paths = [
-        manifests_dir / HTTP_LATENCY_FILE,
-        manifests_dir / CPU_BATCH_FILE,
-        manifests_dir / ML_INFER_FILE,
-        manifests_dir / IO_JOB_FILE,
-        manifests_dir / MEMORY_INTENSIVE_FILE,
-        manifests_dir / STREAM_PROCESSOR_FILE,
-        manifests_dir / TOOLBOX_FILE,
-    ]
+        manifests_dir / args.http_latency_file,
+        manifests_dir / args.cpu_batch_file,
+        manifests_dir / args.ml_infer_file,
+        manifests_dir / args.io_job_file,
+        manifests_dir / args.memory_intensive_file,
+        manifests_dir / args.stream_processor_file,
+        manifests_dir / args.toolbox_file,
+        ]
     for p in paths:
         if file_exists(p):
             k_delete(ns, p)
@@ -839,25 +818,149 @@ def cleanup_namespace(ns: str):
 
 
 # -------------------- Main --------------------
-def main():
-    parser = argparse.ArgumentParser(description="Kubernetes SLO Benchmark Suite (Python)")
-    parser.add_argument("--namespace", "-n", default=NAMESPACE)
-    parser.add_argument("--results-dir", default=RESULTS_DIR)
-    parser.add_argument("--manifests-dir", default=MANIFESTS_DIR)
-    parser.add_argument("--no-cleanup", action="store_true")
-    parser.add_argument("--cleanup-namespace", action="store_true")
-    args = parser.parse_args()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Kubernetes SLO Benchmark Suite",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
 
+    # Core Configuration
+    core = parser.add_argument_group("Core Configuration")
+    core.add_argument(
+        "--namespace",
+        "-n",
+        required=True,
+        help="Kubernetes namespace for the benchmark.",
+    )
+    core.add_argument(
+        "--manifests-dir",
+        required=True,
+        help="Directory containing the workload YAML manifests.",
+    )
+    core.add_argument(
+        "--results-root",
+        required=True,
+        help="Root directory to store benchmark results. A timestamped sub-directory will be created here.",
+    )
+    core.add_argument("--context", default="", help="Kubernetes context to use.")
+    core.add_argument(
+        "--kubeconfig",
+        default=os.path.expanduser("~/.kube/config"),
+        help="Path to the kubeconfig file.",
+    )
+
+    # Manifest Filenames
+    manifests = parser.add_argument_group("Manifest Filenames")
+    manifests.add_argument(
+        "--http-latency-file",
+        default="http-latency.yaml",
+        help="Filename for the HTTP latency workload.",
+    )
+    manifests.add_argument(
+        "--toolbox-file", default="toolbox.yaml", help="Filename for the toolbox pod."
+    )
+    manifests.add_argument(
+        "--cpu-batch-file",
+        default="cpu-batch.yaml",
+        help="Filename for the CPU batch job.",
+    )
+    manifests.add_argument(
+        "--ml-infer-file",
+        default="ml-infer.yaml",
+        help="Filename for the ML inference job.",
+    )
+    manifests.add_argument(
+        "--io-job-file", default="io-job.yaml", help="Filename for the I/O job."
+    )
+    manifests.add_argument(
+        "--memory-intensive-file",
+        default="memory-intensive.yaml",
+        help="Filename for the memory-intensive job.",
+    )
+    manifests.add_argument(
+        "--stream-processor-file",
+        default="stream-processor.yaml",
+        help="Filename for the stream processor workload.",
+    )
+    manifests.add_argument(
+        "--build-job-file", default="build-job.yaml", help="Filename for the build job."
+    )
+
+    # Benchmark Parameters
+    params = parser.add_argument_group("Benchmark Parameters")
+    params.add_argument(
+        "--stream-warmup-sec",
+        type=int,
+        default=5,
+        help="Stream processor warmup duration.",
+    )
+    params.add_argument(
+        "--stream-test-sec",
+        type=int,
+        default=120,
+        help="Stream processor test duration.",
+    )
+    params.add_argument(
+        "--http-warmup-sec", type=int, default=10, help="HTTP benchmark warmup duration."
+    )
+    params.add_argument(
+        "--http-test-sec", type=int, default=30, help="HTTP benchmark test duration."
+    )
+    params.add_argument("--http-qps", type=int, default=20, help="HTTP benchmark QPS.")
+    params.add_argument(
+        "--http-conc",
+        type=int,
+        default=20,
+        help="HTTP benchmark concurrency level.",
+    )
+    params.add_argument(
+        "--timeout-job-sec",
+        type=int,
+        default=900,
+        help="Timeout in seconds for waiting on batch jobs to complete.",
+    )
+    params.add_argument(
+        "--latency-policy-metric",
+        default="p95",
+        choices=["p50", "p95", "p99", "avg"],
+        help="Metric to use for evaluating latency-based SLOs.",
+    )
+
+    # Control Flags
+    control = parser.add_argument_group("Control Flags")
+    control.add_argument(
+        "--no-cleanup",
+        action="store_true",
+        help="Disable cleanup of workloads after the benchmark.",
+    )
+    control.add_argument(
+        "--cleanup-namespace",
+        action="store_true",
+        help="Delete the entire namespace during cleanup. Implies --no-cleanup is not set.",
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    # Derived configuration
     ns = args.namespace
     manifests_dir = Path(args.manifests_dir)
-    results_dir = Path(args.results_dir)
+    results_dir = Path(args.results_root) / datetime.now().strftime(
+        "%Y%m%d-%H%M%S"
+    )
     ensure_dir(results_dir)
+
+    http_svc_url = f"http://http-latency.{ns}.svc.cluster.local/"
+    stream_svc_url = f"http://stream-processor.{ns}.svc.cluster.local:8080"
 
     log(f"Namespace: {ns}")
     log(f"Manifests: {manifests_dir}")
     log(f"Results:   {results_dir}")
 
-    kube_init()
+    kube_init(args.context, args.kubeconfig)
     v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
     batch = client.BatchV1Api()
@@ -865,23 +968,20 @@ def main():
     ensure_namespace(v1, ns)
 
     # Build SLO catalog from manifests (before deploy, so we capture intent)
-    catalog = build_catalog_from_manifests(
-        ns,
-        manifests_dir,
-        [
-            HTTP_LATENCY_FILE,
-            CPU_BATCH_FILE,
-            ML_INFER_FILE,
-            IO_JOB_FILE,
-            MEMORY_INTENSIVE_FILE,
-            STREAM_PROCESSOR_FILE,
-            BUILD_JOB_FILE
-        ],
-    )
+    manifest_files = [
+        args.http_latency_file,
+        args.cpu_batch_file,
+        args.ml_infer_file,
+        args.io_job_file,
+        args.memory_intensive_file,
+        args.stream_processor_file,
+        args.build_job_file,
+    ]
+    catalog = build_catalog_from_manifests(ns, manifests_dir, manifest_files)
     save_catalog(catalog, results_dir)
 
     # Deploy workloads and wait for ready
-    deploy_and_wait(ns, manifests_dir)
+    deploy_and_wait(ns, manifests_dir, args)
 
     # Snapshots
     log("Capturing cluster state...")
@@ -899,18 +999,18 @@ def main():
         pass
 
     # HTTP benchmark
-    http_meas = measure_http(v1, ns, results_dir)
+    http_meas = measure_http(v1, ns, results_dir, args, http_svc_url)
 
     # Stream: wait later for job logs; still do a health warmup
     try:
-        toolbox_exec(v1, ns, f"curl -sf {STREAM_SVC_URL}/health", check=False)
+        toolbox_exec(v1, ns, f"curl -sf {stream_svc_url}/health", check=False)
     except Exception:
         pass
 
     # Jobs (wait + logs)
     for job in ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job", "stream-data-generator"]:
         try:
-            record_job(batch, v1, ns, results_dir, job)
+            record_job(batch, v1, ns, results_dir, job, args.timeout_job_sec)
         except Exception as e:
             log(f"Job {job} wait/log failed: {e}")
 
@@ -934,7 +1034,9 @@ def main():
         ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job", "stream-data-generator"],
     )
     # Stream measures from generator logs (now should exist)
-    stream_meas = measure_stream(apps_v1, v1, ns, results_dir)
+    stream_meas = measure_stream(
+        apps_v1, v1, ns, results_dir, stream_svc_url, args.stream_warmup_sec
+    )
 
     # Combine measures
     measures: Dict[str, Any] = {}
@@ -944,7 +1046,7 @@ def main():
     save_measures(measures, results_dir)
 
     # Evaluate SLOs
-    summary = evaluate_slos(catalog, measures, results_dir)
+    summary = evaluate_slos(catalog, measures, results_dir, args.latency_policy_metric)
 
     # Print concise summary to stdout
     log("SLO summary:")
@@ -954,14 +1056,14 @@ def main():
         pass
 
     # Cleanup
-    if not args.no_cleanup and CLEANUP:
-        if args.cleanup_namespace or CLEANUP_NAMESPACE:
+    if not args.no_cleanup:
+        if args.cleanup_namespace:
             cleanup_namespace(ns)
         else:
-            cleanup_workloads(ns, manifests_dir)
+            cleanup_workloads(ns, manifests_dir, args)
         log("Cleanup done.")
     else:
-        log("Cleanup skipped. Use --no-cleanup to preserve resources/artifacts only.")
+        log("Cleanup skipped.")
 
     log(f"Benchmark complete. Artifacts -> {results_dir}")
 
