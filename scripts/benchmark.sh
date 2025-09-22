@@ -19,6 +19,13 @@ TOOLBOX_FILE="${TOOLBOX_FILE:-toolbox.yaml}"
 CPU_BATCH_FILE="${CPU_BATCH_FILE:-cpu-batch.yaml}"
 ML_INFER_FILE="${ML_INFER_FILE:-ml-infer.yaml}"
 IO_JOB_FILE="${IO_JOB_FILE:-io-job.yaml}"         # optional, may not exist
+MEMORY_INTENSIVE_FILE="${MEMORY_INTENSIVE_FILE:-memory-intensive.yaml}"
+STREAM_PROCESSOR_FILE="${STREAM_PROCESSOR_FILE:-stream-processor.yaml}"
+
+# Stream processing parameters
+STREAM_SVC_URL="${STREAM_SVC_URL:-http://stream-processor.${NAMESPACE}.svc.cluster.local:8080}"
+STREAM_WARMUP_SEC="${STREAM_WARMUP_SEC:-5}"
+STREAM_TEST_SEC="${STREAM_TEST_SEC:-120}"  # 2 minutes for stream processing
 
 # HTTP benchmark parameters
 HTTP_SVC_URL="${HTTP_SVC_URL:-http://http-latency.${NAMESPACE}.svc.cluster.local/}"
@@ -76,6 +83,8 @@ cleanup_workloads() {
   [[ -f "${MANIFESTS_DIR}/${CPU_BATCH_FILE}"     ]] && kubectl -n "$NAMESPACE" delete -f "${MANIFESTS_DIR}/${CPU_BATCH_FILE}"     --ignore-not-found
   [[ -f "${MANIFESTS_DIR}/${ML_INFER_FILE}"      ]] && kubectl -n "$NAMESPACE" delete -f "${MANIFESTS_DIR}/${ML_INFER_FILE}"      --ignore-not-found || true
   [[ -f "${MANIFESTS_DIR}/${IO_JOB_FILE}"        ]] && kubectl -n "$NAMESPACE" delete -f "${MANIFESTS_DIR}/${IO_JOB_FILE}"        --ignore-not-found || true
+  [[ -f "${MANIFESTS_DIR}/${MEMORY_INTENSIVE_FILE}" ]] && kubectl -n "$NAMESPACE" delete -f "${MANIFESTS_DIR}/${MEMORY_INTENSIVE_FILE}" --ignore-not-found || true
+  [[ -f "${MANIFESTS_DIR}/${STREAM_PROCESSOR_FILE}" ]] && kubectl -n "$NAMESPACE" delete -f "${MANIFESTS_DIR}/${STREAM_PROCESSOR_FILE}" --ignore-not-found || true
   [[ -f "${MANIFESTS_DIR}/${TOOLBOX_FILE}"       ]] && kubectl -n "$NAMESPACE" delete -f "${MANIFESTS_DIR}/${TOOLBOX_FILE}"       --ignore-not-found
 }
 
@@ -140,6 +149,25 @@ else
   log "IO job manifest not found (optional): $IO_JOB_PATH"
 fi
 
+# Memory-intensive job
+MEMORY_INTENSIVE_PATH="${MANIFESTS_DIR}/${MEMORY_INTENSIVE_FILE}"
+if [[ -f "$MEMORY_INTENSIVE_PATH" ]]; then
+  log "Applying memory-intensive job from $MEMORY_INTENSIVE_PATH ..."
+  kubectl -n "$NAMESPACE" apply -f "$MEMORY_INTENSIVE_PATH"
+else
+  log "Memory-intensive manifest not found (optional): $MEMORY_INTENSIVE_PATH"
+fi
+
+# Stream processor
+STREAM_PROCESSOR_PATH="${MANIFESTS_DIR}/${STREAM_PROCESSOR_FILE}"
+if [[ -f "$STREAM_PROCESSOR_PATH" ]]; then
+  log "Deploying stream processor from $STREAM_PROCESSOR_PATH ..."
+  kubectl -n "$NAMESPACE" apply -f "$STREAM_PROCESSOR_PATH"
+  wait_deployment "$NAMESPACE" "stream-processor" "240s"
+else
+  log "Stream processor manifest not found (optional): $STREAM_PROCESSOR_PATH"
+fi
+
 # Snapshots
 log "Capturing cluster state..."
 kubectl get nodes -o wide > "${RESULTS_DIR}/nodes.txt"
@@ -156,6 +184,19 @@ kubectl -n "$NAMESPACE" exec toolbox -- sh -lc \
   "/hey -z ${HTTP_TEST_SEC}s -q ${HTTP_QPS} -c ${HTTP_CONC} ${HTTP_SVC_URL}" \
   | tee "${RESULTS_DIR}/http_benchmark.txt"
 
+# Stream processing benchmark (if deployed)
+if kubectl -n "$NAMESPACE" get deployment stream-processor >/dev/null 2>&1; then
+  log "Stream processor warmup ${STREAM_WARMUP_SEC}s @ ${STREAM_SVC_URL}/health"
+  kubectl -n "$NAMESPACE" exec toolbox -- sh -lc \
+    "curl -f ${STREAM_SVC_URL}/health" >/dev/null 2>&1 || log "Stream processor warmup failed"
+
+  log "Running stream data generator for ${STREAM_TEST_SEC}s"
+  # The stream-data-generator job is included in the stream-processor manifest
+  # It will run automatically and generate results
+else
+  log "Stream processor not deployed, skipping stream benchmark"
+fi
+
 # Jobs wait + logs
 record_job() {
   local name="$1"
@@ -168,9 +209,12 @@ record_job() {
     log "Job $name not found, skipping."
   fi
 }
+
 record_job "cpu-batch"
 record_job "ml-infer"
 record_job "io-job"
+record_job "memory-intensive"
+record_job "stream-data-generator"  # This will be created by the stream processor manifest
 
 # Final snapshots
 log "Capturing final placement and events..."
@@ -200,6 +244,21 @@ if [[ -f "${RESULTS_DIR}/http_benchmark.txt" ]]; then
   grep -E "Requests/sec|Latency|99%|95%|50%" -n "${RESULTS_DIR}/http_benchmark.txt" \
     > "${RESULTS_DIR}/http_summary.txt" || true
 fi
+
+# Memory usage summary (if memory-intensive job ran)
+if [[ -f "${RESULTS_DIR}/memory-intensive_logs.txt" ]]; then
+  log "Extracting memory usage metrics..."
+  grep -E "Peak memory usage|Memory test completed" "${RESULTS_DIR}/memory-intensive_logs.txt" \
+    > "${RESULTS_DIR}/memory_summary.txt" || true
+fi
+
+# Stream processing summary (if stream job ran)
+if [[ -f "${RESULTS_DIR}/stream-data-generator_logs.txt" ]]; then
+  log "Extracting stream processing metrics..."
+  grep -E "STREAM PROCESSING RESULTS|Average latency|Anomalies detected|SLO violations" \
+    "${RESULTS_DIR}/stream-data-generator_logs.txt" > "${RESULTS_DIR}/stream_summary.txt" || true
+fi
+
 
 if [[ "${CLEANUP}" == "true" ]]; then
   if [[ "${CLEANUP_NAMESPACE}" == "true" ]]; then

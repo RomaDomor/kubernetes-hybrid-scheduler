@@ -1,0 +1,347 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stream-processor
+  labels:
+    app: stream-processor
+  annotations:
+    slo.class: "latency"
+    slo.latency.ms: "50"                # Very strict latency for real-time
+    slo.max-offload-penalty.ms: "15"    # Minimal tolerance - edge preferred
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stream-processor
+  template:
+    metadata:
+      labels:
+        app: stream-processor
+      annotations:
+        slo.class: "latency"
+        slo.latency.ms: "50"
+        slo.max-offload-penalty.ms: "15"
+    spec:
+      containers:
+        - name: processor
+          image: python:3.11-slim
+          ports:
+            - containerPort: 8080
+          command:
+            - bash
+            - -lc
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir flask numpy
+              python -c "
+              from flask import Flask, request, jsonify
+              import numpy as np
+              import json
+              import time
+              from collections import deque
+              import threading
+              import math
+              
+              app = Flask(__name__)
+              
+              # Sliding window for real-time analytics
+              data_window = deque(maxlen=1000)
+              stats_lock = threading.Lock()
+              
+              def safe_float(val):
+                  '''Convert value to JSON-safe float'''
+                  if val is None or math.isnan(val) or math.isinf(val):
+                      return 0.0
+                  return float(val)
+              
+              def safe_bool(val):
+                  '''Convert value to JSON-safe boolean'''
+                  return bool(val) if val is not None else False
+              
+              def process_sensor_data(data_point):
+                  '''Simulates real-time IoT sensor data processing'''
+                  start_time = time.time()
+              
+                  try:
+                      # Parse sensor reading
+                      timestamp = data_point.get('timestamp', time.time())
+                      sensor_id = str(data_point.get('sensor_id', 'unknown'))
+                      values = data_point.get('values', [])
+              
+                      if not values or len(values) == 0:
+                          return {'error': 'No sensor values provided'}
+              
+                      # Convert to numpy array safely
+                      values_array = np.array([float(x) for x in values if not (math.isnan(float(x)) or math.isinf(float(x)))])
+              
+                      if len(values_array) == 0:
+                          return {'error': 'No valid sensor values'}
+              
+                      # Real-time processing (anomaly detection simulation)
+                      mean_val = np.mean(values_array)
+                      std_val = np.std(values_array)
+              
+                      # Add to sliding window
+                      with stats_lock:
+                          data_window.append({
+                              'timestamp': timestamp,
+                              'sensor_id': sensor_id,
+                              'mean': safe_float(mean_val),
+                              'std': safe_float(std_val)
+                          })
+              
+                          # Compute rolling statistics
+                          if len(data_window) >= 10:
+                              recent_means = [d['mean'] for d in list(data_window)[-10:]]
+                              rolling_avg = np.mean(recent_means)
+                              rolling_std = np.std(recent_means)
+              
+                              # Simple anomaly detection
+                              is_anomaly = abs(mean_val - rolling_avg) > 2 * rolling_std if rolling_std > 0 else False
+                          else:
+                              rolling_avg = mean_val
+                              is_anomaly = False
+              
+                      processing_time = (time.time() - start_time) * 1000  # ms
+              
+                      return {
+                          'sensor_id': sensor_id,
+                          'timestamp': safe_float(timestamp),
+                          'processed_value': safe_float(mean_val),
+                          'rolling_average': safe_float(rolling_avg),
+                          'anomaly_detected': safe_bool(is_anomaly),
+                          'processing_time_ms': safe_float(processing_time),
+                          'window_size': len(data_window)
+                      }
+              
+                  except Exception as e:
+                      return {'error': f'Processing failed: {str(e)}'}
+              
+              @app.route('/health', methods=['GET'])
+              def health():
+                  return jsonify({'status': 'healthy', 'window_size': len(data_window)})
+              
+              @app.route('/process', methods=['POST'])
+              def process_data():
+                  try:
+                      data = request.get_json()
+                      if not data:
+                          return jsonify({'error': 'No JSON data provided'}), 400
+              
+                      result = process_sensor_data(data)
+                      return jsonify(result)
+                  except Exception as e:
+                      return jsonify({'error': str(e)}), 400
+              
+              @app.route('/stats', methods=['GET'])
+              def get_stats():
+                  with stats_lock:
+                      if not data_window:
+                          return jsonify({'message': 'No data processed yet'})
+              
+                      return jsonify({
+                          'total_processed': len(data_window),
+                          'window_size': len(data_window)
+                      })
+              
+              if __name__ == '__main__':
+                  print('Starting real-time stream processor...')
+                  app.run(host='0.0.0.0', port=8080, threaded=True)
+              "
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 2
+            timeoutSeconds: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "256Mi"
+            limits:
+              cpu: "800m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stream-processor
+  labels:
+    app: stream-processor
+spec:
+  selector:
+    app: stream-processor
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stream-data-generator
+  labels:
+    app: stream-data-generator
+  annotations:
+    slo.class: "latency"
+    slo.latency.ms: "100"               # Generator should be responsive
+    slo.max-offload-penalty.ms: "25"
+spec:
+  completions: 1
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: stream-data-generator
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: generator
+          image: python:3.11-slim
+          command:
+            - bash
+            - -lc
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir requests numpy
+              python -c "
+              import requests
+              import numpy as np
+              import time
+              import json
+              import random
+              import math
+              
+              PROCESSOR_URL = 'http://stream-processor.default.svc.cluster.local:8080'
+              
+              def safe_float(val):
+                  '''Ensure value is JSON-safe float'''
+                  if val is None or math.isnan(val) or math.isinf(val):
+                      return 0.0
+                  return float(val)
+              
+              print('Waiting for stream processor to be ready...')
+              for i in range(30):
+                  try:
+                      resp = requests.get(f'{PROCESSOR_URL}/health', timeout=2)
+                      if resp.status_code == 200:
+                          print('Stream processor is ready!')
+                          break
+                  except:
+                      pass
+                  time.sleep(2)
+              else:
+                  print('Stream processor not ready, proceeding anyway...')
+              
+              print('Starting data stream generation...')
+              
+              sensor_ids = ['temp_01', 'pressure_02', 'vibration_03', 'flow_04']
+              total_requests = 0
+              total_latency = 0
+              anomaly_count = 0
+              error_count = 0
+              
+              # Run for 2 minutes
+              end_time = time.time() + 120
+              
+              while time.time() < end_time:
+                  # Generate realistic sensor data
+                  sensor_id = random.choice(sensor_ids)
+              
+                  # Normal data with occasional anomalies
+                  if random.random() < 0.05:  # 5% anomaly rate
+                      base_values = np.random.normal(100, 50, 20)
+                  else:
+                      base_values = np.random.normal(50, 5, 20)
+              
+                  # Ensure all values are JSON-safe
+                  values = [safe_float(x) for x in base_values.tolist()]
+              
+                  data = {
+                      'timestamp': time.time(),
+                      'sensor_id': sensor_id,
+                      'values': values
+                  }
+              
+                  try:
+                      start_time = time.time()
+                      response = requests.post(
+                          f'{PROCESSOR_URL}/process',
+                          json=data,
+                          timeout=1.0,  # Strict timeout for real-time
+                          headers={'Content-Type': 'application/json'}
+                      )
+                      latency = (time.time() - start_time) * 1000  # ms
+              
+                      if response.status_code == 200:
+                          try:
+                              result = response.json()
+                              if 'error' in result:
+                                  print(f'Processing error: {result[\"error\"]}')
+                                  error_count += 1
+                              else:
+                                  total_requests += 1
+                                  total_latency += latency
+              
+                                  if result.get('anomaly_detected', False):
+                                      anomaly_count += 1
+                                      print(f'ANOMALY detected in {sensor_id}: {result.get(\"processed_value\", \"N/A\")}')
+              
+                                  # Print progress every 20 requests
+                                  if total_requests % 20 == 0:
+                                      avg_latency = total_latency / total_requests
+                                      print(f'Processed {total_requests} samples, avg latency: {avg_latency:.1f}ms, anomalies: {anomaly_count}, errors: {error_count}')
+                          except json.JSONDecodeError as e:
+                              print(f'JSON decode error: {e} - Response: {response.text}')
+                              error_count += 1
+                      else:
+                          print(f'HTTP Error: {response.status_code} - {response.text}')
+                          error_count += 1
+              
+                  except requests.exceptions.Timeout:
+                      print('Request timeout - latency SLO violation!')
+                      error_count += 1
+                  except Exception as e:
+                      print(f'Request failed: {e}')
+                      error_count += 1
+              
+                  # Real-time streaming rate (10Hz)
+                  time.sleep(0.1)
+              
+              # Final statistics
+              print(f'\\n=== STREAM PROCESSING RESULTS ===')
+              print(f'Total successful requests: {total_requests}')
+              print(f'Total errors: {error_count}')
+              if total_requests > 0:
+                  avg_latency = total_latency / total_requests
+                  print(f'Average latency: {avg_latency:.2f}ms')
+                  print(f'Anomalies detected: {anomaly_count}')
+                  slo_violations = sum(1 for _ in range(int(total_latency)) if total_latency/total_requests > 50) if total_requests > 0 else 0
+                  print(f'SLO violations (>50ms): {slo_violations}')
+              
+                  # Get final stats from processor
+                  try:
+                      stats_resp = requests.get(f'{PROCESSOR_URL}/stats', timeout=5)
+                      if stats_resp.status_code == 200:
+                          stats = stats_resp.json()
+                          print(f'Processor stats: {stats}')
+                  except:
+                      print('Could not retrieve processor stats')
+              "
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              cpu: "400m"
+              memory: "256Mi"

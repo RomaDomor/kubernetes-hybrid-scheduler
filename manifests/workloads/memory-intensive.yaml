@@ -1,0 +1,84 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: memory-intensive
+  labels:
+    app: memory-intensive
+  annotations:
+    slo.class: "batch"
+    slo.deadline.ms: "180000"           # 3 min
+    slo.max-offload-penalty.ms: "800"   # moderate tolerance for offloading
+spec:
+  completions: 1
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: memory-intensive
+      annotations:
+        slo.class: "batch"
+        slo.deadline.ms: "180000"
+        slo.max-offload-penalty.ms: "800"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: memory-worker
+          image: python:3.11-slim
+          command:
+            - bash
+            - -lc
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir numpy psutil
+              python -c "
+              import numpy as np
+              import psutil
+              import time
+              import gc
+              
+              print(f'Starting memory test. Available RAM: {psutil.virtual_memory().available // 1024**2} MB')
+              
+              # Allocate arrays progressively (simulates data processing pipeline)
+              arrays = []
+              start_time = time.time()
+              
+              # Phase 1: Allocate 1GB in chunks
+              print('Phase 1: Allocating memory...')
+              for i in range(8):
+                  # 128MB chunks
+                  arr = np.random.rand(16 * 1024 * 1024).astype(np.float32)
+                  arrays.append(arr)
+                  print(f'  Allocated chunk {i+1}/8, RSS: {psutil.Process().memory_info().rss // 1024**2} MB')
+                  time.sleep(0.1)
+              
+              # Phase 2: Process data (matrix operations)
+              print('Phase 2: Processing data...')
+              results = []
+              for i, arr in enumerate(arrays):
+                  reshaped = arr.reshape(4096, 4096)
+                  # Memory-intensive operations
+                  result = np.mean(reshaped, axis=0)
+                  result = np.convolve(result, np.ones(100)/100, mode='valid')  # Moving average
+                  results.append(result.sum())
+                  print(f'  Processed chunk {i+1}/8')
+              
+              # Phase 3: Cleanup and summary
+              total_result = sum(results)
+              elapsed = time.time() - start_time
+              peak_memory = psutil.Process().memory_info().rss // 1024**2
+              
+              print(f'Memory test completed in {elapsed:.2f}s')
+              print(f'Peak memory usage: {peak_memory} MB')
+              print(f'Final result: {total_result:.6f}')
+              
+              # Cleanup
+              del arrays, results
+              gc.collect()
+              "
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1.5Gi"
+            limits:
+              cpu: "1000m"
+              memory: "2.5Gi"
