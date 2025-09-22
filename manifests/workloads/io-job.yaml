@@ -2,10 +2,11 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: io-job
-  labels: { app: io-job }
+  labels:
+    app: io-job
   annotations:
     slo.class: "batch"
-    slo.deadline.ms: "180000"          # from 90000 to allow variability
+    slo.deadline.ms: "180000"
     slo.max-offload-penalty.ms: "1200"
 spec:
   backoffLimit: 0
@@ -14,33 +15,63 @@ spec:
       restartPolicy: Never
       containers:
         - name: io
-          image: alpine:3.19
+          image: curlimages/curl:8.10.1
           env:
             - name: BYTES_MB
-              value: "100"             # total size to fetch/generate
+              value: "100"          # fallback size if downloads fail
             - name: WR_COPIES
-              value: "3"               # copies to write
+              value: "3"            # number of disk write copies
+            - name: URLS            # candidate WAN URLs (space-separated)
+              value: "https://speed.hetzner.de/100MB.bin https://proof.ovh.net/files/100Mb.dat"
+            - name: RETRIES_PER_URL
+              value: "5"
+            - name: CONNECT_TIMEOUT
+              value: "3"
+            - name: MAX_TIME
+              value: "120"
           command:
             - sh
             - -c
             - |
               set -e
-              apk add --no-cache wget coreutils || true
               mkdir -p /work
-              # Try 100MB test; fallback to synthetic
-              wget -O /work/blob.bin http://speedtest.tele2.net/100MB.zip || \
-              wget -O /work/blob.bin https://speed.hetzner.de/100MB.bin || \
-              dd if=/dev/urandom of=/work/blob.bin bs=1M count=${BYTES_MB}
+              echo "IO job starting..."
+
+              ok=""
+              for u in $URLS; do
+                i=1
+                while [ $i -le ${RETRIES_PER_URL:-5} ]; do
+                  echo "Downloading $u (attempt $i/${RETRIES_PER_URL:-5})..."
+                  if curl -L --fail --connect-timeout ${CONNECT_TIMEOUT:-3} --max-time ${MAX_TIME:-120} -o /work/blob.bin "$u"; then
+                    ok="yes"
+                    break
+                  fi
+                  sleep 2
+                  i=$((i+1))
+                done
+                [ -n "$ok" ] && break
+              done
+
+              if [ -z "$ok" ]; then
+                echo "All downloads failed - generating ${BYTES_MB:-100}MB locally"
+                dd if=/dev/urandom of=/work/blob.bin bs=1M count=${BYTES_MB:-100} status=none
+              fi
+
+              echo "Checksum:"
               sha256sum /work/blob.bin || true
-              # Write copies with direct I/O to stress disk
+
+              # Disk writes with direct I/O to stress filesystem and storage
               i=1
-              while [ $i -le ${WR_COPIES} ]; do
+              while [ $i -le ${WR_COPIES:-3} ]; do
+                echo "Writing copy $i with oflag=direct..."
                 dd if=/work/blob.bin of=/work/copy_${i}.bin bs=4M oflag=direct status=none
                 i=$((i+1))
               done
-              # Read back to stress page cache
+
+              echo "Reading back copies (page cache + IO path)..."
               cat /work/copy_*.bin >/dev/null 2>&1 || true
-              sleep 1
+
+              echo "IO job done."
           resources:
             requests: { cpu: "300m", memory: "256Mi" }
             limits:   { cpu: "800m", memory: "512Mi" }
