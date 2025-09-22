@@ -2,42 +2,37 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: cpu-batch
-  labels:
-    app: cpu-batch
+  labels: { app: cpu-batch }
   annotations:
     slo.class: "batch"
-    slo.deadline.ms: "300000"           # 5 min
-    slo.max-offload-penalty.ms: "500"   # tolerate up to 0.5s extra
+    slo.deadline.ms: "180000"          # tightened from 300000
+    slo.max-offload-penalty.ms: "500"
 spec:
-  completions: 1
   backoffLimit: 0
   template:
     metadata:
-      labels:
-        app: cpu-batch
-      annotations:
-        slo.class: "batch"
-        slo.deadline.ms: "300000"
-        slo.max-offload-penalty.ms: "500"
+      labels: { app: cpu-batch }
     spec:
       restartPolicy: Never
-      dnsPolicy: ClusterFirst
       containers:
         - name: worker
-          image: docker.io/library/debian:bookworm-slim
+          image: debian:bookworm-slim
+          env:
+            - name: CPU_WKRS
+              value: "4"
+            - name: CPU_LOAD
+              value: "90"
+            - name: CPU_SEC
+              value: "180"
           command:
             - bash
-            - -lc
+            - -c
             - |
               set -euo pipefail
               apt-get update -y
               apt-get install -y --no-install-recommends stress-ng ca-certificates
               update-ca-certificates
-              stress-ng --cpu 2 --cpu-load 80 --timeout 120s --metrics-brief
+              stress-ng --cpu ${CPU_WKRS} --cpu-load ${CPU_LOAD} --timeout ${CPU_SEC}s --metrics-brief
           resources:
-            requests:
-              cpu: "1"
-              memory: "256Mi"
-            limits:
-              cpu: "2"
-              memory: "512Mi"
+            requests: { cpu: "800m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "512Mi" }

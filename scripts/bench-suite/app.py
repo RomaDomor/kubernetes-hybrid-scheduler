@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import argparse
+import json
 import os
+import subprocess
 import sys
 import time
-import json
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -15,9 +15,11 @@ from kubernetes import client, config, watch
 from kubernetes.client import ApiException
 from kubernetes.stream import stream
 
+
 # -------------------- Defaults (env overridable) --------------------
 def env(name, default):
     return os.environ.get(name, default)
+
 
 NAMESPACE = env("NAMESPACE", "default")
 CTX = env("CTX", "")
@@ -36,6 +38,7 @@ ML_INFER_FILE = env("ML_INFER_FILE", "ml-infer.yaml")
 IO_JOB_FILE = env("IO_JOB_FILE", "io-job.yaml")
 MEMORY_INTENSIVE_FILE = env("MEMORY_INTENSIVE_FILE", "memory-intensive.yaml")
 STREAM_PROCESSOR_FILE = env("STREAM_PROCESSOR_FILE", "stream-processor.yaml")
+BUILD_JOB_FILE = env("BUILD_JOB_FILE", "build-job.yaml")
 
 STREAM_SVC_URL = env(
     "STREAM_SVC_URL",
@@ -59,15 +62,19 @@ CLEANUP_NAMESPACE = env("CLEANUP_NAMESPACE", "false").lower() == "true"
 # SLO policy: which metric to compare for latency class (p95 by default)
 LATENCY_POLICY_METRIC = env("LATENCY_POLICY_METRIC", "p95")  # p50|p95|p99|avg
 
+
 # -------------------- Utilities --------------------
 def log(msg: str):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
+
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
+
 def file_exists(path: Path) -> bool:
     return path.exists() and path.is_file()
+
 
 def read_yaml_multi(path: Path) -> List[Dict[str, Any]]:
     docs: List[Dict[str, Any]] = []
@@ -76,6 +83,7 @@ def read_yaml_multi(path: Path) -> List[Dict[str, Any]]:
             if doc:
                 docs.append(doc)
     return docs
+
 
 def get_annotations(doc: Dict[str, Any]) -> Dict[str, str]:
     ann = {}
@@ -90,6 +98,7 @@ def get_annotations(doc: Dict[str, Any]) -> Dict[str, str]:
     ann.update(a2)
     return {k: str(v) for k, v in ann.items()}
 
+
 def to_int(val: Optional[str]) -> Optional[int]:
     if val is None or val == "":
         return None
@@ -101,6 +110,7 @@ def to_int(val: Optional[str]) -> Optional[int]:
         except Exception:
             return None
 
+
 # -------------------- K8s helpers --------------------
 def kube_init():
     try:
@@ -111,6 +121,7 @@ def kube_init():
     except Exception:
         config.load_incluster_config()
 
+
 def ensure_namespace(v1: client.CoreV1Api, ns: str):
     try:
         v1.read_namespace(ns)
@@ -119,6 +130,7 @@ def ensure_namespace(v1: client.CoreV1Api, ns: str):
             v1.create_namespace(client.V1Namespace(metadata=client.V1ObjectMeta(name=ns)))
         else:
             raise
+
 
 def apply_yaml_objects(docs: List[Dict[str, Any]], ns: str):
     """Apply YAML objects using the kubernetes client"""
@@ -129,10 +141,12 @@ def apply_yaml_objects(docs: List[Dict[str, Any]], ns: str):
         # Add namespace to the object if it doesn't have one
         if doc.get("metadata") is None:
             doc["metadata"] = {}
-        if "namespace" not in doc["metadata"] and doc.get("kind") not in ["Namespace", "ClusterRole", "ClusterRoleBinding"]:
+        if "namespace" not in doc["metadata"] and doc.get("kind") not in ["Namespace", "ClusterRole",
+                                                                          "ClusterRoleBinding"]:
             doc["metadata"]["namespace"] = ns
 
     utils.create_from_yaml(k8s_client, yaml_objects=docs, namespace=ns)
+
 
 def delete_yaml_objects(docs: List[Dict[str, Any]], ns: str):
     """Delete YAML objects using the kubernetes client"""
@@ -163,9 +177,11 @@ def delete_yaml_objects(docs: List[Dict[str, Any]], ns: str):
             if e.status != 404:  # Ignore not found errors
                 log(f"Error deleting {kind}/{name}: {e}")
 
+
 def k_apply(ns: str, file_path: Path):
     docs = read_yaml_multi(file_path)
     apply_yaml_objects(docs, ns)
+
 
 def k_delete(ns: str, file_path: Path):
     try:
@@ -173,6 +189,7 @@ def k_delete(ns: str, file_path: Path):
         delete_yaml_objects(docs, ns)
     except Exception as e:
         log(f"Warning: Error during deletion: {e}")
+
 
 def wait_pod_ready(v1: client.CoreV1Api, ns: str, name: str, timeout_sec: int = 180):
     """Wait for pod to be ready"""
@@ -200,6 +217,7 @@ def wait_pod_ready(v1: client.CoreV1Api, ns: str, name: str, timeout_sec: int = 
             break
 
     raise TimeoutError(f"Pod {name} did not become ready within {timeout_sec} seconds")
+
 
 def wait_deployment_ready(apps_v1: client.AppsV1Api, ns: str, name: str, timeout_sec: int = 300):
     """Wait for deployment rollout to complete"""
@@ -229,6 +247,7 @@ def wait_deployment_ready(apps_v1: client.AppsV1Api, ns: str, name: str, timeout
             break
 
     raise TimeoutError(f"Deployment {name} did not become ready within {timeout_sec} seconds")
+
 
 def wait_job_complete(batch_v1: client.BatchV1Api, ns: str, name: str, timeout_sec: int) -> int:
     """Wait for job to complete and return duration in seconds"""
@@ -275,6 +294,7 @@ def wait_job_complete(batch_v1: client.BatchV1Api, ns: str, name: str, timeout_s
         pass
     raise TimeoutError(f"Job {name} did not complete within {timeout_sec} seconds")
 
+
 def get_job_logs(v1: client.CoreV1Api, ns: str, job_name: str) -> str:
     """Get logs from all pods of a job"""
     try:
@@ -294,6 +314,7 @@ def get_job_logs(v1: client.CoreV1Api, ns: str, job_name: str) -> str:
     except Exception as e:
         log(f"Error getting job logs: {e}")
         return ""
+
 
 def toolbox_exec(v1: client.CoreV1Api, ns: str, cmd: str, check=False) -> str:
     """Execute command in toolbox pod"""
@@ -323,6 +344,7 @@ def toolbox_exec(v1: client.CoreV1Api, ns: str, cmd: str, check=False) -> str:
         log(f"Command failed: {cmd}, error: {e}")
         return ""
 
+
 def detect_virtual_node(v1: client.CoreV1Api) -> str:
     try:
         nodes = v1.list_node(label_selector="liqo.io/virtual-node=true").items
@@ -331,6 +353,7 @@ def detect_virtual_node(v1: client.CoreV1Api) -> str:
     except Exception:
         pass
     return ""
+
 
 # -------------------- Catalog (SLOs) --------------------
 def build_catalog_from_manifests(ns: str, manifests_dir: Path, files: List[str]) -> List[Dict[str, Any]]:
@@ -366,6 +389,7 @@ def build_catalog_from_manifests(ns: str, manifests_dir: Path, files: List[str])
             )
     return catalog
 
+
 def save_catalog(catalog: List[Dict[str, Any]], results_dir: Path):
     (results_dir / "catalog.json").write_text(json.dumps(catalog, indent=2))
     # also CSV
@@ -386,6 +410,7 @@ def save_catalog(catalog: List[Dict[str, Any]], results_dir: Path):
             )
         )
     (results_dir / "catalog.csv").write_text("\n".join(lines))
+
 
 # -------------------- Measurement --------------------
 def measure_http(v1: client.CoreV1Api, ns: str, results_dir: Path) -> Dict[str, Any]:
@@ -445,6 +470,7 @@ def measure_http(v1: client.CoreV1Api, ns: str, results_dir: Path) -> Dict[str, 
     }
     return measures
 
+
 def measure_stream(apps_v1: client.AppsV1Api, v1: client.CoreV1Api, ns: str, results_dir: Path) -> Dict[str, Any]:
     # verify deployment exists
     try:
@@ -497,6 +523,7 @@ def measure_stream(apps_v1: client.AppsV1Api, v1: client.CoreV1Api, ns: str, res
     }
     return measures
 
+
 def measure_jobs_via_api(batch: client.BatchV1Api, ns: str, names: List[str]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for name in names:
@@ -511,8 +538,10 @@ def measure_jobs_via_api(batch: client.BatchV1Api, ns: str, names: List[str]) ->
         out[name] = {"metric": "duration_ms", "value_ms": dur_ms}
     return out
 
+
 def save_measures(measures: Dict[str, Any], results_dir: Path):
     (results_dir / "measures.json").write_text(json.dumps(measures, indent=2))
+
 
 # -------------------- SLO Evaluation --------------------
 def evaluate_slos(
@@ -570,7 +599,7 @@ def evaluate_slos(
             add("stream-processor", "Deployment", klass, slo_lat, round(meas_ms, 2), "avg", meas_ms <= slo_lat)
 
     # Jobs (batch): deadline_ms
-    for job_name in ["cpu-batch", "io-job", "memory-intensive", "ml-infer", "stream-data-generator"]:
+    for job_name in ["cpu-batch", "io-job", "memory-intensive", "ml-infer", "build-job", "stream-data-generator"]:
         # Find catalog entry by kind Job
         job_cat = idx.get((job_name, "Job"))
         if not job_cat:
@@ -608,6 +637,7 @@ def evaluate_slos(
     (results_dir / "slo_report.txt").write_text("\n".join(report_lines))
     (results_dir / "slo_summary.json").write_text(json.dumps(summary, indent=2))
     return summary
+
 
 # -------------------- Orchestration --------------------
 def deploy_and_wait(ns: str, manifests_dir: Path):
@@ -667,6 +697,15 @@ def deploy_and_wait(ns: str, manifests_dir: Path):
     else:
         log(f"Stream processor manifest not found (optional): {stream_path}")
 
+    build_path = manifests_dir / BUILD_JOB_FILE
+    if file_exists(build_path):
+        log(f"Applying build job from {build_path} ...")
+        k_apply(ns, build_path)
+        manifests_dir / TOOLBOX_FILE,
+    else:
+        log(f"Build job manifest not found (optional): {build_path}")
+
+
 def record_job(batch_v1: client.BatchV1Api, v1: client.CoreV1Api, ns: str, results_dir: Path, name: str):
     # Check if job exists
     try:
@@ -688,6 +727,7 @@ def record_job(batch_v1: client.BatchV1Api, v1: client.CoreV1Api, ns: str, resul
     except Exception:
         pass
 
+
 def get_events(v1: client.CoreV1Api, ns: str, out_path: Path):
     try:
         ev = v1.list_namespaced_event(ns)
@@ -699,6 +739,7 @@ def get_events(v1: client.CoreV1Api, ns: str, out_path: Path):
     except Exception as e:
         log(f"warn: events retrieval failed: {e}")
 
+
 def get_pod_node_csv(v1: client.CoreV1Api, ns: str, out_path: Path):
     pods = v1.list_namespaced_pod(ns).items
     lines = []
@@ -708,6 +749,7 @@ def get_pod_node_csv(v1: client.CoreV1Api, ns: str, out_path: Path):
         phase = p.status.phase or "NA"
         lines.append(f'"{name}","{node}","{phase}"')
     out_path.write_text("\n".join(lines))
+
 
 def get_objects_info(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, batch_v1: client.BatchV1Api, ns: str) -> str:
     """Get information about k8s objects like kubectl get"""
@@ -719,7 +761,8 @@ def get_objects_info(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, batch_v1: 
         for pod in pods.items:
             ready_count = sum(1 for c in pod.status.container_statuses or [] if c.ready)
             total_count = len(pod.status.container_statuses or [])
-            lines.append(f"pod/{pod.metadata.name} {ready_count}/{total_count} {pod.status.phase} {pod.spec.node_name or 'N/A'}")
+            lines.append(
+                f"pod/{pod.metadata.name} {ready_count}/{total_count} {pod.status.phase} {pod.spec.node_name or 'N/A'}")
     except Exception as e:
         lines.append(f"Error getting pods: {e}")
 
@@ -753,6 +796,7 @@ def get_objects_info(v1: client.CoreV1Api, apps_v1: client.AppsV1Api, batch_v1: 
 
     return "\n".join(lines)
 
+
 def get_nodes_info(v1: client.CoreV1Api) -> str:
     """Get node information like kubectl get nodes"""
     try:
@@ -767,6 +811,7 @@ def get_nodes_info(v1: client.CoreV1Api) -> str:
     except Exception as e:
         return f"Error getting nodes: {e}"
 
+
 def cleanup_workloads(ns: str, manifests_dir: Path):
     log(f"Cleaning up workloads in namespace {ns}...")
     paths = [
@@ -777,10 +822,11 @@ def cleanup_workloads(ns: str, manifests_dir: Path):
         manifests_dir / MEMORY_INTENSIVE_FILE,
         manifests_dir / STREAM_PROCESSOR_FILE,
         manifests_dir / TOOLBOX_FILE,
-        ]
+    ]
     for p in paths:
         if file_exists(p):
             k_delete(ns, p)
+
 
 def cleanup_namespace(ns: str):
     log(f"Deleting namespace {ns} (ALL resources)...")
@@ -790,6 +836,7 @@ def cleanup_namespace(ns: str):
     except ApiException as e:
         if e.status != 404:
             log(f"Error deleting namespace: {e}")
+
 
 # -------------------- Main --------------------
 def main():
@@ -828,6 +875,7 @@ def main():
             IO_JOB_FILE,
             MEMORY_INTENSIVE_FILE,
             STREAM_PROCESSOR_FILE,
+            BUILD_JOB_FILE
         ],
     )
     save_catalog(catalog, results_dir)
@@ -860,7 +908,7 @@ def main():
         pass
 
     # Jobs (wait + logs)
-    for job in ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "stream-data-generator"]:
+    for job in ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job", "stream-data-generator"]:
         try:
             record_job(batch, v1, ns, results_dir, job)
         except Exception as e:
@@ -880,8 +928,11 @@ def main():
         pass
 
     # Build job measures via API (more accurate)
-    job_meas = measure_jobs_via_api(batch, ns, ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "stream-data-generator"])
-
+    job_meas = measure_jobs_via_api(
+        batch,
+        ns,
+        ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job", "stream-data-generator"],
+    )
     # Stream measures from generator logs (now should exist)
     stream_meas = measure_stream(apps_v1, v1, ns, results_dir)
 
@@ -913,6 +964,7 @@ def main():
         log("Cleanup skipped. Use --no-cleanup to preserve resources/artifacts only.")
 
     log(f"Benchmark complete. Artifacts -> {results_dir}")
+
 
 if __name__ == "__main__":
     main()
