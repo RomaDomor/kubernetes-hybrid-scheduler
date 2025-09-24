@@ -8,6 +8,15 @@
 
 set -euo pipefail
 
+# Resolve directory of this script (handles symlinks and relative paths)
+SCRIPT_SRC="${BASH_SOURCE[0]}"
+while [ -h "$SCRIPT_SRC" ]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SRC")" && pwd)"
+  SCRIPT_SRC="$(readlink "$SCRIPT_SRC")"
+  [[ "$SCRIPT_SRC" != /* ]] && SCRIPT_SRC="$SCRIPT_DIR/$SCRIPT_SRC"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SRC")" && pwd)"
+
 ROUTER="${1:?SSH target, e.g., user@10.0.0.1}"
 shift || true
 
@@ -27,7 +36,8 @@ done
 copy_scripts() {
   echo "[*] Copying WAN scripts to $ROUTER ..."
   ssh "$ROUTER" "sudo mkdir -p /usr/local/sbin/wan /etc/wan"
-  scp scripts/wan/*.sh "$ROUTER":/tmp/
+  # Copy all .sh files that are in the same dir as this installer
+  scp "$SCRIPT_DIR"/*.sh "$ROUTER":/tmp/
   ssh "$ROUTER" "sudo mv /tmp/*.sh /usr/local/sbin/wan/ && sudo chmod +x /usr/local/sbin/wan/*.sh"
 }
 
