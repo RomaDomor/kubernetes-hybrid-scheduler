@@ -163,4 +163,4 @@ validate_detection
 apply_optional_profile
 
 echo "[*] Done. Router is ready. You can now run:"
-echo "    ssh $ROUTER '. /etc/wan/env; sudo -n /usr/local/sbin/wan/apply_wan.sh good|moderate|poor|clear'"
+echo "    ssh $ROUTER 'sudo -n /usr/local/sbin/wan/apply_wan.sh good|moderate|poor|clear'"
