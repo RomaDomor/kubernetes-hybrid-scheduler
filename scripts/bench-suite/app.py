@@ -836,7 +836,7 @@ def wan_apply_and_record(results_dir: Path, router: str, profile: str) -> dict:
         # Apply profile
         ssh_run(
             router,
-            ". /etc/wan/env; /usr/local/sbin/wan/apply_wan.sh "
+            "sudo -n /usr/local/sbin/wan/apply_wan.sh "
             + shlex.quote(profile),
         )
         meta["applied"] = True
