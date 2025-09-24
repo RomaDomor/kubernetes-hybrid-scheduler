@@ -62,7 +62,8 @@ copy_scripts() {
 detect_ifaces_on_router() {
   echo "[*] Detecting interfaces on router ..."
   # Build remote detection script
-  read -r -d '' REMOTE <<'RS'
+  TMP_LOCAL="$(mktemp)"
+  cat >"$TMP_LOCAL" <<'RS'
 set -euo pipefail
 
 EDGE_CIDR_IN="${EDGE_CIDR_IN:-}"
@@ -128,16 +129,16 @@ EOF
 
 echo "Detected EDGE_IF=$edge_if CLOUD_IF=$cloud_if"
 RS
-
-  # Run remote detection with provided CIDRs (if any); fail loudly on sudo prompts
+  scp "$TMP_LOCAL" "$ROUTER":/tmp/wan_detect.sh
+  rm -f "$TMP_LOCAL"
   set +e
-  ssh "$ROUTER" \
-    "EDGE_CIDR_IN='$EDGE_CIDR' CLOUD_CIDR_IN='$CLOUD_CIDR' bash -s" <<<"$REMOTE"
-  rc=$?
+  REMOTE_OUT="$(ssh -tt "$ROUTER" "EDGE_CIDR_IN='$EDGE_CIDR' CLOUD_CIDR_IN='$CLOUD_CIDR' bash /tmp/wan_detect.sh" 2>&1)"
+  RC=$?
   set -e
-  if [[ $rc -ne 0 ]]; then
-    echo "ERROR: Interface detection failed on $ROUTER. Ensure sudo is passwordless and 'ip' is available." >&2
-    exit $rc
+  echo "[*] Remote output (rc=$RC):"
+  echo "$REMOTE_OUT"
+  if [[ $RC -ne 0 ]]; then
+    exit $RC
   fi
 }
 
