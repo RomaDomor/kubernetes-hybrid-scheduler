@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -801,7 +802,7 @@ def cleanup_workloads(ns: str, manifests_dir: Path, args: argparse.Namespace):
         manifests_dir / args.memory_intensive_file,
         manifests_dir / args.stream_processor_file,
         manifests_dir / args.toolbox_file,
-        ]
+    ]
     for p in paths:
         if file_exists(p):
             k_delete(ns, p)
@@ -815,6 +816,44 @@ def cleanup_namespace(ns: str):
     except ApiException as e:
         if e.status != 404:
             log(f"Error deleting namespace: {e}")
+
+
+# -------------------- WAN --------------------
+def ssh_run(router: str, cmd: str, timeout: int = 20) -> str:
+    # router is like "user@10.0.0.1"
+    full = (
+        f"ssh -o BatchMode=yes -o ConnectTimeout=5 "
+        f"{shlex.quote(router)} {shlex.quote(cmd)}"
+    )
+    return subprocess.check_output(
+        full, shell=True, timeout=timeout, text=True
+    )
+
+
+def wan_apply_and_record(results_dir: Path, router: str, profile: str) -> dict:
+    meta = {"router": router, "wan_profile": profile, "applied": False}
+    try:
+        # Apply profile
+        ssh_run(
+            router,
+            ". /etc/wan/env; /usr/local/sbin/wan/apply_wan.sh "
+            + shlex.quote(profile),
+        )
+        meta["applied"] = True
+        # Save env
+        env_txt = ssh_run(router, "cat /etc/wan/env || true", timeout=5)
+        (results_dir / "router_env.txt").write_text(env_txt)
+        # Save qdisc state
+        qdisc = ssh_run(
+            router,
+            '. /etc/wan/env; (tc qdisc show dev "$EDGE_IF"; echo "---"; '
+            'tc qdisc show dev "$CLOUD_IF") || true',
+            timeout=8,
+        )
+        (results_dir / "router_qdisc.txt").write_text(qdisc)
+    except Exception as e:
+        (results_dir / "router_error.txt").write_text(str(e))
+    return meta
 
 
 # -------------------- Main --------------------
@@ -939,6 +978,12 @@ def parse_args() -> argparse.Namespace:
         help="Delete the entire namespace during cleanup. Implies --no-cleanup is not set.",
     )
 
+    wan = parser.add_argument_group("WAN Emulation")
+    wan.add_argument("--wan-router", default="", help="SSH target for router, e.g., user@10.0.0.1")
+    wan.add_argument("--wan-profile", default="none", choices=["none", "good", "moderate", "poor", "clear"])
+    wan.add_argument("--wan-verify", action="store_true", help="Verify WAN with a short ping from toolbox")
+    wan.add_argument("--wan-verify-target", default="", help="IP to ping for verification (e.g., a cloud node IP)")
+
     return parser.parse_args()
 
 
@@ -953,6 +998,23 @@ def main():
     )
     ensure_dir(results_dir)
 
+    # Run metadata (start)
+    run_meta = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "context": args.context,
+        "namespace": ns,
+        "latency_policy": args.latency_policy_metric,
+        "wan": {
+            "router": args.wan_router,
+            "profile": args.wan_profile,
+            "applied": False,
+        },
+    }
+
+    (results_dir / "run_meta.json").write_text(
+        json.dumps(run_meta, indent=2)
+    )
+
     http_svc_url = f"http://http-latency.{ns}.svc.cluster.local/"
     stream_svc_url = f"http://stream-processor.{ns}.svc.cluster.local:8080"
 
@@ -966,6 +1028,23 @@ def main():
     batch = client.BatchV1Api()
 
     ensure_namespace(v1, ns)
+
+    # Optionally apply WAN profile on router BEFORE deployments
+    if args.wan_router and args.wan_profile and args.wan_profile != "none":
+        log(
+            f"Applying WAN profile '{args.wan_profile}' on router "
+            f"{args.wan_router} ..."
+        )
+        wan_meta = wan_apply_and_record(
+            results_dir, args.wan_router, args.wan_profile
+        )
+        # merge into run_meta.json
+        run_meta["wan"].update(wan_meta)
+        (results_dir / "run_meta.json").write_text(
+            json.dumps(run_meta, indent=2)
+        )
+    else:
+        log("WAN profile: none (skipping router configuration).")
 
     # Build SLO catalog from manifests (before deploy, so we capture intent)
     manifest_files = [
@@ -1064,6 +1143,15 @@ def main():
         log("Cleanup done.")
     else:
         log("Cleanup skipped.")
+    # Finalize run_meta with summary counts if available
+    try:
+        items = summary.get("items", [])
+        passed = sum(1 for x in items if x.get("pass"))
+        total = len(items)
+        run_meta["slo_pass"] = {"passed": passed, "total": total}
+        (results_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2))
+    except Exception:
+        pass
 
     log(f"Benchmark complete. Artifacts -> {results_dir}")
 
