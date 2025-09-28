@@ -49,15 +49,18 @@ show_qdisc() {
 
 # Egress selective shaping (edge->cloud and cloud->edge) with flower
 apply_shape_selective() {
-  local rate_mbit="$1"   # Mbit/s
-  local one_way_ms="$2"  # ms
-  local jitter_ms="$3"   # ms
-  local loss_pct="$4"    # %
+  local rate_mbit="$1"
+  local one_way_ms="$2"
+  local jitter_ms="$3"
+  local loss_pct="$4"
+
+  local full_rate="1000mbit"  # Adjust based on your interface speeds
 
   # EDGE_IF egress
   tc qdisc add dev "$EDGE_IF" root handle 1: htb default 20 r2q 1
   tc class add dev "$EDGE_IF" parent 1: classid 1:10 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
-  tc class add dev "$EDGE_IF" parent 1: classid 1:20 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
+  tc class add dev "$EDGE_IF" parent 1: classid 1:20 htb rate "$full_rate" ceil "$full_rate"
+
   if [[ "$jitter_ms" = "0" || "$jitter_ms" = "0.0" ]]; then
     tc qdisc add dev "$EDGE_IF" parent 1:10 handle 10: netem delay "${one_way_ms}ms" loss "${loss_pct}%"
   else
@@ -71,7 +74,8 @@ apply_shape_selective() {
   # CLOUD_IF egress
   tc qdisc add dev "$CLOUD_IF" root handle 1: htb default 20 r2q 1
   tc class add dev "$CLOUD_IF" parent 1: classid 1:10 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
-  tc class add dev "$CLOUD_IF" parent 1: classid 1:20 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
+  tc class add dev "$CLOUD_IF" parent 1: classid 1:20 htb rate "$full_rate" ceil "$full_rate"
+
   if [[ "$jitter_ms" = "0" || "$jitter_ms" = "0.0" ]]; then
     tc qdisc add dev "$CLOUD_IF" parent 1:10 handle 10: netem delay "${one_way_ms}ms" loss "${loss_pct}%"
   else
@@ -93,31 +97,33 @@ setup_ifb() {
   ip link set ifb0 up
   ip link set ifb1 up
 
-  # Redirect ingress of EDGE_IF -> ifb0
+  # Redirect ingress of EDGE_IF -> ifb0, but ONLY for traffic from CLOUD_CIDR
   tc qdisc add dev "$EDGE_IF" handle ffff: ingress 2>/dev/null || true
-  # clear existing filters if any
   tc filter del dev "$EDGE_IF" parent ffff: 2>/dev/null || true
-  tc filter add dev "$EDGE_IF" parent ffff: protocol all \
-    flower skip_hw action mirred egress redirect dev ifb0
+  tc filter add dev "$EDGE_IF" parent ffff: protocol ip prio 1 \
+    flower src_ip "${CLOUD_CIDR}" skip_hw action mirred egress redirect dev ifb0
 
-  # Redirect ingress of CLOUD_IF -> ifb1
+  # Redirect ingress of CLOUD_IF -> ifb1, but ONLY for traffic from EDGE_CIDR
   tc qdisc add dev "$CLOUD_IF" handle ffff: ingress 2>/dev/null || true
   tc filter del dev "$CLOUD_IF" parent ffff: 2>/dev/null || true
-  tc filter add dev "$CLOUD_IF" parent ffff: protocol all \
-    flower skip_hw action mirred egress redirect dev ifb1
+  tc filter add dev "$CLOUD_IF" parent ffff: protocol ip prio 1 \
+    flower src_ip "${EDGE_CIDR}" skip_hw action mirred egress redirect dev ifb1
 }
 
 # Ingress selective shaping on IFBs (cloud->edge and edge->cloud) with flower
 apply_ingress_shape_selective() {
-  local rate_mbit="$1"   # Mbit/s
-  local one_way_ms="$2"  # ms
-  local jitter_ms="$3"   # ms
-  local loss_pct="$4"    # %
+  local rate_mbit="$1"
+  local one_way_ms="$2"
+  local jitter_ms="$3"
+  local loss_pct="$4"
 
-  # ifb0 mirrors ingress of EDGE_IF; impair only src CLOUD_CIDR
+  local full_rate="1000mbit"
+
+  # ifb0 configuration
   tc qdisc add dev ifb0 root handle 1: htb default 20 r2q 1
   tc class add dev ifb0 parent 1: classid 1:10 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
-  tc class add dev ifb0 parent 1: classid 1:20 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
+  tc class add dev ifb0 parent 1: classid 1:20 htb rate "$full_rate" ceil "$full_rate"
+
   if [[ "$jitter_ms" = "0" || "$jitter_ms" = "0.0" ]]; then
     tc qdisc add dev ifb0 parent 1:10 handle 10: netem delay "${one_way_ms}ms" loss "${loss_pct}%"
   else
@@ -131,7 +137,7 @@ apply_ingress_shape_selective() {
   # ifb1 mirrors ingress of CLOUD_IF; impair only src EDGE_CIDR
   tc qdisc add dev ifb1 root handle 1: htb default 20 r2q 1
   tc class add dev ifb1 parent 1: classid 1:10 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
-  tc class add dev ifb1 parent 1: classid 1:20 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
+  tc class add dev ifb1 parent 1: classid 1:20 htb rate "$full_rate" ceil "$full_rate"
   if [[ "$jitter_ms" = "0" || "$jitter_ms" = "0.0" ]]; then
     tc qdisc add dev ifb1 parent 1:10 handle 10: netem delay "${one_way_ms}ms" loss "${loss_pct}%"
   else
