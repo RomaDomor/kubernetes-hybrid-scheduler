@@ -1446,6 +1446,7 @@ def main():
     if not args.no_cleanup:
         if args.cleanup_namespace:
             cleanup_namespace(ns_offloaded)
+            cleanup_namespace(ns_local)
         else:
             cleanup_workloads(ns_offloaded, ns_local, manifests_dir, args)
         log("Cleanup done.")
