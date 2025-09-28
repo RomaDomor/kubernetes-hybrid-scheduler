@@ -21,8 +21,6 @@ clear_qdisc() {
   # Egress roots
   tc qdisc del dev "$EDGE_IF"  root 2>/dev/null || true
   tc qdisc del dev "$CLOUD_IF" root 2>/dev/null || true
-
-  # No more IFBs needed
 }
 
 show_qdisc() {
@@ -30,7 +28,7 @@ show_qdisc() {
   echo "== qdisc $CLOUD_IF =="; tc qdisc show dev "$CLOUD_IF" || true
 }
 
-# Simple egress-only shaping
+# Simple egress-only shaping with specific bidirectional u32 filters
 apply_shape_simple() {
   local rate_mbit="$1"
   local one_way_ms="$2"
@@ -39,7 +37,7 @@ apply_shape_simple() {
 
   local full_rate="1000mbit"
 
-  # EDGE_IF egress: impair traffic TO cloud network
+  # EDGE_IF egress: impair traffic FROM cloud TO edge (return traffic)
   tc qdisc add dev "$EDGE_IF" root handle 1: htb default 20 r2q 1
   tc class add dev "$EDGE_IF" parent 1: classid 1:10 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
   tc class add dev "$EDGE_IF" parent 1: classid 1:20 htb rate "$full_rate" ceil "$full_rate"
@@ -51,10 +49,13 @@ apply_shape_simple() {
   fi
   tc qdisc add dev "$EDGE_IF" parent 1:20 handle 20: fq_codel
 
-  # Traffic destined to cloud network gets impaired
-  tc filter add dev "$EDGE_IF" protocol ip parent 1: prio 1 flower dst_ip "${CLOUD_CIDR}" skip_hw flowid 1:10
+  # Match packets: src=cloud AND dst=edge
+  tc filter add dev "$EDGE_IF" protocol ip parent 1: prio 1 u32 \
+    match ip src "${CLOUD_CIDR}" \
+    match ip dst "${EDGE_CIDR}" \
+    flowid 1:10
 
-  # CLOUD_IF egress: impair traffic TO edge network
+  # CLOUD_IF egress: impair traffic FROM edge TO cloud (forward traffic)
   tc qdisc add dev "$CLOUD_IF" root handle 1: htb default 20 r2q 1
   tc class add dev "$CLOUD_IF" parent 1: classid 1:10 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit"
   tc class add dev "$CLOUD_IF" parent 1: classid 1:20 htb rate "$full_rate" ceil "$full_rate"
@@ -66,6 +67,9 @@ apply_shape_simple() {
   fi
   tc qdisc add dev "$CLOUD_IF" parent 1:20 handle 20: fq_codel
 
-  # Traffic destined to edge network gets impaired
-  tc filter add dev "$CLOUD_IF" protocol ip parent 1: prio 1 flower dst_ip "${EDGE_CIDR}" skip_hw flowid 1:10
+  # Match packets: src=edge AND dst=cloud
+  tc filter add dev "$CLOUD_IF" protocol ip parent 1: prio 1 u32 \
+    match ip src "${EDGE_CIDR}" \
+    match ip dst "${CLOUD_CIDR}" \
+    flowid 1:10
 }
