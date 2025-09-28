@@ -56,7 +56,6 @@ EOF
 # Initialize variables with defaults
 NAMESPACE="${DEFAULT_NAMESPACE}"
 LOCAL_NAMESPACE="${DEFAULT_LOCAL_NAMESPACE}"
-MANIFSETS_DIR_PLACEHOLDER="IGNORE" # placeholder to catch typos
 MANIFESTS_DIR="${DEFAULT_MANIFESTS_DIR}"
 RESULTS_ROOT="${DEFAULT_RESULTS_ROOT}"
 KUBECONFIG="${DEFAULT_KUBECONFIG}"
@@ -184,15 +183,81 @@ if [[ "${DRY_RUN}" == "true" ]]; then
     echo ""
 fi
 
-# Pre-clean function
-cleanup_namespace() {
-    local ns="$1"
-    local kubeconfig_path="$2"
+# Poll until the namespace has no remaining workload/config/storage resources
+wait_ns_empty() {
+  local ns="$1"
+  local kubeconfig="$2"
+  local timeout="${3:-300}"   # seconds
+  local interval="${4:-3}"    # seconds
+  local end=$((SECONDS + timeout))
 
-    echo "🧹 Pre-cleaning namespace '${ns}' using kubeconfig '${kubeconfig_path}' ..."
-    set +e
-    kubectl delete all --all -n "${ns}" --kubeconfig "${kubeconfig_path}"
-    set -e
+  # Kinds to watch (namespaced, common)
+  local kinds=(
+    pods
+    deployments.apps
+    replicasets.apps
+    statefulsets.apps
+    daemonsets.apps
+    jobs.batch
+    cronjobs.batch
+    services
+    configmaps
+    secrets
+    persistentvolumeclaims
+  )
+
+  echo "⏳ Waiting for namespace '${ns}' to be empty (timeout ${timeout}s)..."
+  while (( SECONDS < end )); do
+    local remaining=0
+    for kind in "${kinds[@]}"; do
+      # get -o name to avoid header issues; ignore errors (some kinds may not exist)
+      local cnt
+      cnt=$(kubectl get "$kind" -n "$ns" --kubeconfig "$kubeconfig" -o name 2>/dev/null | wc -l | tr -d ' ')
+      [[ "$cnt" =~ ^[0-9]+$ ]] || cnt=0
+      remaining=$((remaining + cnt))
+    done
+    if (( remaining == 0 )); then
+      echo "✅ Namespace '${ns}' appears empty."
+      return 0
+    fi
+    sleep "$interval"
+  done
+  echo "⚠️ Timeout waiting for namespace '${ns}' to be empty."
+  return 1
+}
+
+# Clean a namespace and wait until resources terminate
+cleanup_namespace() {
+  local ns="$1"
+  local kubeconfig_path="$2"
+  local wait_timeout="${3:-300}"
+
+  echo "🧹 Pre-cleaning namespace '${ns}' using kubeconfig '${kubeconfig_path}' ..."
+
+  set +e
+  # 1) Controllers first with foreground cascading
+  kubectl delete cronjobs.batch --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found --cascade=foreground
+  kubectl delete jobs.batch     --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found --cascade=foreground
+  kubectl delete deployments.apps   --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found --cascade=foreground
+  kubectl delete statefulsets.apps  --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found --cascade=foreground
+  kubectl delete daemonsets.apps    --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found --cascade=foreground
+
+  # 2) Workload pods (normal delete; uncomment force if needed)
+  kubectl delete pods --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found
+  # If pods hang: use force, but be cautious
+  # kubectl delete pods --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found --force --grace-period=0
+
+  # 3) Services and configs (service will skip the 'kubernetes' svc if not in user ns)
+  kubectl delete services   --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found
+  kubectl delete configmaps --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found
+  kubectl delete secrets    --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found
+
+  # 4) Storage
+  kubectl delete persistentvolumeclaims --all -n "${ns}" --kubeconfig "${kubeconfig_path}" --ignore-not-found
+  set -e
+
+  # 5) Wait for emptiness
+  wait_ns_empty "${ns}" "${kubeconfig_path}" "${wait_timeout}" 3 || true
 }
 
 # Run benchmarks for each profile
