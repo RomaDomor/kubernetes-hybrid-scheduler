@@ -12,6 +12,13 @@ LOSS=2.0
 JITTER=20
 
 ONE_WAY=$(( RTT / 2 ))
-apply_shape "$RATE" "$ONE_WAY" "$JITTER" "$LOSS"
+
+# Egress: only edge->cloud and cloud->edge
+apply_shape_selective "$RATE" "$ONE_WAY" "$JITTER" "$LOSS"
+
+# Ingress: mirror with IFB, only cloud->edge and edge->cloud
+setup_ifb
+apply_ingress_shape_selective "$RATE" "$ONE_WAY" "$JITTER" "$LOSS"
+
 show_qdisc
-echo "Applied POOR profile: ${RATE}Mbit, RTT~${RTT}ms, loss ${LOSS}%"
+echo "Applied GOOD selective profile (egress+ingress): ${RATE}Mbit, RTT~${RTT}ms, loss ${LOSS}%"
