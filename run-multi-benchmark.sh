@@ -201,8 +201,6 @@ wait_ns_empty() {
     jobs.batch
     cronjobs.batch
     services
-    configmaps
-    secrets
     persistentvolumeclaims
   )
 
