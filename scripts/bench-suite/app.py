@@ -13,7 +13,7 @@ from typing import Dict, Any, List, Optional
 
 import yaml  # pip install pyyaml
 from kubernetes import client, config, watch
-from kubernetes.client import ApiException
+from kubernetes.client import ApiException, V1DeleteOptions
 from kubernetes.stream import stream
 
 
@@ -808,6 +808,16 @@ def cleanup_workloads(ns: str, manifests_dir: Path, args: argparse.Namespace):
         if file_exists(p):
             k_delete(ns, p)
 
+    try:
+        force_delete_all_in_namespace(ns, label_selector="app")
+    except Exception as e:
+        log(f"Force sweep (label app) failed: {e}")
+        # As a last resort, sweep all kinds without label selector
+        try:
+            force_delete_all_in_namespace(ns, label_selector="")
+        except Exception as e2:
+            log(f"Force sweep (no selector) failed: {e2}")
+
 
 def cleanup_namespace(ns: str):
     log(f"Deleting namespace {ns} (ALL resources)...")
@@ -818,6 +828,242 @@ def cleanup_namespace(ns: str):
         if e.status != 404:
             log(f"Error deleting namespace: {e}")
 
+# -------------------- Force cleanup (kubectl-like) --------------------
+def wait_gone(check_fn, name: str, timeout_sec: int = 120, interval: float = 0.5):
+    """Poll until the resource retrieval raises 404 or times out."""
+    end = time.time() + timeout_sec
+    while time.time() < end:
+        try:
+            check_fn()
+            time.sleep(interval)
+        except ApiException as e:
+            if e.status == 404:
+                return True
+            time.sleep(interval)
+        except Exception:
+            # Treat other errors as not-gone-yet, continue
+            time.sleep(interval)
+    log(f"Timeout waiting for deletion: {name}")
+    return False
+
+
+def force_delete_all_in_namespace(ns: str, label_selector: str = "", timeout_sec: int = 180):
+    """
+    Force delete almost everything in a namespace, similar to:
+      kubectl delete all,cm,secret,ingress,sa,role,rolebinding,pvc,job,cronjob,deploy,rs,po \
+        -l <selector> -n <ns> --force --grace-period=0
+    If label_selector is empty, deletes all matching kinds in the namespace.
+    """
+    v1 = client.CoreV1Api()
+    apps_v1 = client.AppsV1Api()
+    batch_v1 = client.BatchV1Api()
+    networking_v1 = client.NetworkingV1Api()
+    rbac_v1 = client.RbacAuthorizationV1Api()
+
+    opts_fg = V1DeleteOptions(propagation_policy="Foreground")
+    opts_bg = V1DeleteOptions(propagation_policy="Background")
+
+    ls = label_selector or ""
+
+    def del_and_wait_deploy():
+        try:
+            items = apps_v1.list_namespaced_deployment(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    apps_v1.delete_namespaced_deployment(name, ns, body=opts_fg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete deployment/{name}: {e}")
+                wait_gone(lambda: apps_v1.read_namespaced_deployment(name, ns), f"deployment/{name}")
+        except Exception as e:
+            log(f"list deployments: {e}")
+
+    def del_and_wait_rs():
+        try:
+            items = apps_v1.list_namespaced_replica_set(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    apps_v1.delete_namespaced_replica_set(name, ns, body=opts_bg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete rs/{name}: {e}")
+                wait_gone(lambda: apps_v1.read_namespaced_replica_set(name, ns), f"rs/{name}")
+        except Exception as e:
+            log(f"list replicasets: {e}")
+
+    def del_and_wait_jobs():
+        try:
+            items = batch_v1.list_namespaced_job(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    batch_v1.delete_namespaced_job(name, ns, body=opts_fg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete job/{name}: {e}")
+                wait_gone(lambda: batch_v1.read_namespaced_job(name, ns), f"job/{name}")
+        except Exception as e:
+            log(f"list jobs: {e}")
+
+    def del_and_wait_cronjobs():
+        try:
+            items = batch_v1.list_namespaced_cron_job(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    batch_v1.delete_namespaced_cron_job(name, ns, body=opts_fg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete cronjob/{name}: {e}")
+                wait_gone(lambda: batch_v1.read_namespaced_cron_job(name, ns), f"cronjob/{name}")
+        except Exception as e:
+            log(f"list cronjobs: {e}")
+
+    def del_and_wait_pods():
+        try:
+            items = v1.list_namespaced_pod(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    v1.delete_namespaced_pod(name, ns, body=opts_fg, grace_period_seconds=0)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete pod/{name}: {e}")
+                wait_gone(lambda: v1.read_namespaced_pod(name, ns), f"pod/{name}")
+        except Exception as e:
+            log(f"list pods: {e}")
+
+    def del_and_wait_svcs():
+        try:
+            items = v1.list_namespaced_service(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                if name == "kubernetes":  # cluster service; usually not in user ns
+                    continue
+                try:
+                    v1.delete_namespaced_service(name, ns, body=opts_bg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete svc/{name}: {e}")
+                wait_gone(lambda: v1.read_namespaced_service(name, ns), f"svc/{name}")
+        except Exception as e:
+            log(f"list services: {e}")
+
+    def del_and_wait_cms():
+        try:
+            items = v1.list_namespaced_config_map(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    v1.delete_namespaced_config_map(name, ns, body=opts_bg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete cm/{name}: {e}")
+                wait_gone(lambda: v1.read_namespaced_config_map(name, ns), f"cm/{name}")
+        except Exception as e:
+            log(f"list configmaps: {e}")
+
+    def del_and_wait_secrets():
+        try:
+            items = v1.list_namespaced_secret(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    v1.delete_namespaced_secret(name, ns, body=opts_bg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete secret/{name}: {e}")
+                wait_gone(lambda: v1.read_namespaced_secret(name, ns), f"secret/{name}")
+        except Exception as e:
+            log(f"list secrets: {e}")
+
+    def del_and_wait_ingresses():
+        try:
+            items = networking_v1.list_namespaced_ingress(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    networking_v1.delete_namespaced_ingress(name, ns, body=opts_bg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete ingress/{name}: {e}")
+                wait_gone(lambda: networking_v1.read_namespaced_ingress(name, ns), f"ingress/{name}")
+        except Exception as e:
+            log(f"list ingresses: {e}")
+
+    def del_and_wait_sas():
+        try:
+            items = v1.list_namespaced_service_account(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    v1.delete_namespaced_service_account(name, ns, body=opts_bg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete sa/{name}: {e}")
+                wait_gone(lambda: v1.read_namespaced_service_account(name, ns), f"sa/{name}")
+        except Exception as e:
+            log(f"list serviceaccounts: {e}")
+
+    def del_and_wait_roles():
+        try:
+            items = rbac_v1.list_namespaced_role(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    rbac_v1.delete_namespaced_role(name, ns, body=opts_bg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete role/{name}: {e}")
+                wait_gone(lambda: rbac_v1.read_namespaced_role(name, ns), f"role/{name}")
+        except Exception as e:
+            log(f"list roles: {e}")
+
+    def del_and_wait_rolebindings():
+        try:
+            items = rbac_v1.list_namespaced_role_binding(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    rbac_v1.delete_namespaced_role_binding(name, ns, body=opts_bg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete rolebinding/{name}: {e}")
+                wait_gone(lambda: rbac_v1.read_namespaced_role_binding(name, ns), f"rolebinding/{name}")
+        except Exception as e:
+            log(f"list rolebindings: {e}")
+
+    def del_and_wait_pvcs():
+        try:
+            items = v1.list_namespaced_persistent_volume_claim(ns, label_selector=ls).items
+            for it in items:
+                name = it.metadata.name
+                try:
+                    v1.delete_namespaced_persistent_volume_claim(name, ns, body=opts_fg)
+                except ApiException as e:
+                    if e.status != 404:
+                        log(f"delete pvc/{name}: {e}")
+                wait_gone(lambda: v1.read_namespaced_persistent_volume_claim(name, ns), f"pvc/{name}")
+        except Exception as e:
+            log(f"list pvcs: {e}")
+
+    # Order: controllers first, then workload pods, then services/config, then RBAC/storage
+    del_and_wait_cronjobs()
+    del_and_wait_jobs()
+    del_and_wait_deploy()
+    del_and_wait_rs()
+    del_and_wait_pods()
+    del_and_wait_svcs()
+    del_and_wait_ingresses()
+    del_and_wait_cms()
+    del_and_wait_secrets()
+    del_and_wait_sas()
+    del_and_wait_roles()
+    del_and_wait_rolebindings()
+    del_and_wait_pvcs()
+    log("Force delete sweep finished.")
 
 # -------------------- WAN --------------------
 def ssh_run(router: str, cmd: str, timeout: int = 20) -> str:
