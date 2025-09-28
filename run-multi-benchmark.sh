@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Default configuration
 DEFAULT_NAMESPACE="cloud"
+DEFAULT_LOCAL_NAMESPACE="local-clients"
 DEFAULT_MANIFESTS_DIR="./manifests/workloads"
 DEFAULT_RESULTS_ROOT="./results"
 DEFAULT_KUBECONFIG="$HOME/.kube/config"
@@ -19,6 +20,7 @@ Run multi-profile Kubernetes SLO benchmarks with different WAN conditions.
 
 OPTIONS:
     -n, --namespace NAMESPACE       Kubernetes namespace (default: ${DEFAULT_NAMESPACE})
+        --local-namespace NAMESPACE   Local clients namespace (default: ${DEFAULT_LOCAL_NAMESPACE})
     -m, --manifests-dir DIR         Directory containing workload manifests (default: ${DEFAULT_MANIFESTS_DIR})
     -r, --results-root DIR          Root directory for results (default: ${DEFAULT_RESULTS_ROOT})
     -k, --kubeconfig PATH           Path to kubeconfig file (default: ${DEFAULT_KUBECONFIG})
@@ -48,6 +50,7 @@ EOF
 
 # Initialize variables with defaults
 NAMESPACE="${DEFAULT_NAMESPACE}"
+LOCAL_NAMESPACE="${DEFAULT_LOCAL_NAMESPACE}"
 MANIFESTS_DIR="${DEFAULT_MANIFESTS_DIR}"
 RESULTS_ROOT="${DEFAULT_RESULTS_ROOT}"
 KUBECONFIG="${DEFAULT_KUBECONFIG}"
@@ -64,6 +67,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -n|--namespace)
             NAMESPACE="$2"
+            shift 2
+            ;;
+        --local-namespace)
+            LOCAL_NAMESPACE="$2"
             shift 2
             ;;
         -m|--manifests-dir)
@@ -147,6 +154,7 @@ echo "========================================="
 echo "Multi-Profile Benchmark Configuration"
 echo "========================================="
 echo "Namespace:       ${NAMESPACE}"
+echo "Local Namespace: ${LOCAL_NAMESPACE}"
 echo "Manifests Dir:   ${MANIFESTS_DIR}"
 echo "Results Root:    ${BASE_RESULTS}"
 echo "Kubeconfig:      ${KUBECONFIG}"
@@ -181,6 +189,7 @@ for i in "${!PROFILES[@]}"; do
     cmd=(
         python3 scripts/bench-suite/app.py
         --namespace "${NAMESPACE}"
+        --local-namespace "${LOCAL_NAMESPACE}"
         --manifests-dir "${MANIFESTS_DIR}"
         --results-root "${PROFILE_RESULTS}"
         --kubeconfig "${KUBECONFIG}"

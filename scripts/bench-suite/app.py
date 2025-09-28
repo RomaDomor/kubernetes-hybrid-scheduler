@@ -16,6 +16,8 @@ from kubernetes import client, config, watch
 from kubernetes.client import ApiException, V1DeleteOptions
 from kubernetes.stream import stream
 
+# --- Workloads designated as clients to run in the local namespace ---
+CLIENT_WORKLOADS = {("Pod", "toolbox"), ("Job", "stream-data-generator")}
 
 # -------------------- Utilities --------------------
 def log(msg: str):
@@ -86,33 +88,53 @@ def ensure_namespace(v1: client.CoreV1Api, ns: str):
             raise
 
 
-def apply_yaml_objects(docs: List[Dict[str, Any]], ns: str):
-    """Apply YAML objects using the kubernetes client"""
+def apply_yaml_objects(docs: List[Dict[str, Any]], ns_offloaded: str, ns_local: str):
+    """Apply YAML objects splitting client vs server namespaces."""
     from kubernetes import utils
 
     k8s_client = client.ApiClient()
+    offloaded_docs, local_docs = [], []
+
     for doc in docs:
-        # Add namespace to the object if it doesn't have one
+        kind = doc.get("kind")
+        name = (doc.get("metadata") or {}).get("name")
+        if (kind, name) in CLIENT_WORKLOADS:
+            local_docs.append(doc)
+        else:
+            offloaded_docs.append(doc)
+
+    def ensure_ns(doc: Dict[str, Any], ns: str):
         if doc.get("metadata") is None:
             doc["metadata"] = {}
-        if "namespace" not in doc["metadata"] and doc.get("kind") not in ["Namespace", "ClusterRole",
-                                                                          "ClusterRoleBinding"]:
+        if (
+                "namespace" not in doc["metadata"]
+                and doc.get("kind") not in ["Namespace", "ClusterRole", "ClusterRoleBinding"]
+        ):
             doc["metadata"]["namespace"] = ns
 
-    utils.create_from_yaml(k8s_client, yaml_objects=docs, namespace=ns)
+    if offloaded_docs:
+        for d in offloaded_docs:
+            ensure_ns(d, ns_offloaded)
+        utils.create_from_yaml(k8s_client, yaml_objects=offloaded_docs, namespace=ns_offloaded)
+
+    if local_docs:
+        for d in local_docs:
+            ensure_ns(d, ns_local)
+        utils.create_from_yaml(k8s_client, yaml_objects=local_docs, namespace=ns_local)
 
 
-def delete_yaml_objects(docs: List[Dict[str, Any]], ns: str):
-    """Delete YAML objects using the kubernetes client"""
+def delete_yaml_objects(docs: List[Dict[str, Any]], ns_offloaded: str, ns_local: str):
+    """Delete YAML objects from the correct namespaces."""
     v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
     batch_v1 = client.BatchV1Api()
 
     for doc in docs:
         kind = doc.get("kind")
-        name = doc.get("metadata", {}).get("name")
+        name = (doc.get("metadata") or {}).get("name")
         if not kind or not name:
             continue
+        ns = ns_local if (kind, name) in CLIENT_WORKLOADS else ns_offloaded
 
         try:
             if kind == "Pod":
@@ -128,19 +150,19 @@ def delete_yaml_objects(docs: List[Dict[str, Any]], ns: str):
             elif kind == "Secret":
                 v1.delete_namespaced_secret(name=name, namespace=ns)
         except ApiException as e:
-            if e.status != 404:  # Ignore not found errors
+            if e.status != 404:
                 log(f"Error deleting {kind}/{name}: {e}")
 
 
-def k_apply(ns: str, file_path: Path):
+def k_apply(ns_offloaded: str, ns_local: str, file_path: Path):
     docs = read_yaml_multi(file_path)
-    apply_yaml_objects(docs, ns)
+    apply_yaml_objects(docs, ns_offloaded, ns_local)
 
 
-def k_delete(ns: str, file_path: Path):
+def k_delete(ns_offloaded: str, ns_local: str, file_path: Path):
     try:
         docs = read_yaml_multi(file_path)
-        delete_yaml_objects(docs, ns)
+        delete_yaml_objects(docs, ns_offloaded, ns_local)
     except Exception as e:
         log(f"Warning: Error during deletion: {e}")
 
@@ -440,14 +462,15 @@ def measure_http(
 def measure_stream(
         apps_v1: client.AppsV1Api,
         v1: client.CoreV1Api,
-        ns: str,
+        ns_offloaded: str,
+        ns_local: str,
         results_dir: Path,
         stream_svc_url: str,
         warmup_sec: int,
 ) -> Dict[str, Any]:
     # verify deployment exists
     try:
-        apps_v1.read_namespaced_deployment(name="stream-processor", namespace=ns)
+        apps_v1.read_namespaced_deployment(name="stream-processor", namespace=ns_offloaded)
     except ApiException as e:
         if e.status == 404:
             log("Stream processor not deployed; skipping stream measurement")
@@ -456,7 +479,7 @@ def measure_stream(
 
     log(f"Stream processor warmup {warmup_sec}s @ {stream_svc_url}/health")
     try:
-        toolbox_exec(v1, ns, f"curl -sf {stream_svc_url}/health", check=False)
+        toolbox_exec(v1, ns_local, f"curl -sf {stream_svc_url}/health", check=False)
     except Exception:
         pass
 
@@ -614,7 +637,7 @@ def evaluate_slos(
 
 
 # -------------------- Orchestration --------------------
-def deploy_and_wait(ns: str, manifests_dir: Path, args: argparse.Namespace):
+def deploy_and_wait(ns_offloaded: str, ns_local: str, manifests_dir: Path, args: argparse.Namespace):
     v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
 
@@ -623,58 +646,58 @@ def deploy_and_wait(ns: str, manifests_dir: Path, args: argparse.Namespace):
     if not file_exists(toolbox_path):
         sys.exit(f"Required file not found: {toolbox_path}")
     log(f"Deploying toolbox pod from {toolbox_path} ...")
-    k_apply(ns, toolbox_path)
+    k_apply(ns_offloaded, ns_local, toolbox_path)
     log("Waiting for toolbox to be Ready...")
-    wait_pod_ready(v1, ns, "toolbox", 180)
+    wait_pod_ready(v1, ns_local, "toolbox", 180)
 
     # http-latency
     http_path = manifests_dir / args.http_latency_file
     if not file_exists(http_path):
         sys.exit(f"Required file not found: {http_path}")
     log(f"Deploying http-latency from {http_path} ...")
-    k_apply(ns, http_path)
-    wait_deployment_ready(apps_v1, ns, "http-latency", 240)
+    k_apply(ns_offloaded, ns_local, http_path)
+    wait_deployment_ready(apps_v1, ns_offloaded, "http-latency", 240)
 
     # Jobs
     cpu_path = manifests_dir / args.cpu_batch_file
     if not file_exists(cpu_path):
         sys.exit(f"Required file not found: {cpu_path}")
     log(f"Applying CPU batch job from {cpu_path} ...")
-    k_apply(ns, cpu_path)
+    k_apply(ns_offloaded, ns_local, cpu_path)
 
     ml_path = manifests_dir / args.ml_infer_file
     if file_exists(ml_path):
         log(f"Applying ML infer job from {ml_path} ...")
-        k_apply(ns, ml_path)
+        k_apply(ns_offloaded, ns_local, ml_path)
     else:
         log(f"ML infer manifest not found (optional): {ml_path}")
 
     io_path = manifests_dir / args.io_job_file
     if file_exists(io_path):
         log(f"Applying IO job from {io_path} ...")
-        k_apply(ns, io_path)
+        k_apply(ns_offloaded, ns_local, io_path)
     else:
         log(f"IO job manifest not found (optional): {io_path}")
 
     mem_path = manifests_dir / args.memory_intensive_file
     if file_exists(mem_path):
         log(f"Applying memory-intensive job from {mem_path} ...")
-        k_apply(ns, mem_path)
+        k_apply(ns_offloaded, ns_local, mem_path)
     else:
         log(f"Memory-intensive manifest not found (optional): {mem_path}")
 
     stream_path = manifests_dir / args.stream_processor_file
     if file_exists(stream_path):
         log(f"Deploying stream processor from {stream_path} ...")
-        k_apply(ns, stream_path)
-        wait_deployment_ready(apps_v1, ns, "stream-processor", 240)
+        k_apply(ns_offloaded, ns_local, stream_path)
+        wait_deployment_ready(apps_v1, ns_offloaded, "stream-processor", 240)
     else:
         log(f"Stream processor manifest not found (optional): {stream_path}")
 
     build_path = manifests_dir / args.build_job_file
     if file_exists(build_path):
         log(f"Applying build job from {build_path} ...")
-        k_apply(ns, build_path)
+        k_apply(ns_offloaded, ns_local, build_path)
     else:
         log(f"Build job manifest not found (optional): {build_path}")
 
@@ -792,8 +815,8 @@ def get_nodes_info(v1: client.CoreV1Api) -> str:
         return f"Error getting nodes: {e}"
 
 
-def cleanup_workloads(ns: str, manifests_dir: Path, args: argparse.Namespace):
-    log(f"Cleaning up workloads in namespace {ns}...")
+def cleanup_workloads(ns_offloaded: str, ns_local: str, manifests_dir: Path, args: argparse.Namespace):
+    log(f"Cleaning up workloads in namespaces {ns_offloaded}, {ns_local}...")
     paths = [
         manifests_dir / args.http_latency_file,
         manifests_dir / args.cpu_batch_file,
@@ -806,15 +829,19 @@ def cleanup_workloads(ns: str, manifests_dir: Path, args: argparse.Namespace):
     ]
     for p in paths:
         if file_exists(p):
-            k_delete(ns, p)
+            k_delete(ns_offloaded, ns_local, p)
 
     try:
-        force_delete_all_in_namespace(ns, label_selector="app")
+        # Sweep offloaded namespace
+        force_delete_all_in_namespace(ns_offloaded, label_selector="app")
+        # Sweep local namespace (clients)
+        force_delete_all_in_namespace(ns_local, label_selector="app")
     except Exception as e:
         log(f"Force sweep (label app) failed: {e}")
-        # As a last resort, sweep all kinds without label selector
+        # As a last resort, sweep without selector in both namespaces
         try:
-            force_delete_all_in_namespace(ns, label_selector="")
+            force_delete_all_in_namespace(ns_offloaded, label_selector="")
+            force_delete_all_in_namespace(ns_local, label_selector="")
         except Exception as e2:
             log(f"Force sweep (no selector) failed: {e2}")
 
@@ -1119,6 +1146,11 @@ def parse_args() -> argparse.Namespace:
         help="Kubernetes namespace for the benchmark.",
     )
     core.add_argument(
+        "--local-namespace",
+        default="local-clients",
+        help="Kubernetes namespace for local clients (toolbox, generators). Must not be offloaded.",
+    )
+    core.add_argument(
         "--manifests-dir",
         required=True,
         help="Directory containing the workload YAML manifests.",
@@ -1238,7 +1270,8 @@ def main():
     args = parse_args()
 
     # Derived configuration
-    ns = args.namespace
+    ns_offloaded = args.namespace
+    ns_local = args.local_namespace
     manifests_dir = Path(args.manifests_dir)
     results_dir = Path(args.results_root) / datetime.now().strftime(
         "%Y%m%d-%H%M%S"
@@ -1249,7 +1282,8 @@ def main():
     run_meta = {
         "ts": datetime.now().isoformat(timespec="seconds"),
         "context": args.context,
-        "namespace": ns,
+        "namespace_offloaded": ns_offloaded,
+        "namespace_local": ns_local,
         "latency_policy": args.latency_policy_metric,
         "wan": {
             "router": args.wan_router,
@@ -1262,10 +1296,11 @@ def main():
         json.dumps(run_meta, indent=2)
     )
 
-    http_svc_url = f"http://http-latency.{ns}.svc.cluster.local/"
-    stream_svc_url = f"http://stream-processor.{ns}.svc.cluster.local:8080"
+    http_svc_url = f"http://http-latency.{ns_offloaded}.svc.cluster.local/"
+    stream_svc_url = f"http://stream-processor.{ns_offloaded}.svc.cluster.local:8080"
 
-    log(f"Namespace: {ns}")
+    log(f"Namespace (offloaded): {ns_offloaded}")
+    log(f"Namespace (local): {ns_local}")
     log(f"Manifests: {manifests_dir}")
     log(f"Results:   {results_dir}")
 
@@ -1274,7 +1309,8 @@ def main():
     apps_v1 = client.AppsV1Api()
     batch = client.BatchV1Api()
 
-    ensure_namespace(v1, ns)
+    ensure_namespace(v1, ns_offloaded)
+    ensure_namespace(v1, ns_local)
 
     # Optionally apply WAN profile on router BEFORE deployments
     if args.wan_router and args.wan_profile and args.wan_profile != "none":
@@ -1303,11 +1339,11 @@ def main():
         args.stream_processor_file,
         args.build_job_file,
     ]
-    catalog = build_catalog_from_manifests(ns, manifests_dir, manifest_files)
+    catalog = build_catalog_from_manifests(ns_offloaded, manifests_dir, manifest_files)
     save_catalog(catalog, results_dir)
 
     # Deploy workloads and wait for ready
-    deploy_and_wait(ns, manifests_dir, args)
+    deploy_and_wait(ns_offloaded, ns_local, manifests_dir, args)
 
     # Snapshots
     log("Capturing cluster state...")
@@ -1318,50 +1354,75 @@ def main():
         pass
 
     try:
-        pods_info = get_objects_info(v1, apps_v1, batch, ns)
+        pods_info = get_objects_info(v1, apps_v1, batch, ns_offloaded)
         (results_dir / "pods_initial.txt").write_text(pods_info)
         (results_dir / "k8s_objects_initial.txt").write_text(pods_info)
     except Exception:
         pass
+    try:
+        pods_info_local = get_objects_info(v1, apps_v1, batch, ns_local)
+        (results_dir / "pods_initial_local.txt").write_text(pods_info_local)
+    except Exception:
+        pass
 
     # HTTP benchmark
-    http_meas = measure_http(v1, ns, results_dir, args, http_svc_url)
+    http_meas = measure_http(v1, ns_local, results_dir, args, http_svc_url)
 
-    # Stream: wait later for job logs; still do a health warmup
     try:
-        toolbox_exec(v1, ns, f"curl -sf {stream_svc_url}/health", check=False)
+        toolbox_exec(v1, ns_local, f"curl -sf {stream_svc_url}/health", check=False)
     except Exception:
         pass
 
     # Jobs (wait + logs)
-    for job in ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job", "stream-data-generator"]:
+    # Offloaded jobs
+    for job in ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job"]:
         try:
-            record_job(batch, v1, ns, results_dir, job, args.timeout_job_sec)
+            record_job(batch, v1, ns_offloaded, results_dir, job, args.timeout_job_sec)
         except Exception as e:
             log(f"Job {job} wait/log failed: {e}")
+
+    # Local client job
+    try:
+        record_job(batch, v1, ns_local, results_dir, "stream-data-generator", args.timeout_job_sec)
+    except Exception as e:
+        log(f"Job stream-data-generator wait/log failed: {e}")
 
     # Final snapshots
     log("Capturing final placement and events...")
     try:
-        pods_info_final = get_objects_info(v1, apps_v1, batch, ns)
+        pods_info_final = get_objects_info(v1, apps_v1, batch, ns_offloaded)
         (results_dir / "pods_final.txt").write_text(pods_info_final)
     except Exception:
         pass
-    get_events(v1, ns, results_dir / "events.json")
+    get_events(v1, ns_offloaded, results_dir / "events.json")
     try:
-        get_pod_node_csv(v1, ns, results_dir / "pod_node_map.csv")
+        get_pod_node_csv(v1, ns_offloaded, results_dir / "pod_node_map.csv")
+    except Exception:
+        pass
+
+    try:
+        pods_info_final_local = get_objects_info(v1, apps_v1, batch, ns_local)
+        (results_dir / "pods_final_local.txt").write_text(pods_info_final_local)
+    except Exception:
+        pass
+
+    get_events(v1, ns_local, results_dir / "events_local.json")
+    try:
+        get_pod_node_csv(v1, ns_local, results_dir / "pod_node_map_local.csv")
     except Exception:
         pass
 
     # Build job measures via API (more accurate)
     job_meas = measure_jobs_via_api(
         batch,
-        ns,
-        ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job", "stream-data-generator"],
+        ns_offloaded,
+        ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job"],
     )
+    job_meas_local = measure_jobs_via_api(batch, ns_local, ["stream-data-generator"])
+    job_meas.update(job_meas_local)
     # Stream measures from generator logs (now should exist)
     stream_meas = measure_stream(
-        apps_v1, v1, ns, results_dir, stream_svc_url, args.stream_warmup_sec
+        apps_v1, v1, ns_offloaded, ns_local, results_dir, stream_svc_url, args.stream_warmup_sec
     )
 
     # Combine measures
@@ -1384,9 +1445,9 @@ def main():
     # Cleanup
     if not args.no_cleanup:
         if args.cleanup_namespace:
-            cleanup_namespace(ns)
+            cleanup_namespace(ns_offloaded)
         else:
-            cleanup_workloads(ns, manifests_dir, args)
+            cleanup_workloads(ns_offloaded, ns_local, manifests_dir, args)
         log("Cleanup done.")
     else:
         log("Cleanup skipped.")
