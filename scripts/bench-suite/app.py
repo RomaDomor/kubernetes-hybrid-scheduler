@@ -801,6 +801,7 @@ def cleanup_workloads(ns: str, manifests_dir: Path, args: argparse.Namespace):
         manifests_dir / args.io_job_file,
         manifests_dir / args.memory_intensive_file,
         manifests_dir / args.stream_processor_file,
+        manifests_dir / args.build_job_file,
         manifests_dir / args.toolbox_file,
     ]
     for p in paths:
