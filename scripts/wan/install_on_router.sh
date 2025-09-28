@@ -74,30 +74,62 @@ cloud_ip=""
 edge_if=""
 cloud_if=""
 
-# Helper: get interface by IPv4 address (needs sudo for ip)
-iface_by_ip() {
-  local ip="$1"
-  sudo -n ip -o -4 addr show | awk -v ip="$ip" '$0 ~ ip {print $2; exit}'
+# Helper: get interface by network CIDR (finds interfaces in the given network)
+iface_by_cidr() {
+  local cidr="$1"
+  local network="${cidr%/*}"
+  local prefix="${cidr#*/}"
+
+  # Find interface with IP in this network
+  sudo -n ip -o -4 addr show | while read -r line; do
+    iface=$(echo "$line" | awk '{print $2}')
+    ip_cidr=$(echo "$line" | awk '{print $4}')
+    ip_addr="${ip_cidr%/*}"
+
+    # Check if this IP is in the target network
+    if ip route get "$ip_addr" from "$network/$prefix" 2>/dev/null | grep -q "dev $iface"; then
+      echo "$iface"
+      break
+    fi
+  done 2>/dev/null || true
+}
+
+# Alternative simpler approach - find interface with IP in the network range
+iface_by_network() {
+  local cidr="$1"
+  local network="${cidr%/*}"
+  local prefix="${cidr#*/}"
+
+  # Convert to first 3 octets for /24 networks
+  if [[ "$prefix" == "24" ]]; then
+    local net_prefix="${network%.*}"
+    sudo -n ip -o -4 addr show | awk -v prefix="$net_prefix" '
+      $4 ~ "^"prefix"\\." {print $2; exit}
+    '
+  else
+    # For non-/24 networks, fall back to exact match
+    sudo -n ip -o -4 addr show | awk -v ip="$network" '$0 ~ ip {print $2; exit}'
+  fi
 }
 
 if [[ -n "$EDGE_CIDR_IN" ]]; then
   edge_ip="${EDGE_CIDR_IN%%/*}"
-  edge_if="$(iface_by_ip "$edge_ip" || true)"
+  edge_if="$(iface_by_network "$EDGE_CIDR_IN" || true)"
 fi
 if [[ -n "$CLOUD_CIDR_IN" ]]; then
   cloud_ip="${CLOUD_CIDR_IN%%/*}"
-  cloud_if="$(iface_by_ip "$cloud_ip" || true)"
+  cloud_if="$(iface_by_network "$CLOUD_CIDR_IN" || true)"
 fi
 
 # Auto-guess if still empty: pick two distinct ethernet-like ifaces
 if [[ -z "$edge_if" || -z "$cloud_if" || "$edge_if" == "$cloud_if" ]]; then
   mapfile -t CANDS < <(sudo -n ip -o -4 addr show | awk '{print $2}' | grep -E '^(en|eth|ens|enp|eno)' | sort -u)
   if [[ "${#CANDS[@]}" -ge 2 ]]; then
-    if [[ -z "$edge_if" && -n "$edge_ip" ]]; then
-      edge_if="$(iface_by_ip "$edge_ip" || true)"
+    if [[ -z "$edge_if" && -n "$EDGE_CIDR_IN" ]]; then
+      edge_if="$(iface_by_network "$EDGE_CIDR_IN" || true)"
     fi
-    if [[ -z "$cloud_if" && -n "$cloud_ip" ]]; then
-      cloud_if="$(iface_by_ip "$cloud_ip" || true)"
+    if [[ -z "$cloud_if" && -n "$CLOUD_CIDR_IN" ]]; then
+      cloud_if="$(iface_by_network "$CLOUD_CIDR_IN" || true)"
     fi
     if [[ -z "$edge_if" ]]; then edge_if="${CANDS[0]}"; fi
     if [[ -z "$cloud_if" ]]; then
