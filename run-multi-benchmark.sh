@@ -10,6 +10,7 @@ DEFAULT_KUBECONFIG="$HOME/.kube/config"
 DEFAULT_WAN_ROUTER="router"
 DEFAULT_PROFILES="clear,good,moderate,poor"
 DEFAULT_VENV_PATH="scripts/bench-suite/.venv"
+DEFAULT_PRE_CLEAN=false
 
 # Function to show usage
 usage() {
@@ -30,6 +31,7 @@ OPTIONS:
     -s, --sleep SECONDS             Sleep time between runs in seconds (default: 30)
     -t, --timeout SECONDS           Job timeout in seconds (default: 900)
     --no-cleanup                    Don't cleanup namespace between runs
+    --pre-clean                     Run kubectl cleanup on the offloaded namespace before each profile
     --dry-run                       Show what would be run without executing
     -h, --help                      Show this help message
 
@@ -45,12 +47,16 @@ EXAMPLES:
 
     # Dry run to see what would be executed
     $0 --dry-run --profiles "good,poor"
+
+    # Pre-clean 'cloud' namespace (offloaded) using a specific kubeconfig before each profile
+    $0 --pre-clean -k ~/.kube/edge-config
 EOF
 }
 
 # Initialize variables with defaults
 NAMESPACE="${DEFAULT_NAMESPACE}"
 LOCAL_NAMESPACE="${DEFAULT_LOCAL_NAMESPACE}"
+MANIFSETS_DIR_PLACEHOLDER="IGNORE" # placeholder to catch typos
 MANIFESTS_DIR="${DEFAULT_MANIFESTS_DIR}"
 RESULTS_ROOT="${DEFAULT_RESULTS_ROOT}"
 KUBECONFIG="${DEFAULT_KUBECONFIG}"
@@ -60,6 +66,7 @@ VENV_PATH="${DEFAULT_VENV_PATH}"
 SLEEP_BETWEEN=30
 JOB_TIMEOUT=900
 NO_CLEANUP=false
+PRE_CLEAN="${DEFAULT_PRE_CLEAN}"
 DRY_RUN=false
 
 # Parse command line arguments
@@ -109,6 +116,10 @@ while [[ $# -gt 0 ]]; do
             NO_CLEANUP=true
             shift
             ;;
+        --pre-clean)
+            PRE_CLEAN=true
+            shift
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
@@ -135,6 +146,7 @@ if [[ ! -d "${MANIFESTS_DIR}" ]]; then
 fi
 
 if [[ -f "${VENV_PATH}/bin/activate" ]]; then
+    # shellcheck disable=SC1090
     source "${VENV_PATH}/bin/activate"
 else
     echo "Warning: Virtual environment not found at ${VENV_PATH}, continuing without activation"
@@ -153,23 +165,35 @@ CLEANUP_FLAG=""
 echo "========================================="
 echo "Multi-Profile Benchmark Configuration"
 echo "========================================="
-echo "Namespace:       ${NAMESPACE}"
-echo "Local Namespace: ${LOCAL_NAMESPACE}"
-echo "Manifests Dir:   ${MANIFESTS_DIR}"
-echo "Results Root:    ${BASE_RESULTS}"
-echo "Kubeconfig:      ${KUBECONFIG}"
-echo "WAN Router:      ${WAN_ROUTER}"
-echo "Profiles:        ${PROFILES[*]}"
-echo "Sleep Between:   ${SLEEP_BETWEEN}s"
-echo "Job Timeout:     ${JOB_TIMEOUT}s"
-echo "Cleanup:         ${NO_CLEANUP}"
-echo "Dry Run:         ${DRY_RUN}"
+echo "Namespace (offloaded): ${NAMESPACE}"
+echo "Local Namespace:       ${LOCAL_NAMESPACE}"
+echo "Manifests Dir:         ${MANIFESTS_DIR}"
+echo "Results Root:          ${BASE_RESULTS}"
+echo "Kubeconfig:            ${KUBECONFIG}"
+echo "WAN Router:            ${WAN_ROUTER}"
+echo "Profiles:              ${PROFILES[*]}"
+echo "Sleep Between:         ${SLEEP_BETWEEN}s"
+echo "Job Timeout:           ${JOB_TIMEOUT}s"
+echo "Cleanup (post-run):    ${NO_CLEANUP}"
+echo "Pre-Clean (pre-run):   ${PRE_CLEAN}"
+echo "Dry Run:               ${DRY_RUN}"
 echo "========================================="
 
 if [[ "${DRY_RUN}" == "true" ]]; then
     echo "DRY RUN MODE - Commands that would be executed:"
     echo ""
 fi
+
+# Pre-clean function
+cleanup_namespace() {
+    local ns="$1"
+    local kubeconfig_path="$2"
+
+    echo "🧹 Pre-cleaning namespace '${ns}' using kubeconfig '${kubeconfig_path}' ..."
+    set +e
+    kubectl delete all --all -n "${ns}" --kubeconfig "${kubeconfig_path}"
+    set -e
+}
 
 # Run benchmarks for each profile
 for i in "${!PROFILES[@]}"; do
@@ -184,6 +208,14 @@ for i in "${!PROFILES[@]}"; do
 
     # Create profile-specific results directory
     PROFILE_RESULTS="${BASE_RESULTS}/profile-${profile}"
+
+    # Optional pre-clean per profile (offloaded namespace)
+    if [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" != "true" ]]; then
+        cleanup_namespace "${NAMESPACE}" "${KUBECONFIG}"
+        cleanup_namespace "${LOCAL_NAMESPACE}" "${KUBECONFIG}"
+    elif [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" == "true" ]]; then
+        echo "Would pre-clean namespace '${NAMESPACE}' with kubeconfig '${KUBECONFIG}'"
+    fi
 
     # Build the command
     cmd=(
@@ -247,10 +279,12 @@ summary = {
     "timestamp": "${TIMESTAMP}",
     "config": {
         "namespace": "${NAMESPACE}",
+        "local_namespace": "${LOCAL_NAMESPACE}",
         "wan_router": "${WAN_ROUTER}",
         "profiles": "${PROFILES_STR}".split(","),
         "sleep_between": ${SLEEP_BETWEEN},
-        "job_timeout": ${JOB_TIMEOUT}
+        "job_timeout": ${JOB_TIMEOUT},
+        "pre_clean": ${PRE_CLEAN}
     },
     "profiles": {}
 }
@@ -260,7 +294,7 @@ for profile_dir in base_dir.glob("profile-*"):
     profile = profile_dir.name.replace("profile-", "")
 
     # Find the actual results directory (timestamped subdirectory)
-    result_dirs = list(profile_dir.glob("*"))
+    result_dirs = sorted(profile_dir.glob("*"))
     if result_dirs:
         result_dir = result_dirs[0]  # Should be only one
 
@@ -284,7 +318,7 @@ comparison_file = base_dir / "comparative_summary.json"
 with open(comparison_file, "w") as f:
     json.dump(summary, f, indent=2)
 
-print(f"\n📊 Comparative summary saved to: {comparison_file}")
+print(f"\\n📊 Comparative summary saved to: {comparison_file}")
 print(f"✅ Processed {profiles_found} profile(s)")
 
 if profiles_found == 0:
