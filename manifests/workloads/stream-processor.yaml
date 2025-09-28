@@ -75,14 +75,14 @@ spec:
               PY
           readinessProbe:
             httpGet: { path: /health, port: 8080 }
-            initialDelaySeconds: 3
-            periodSeconds: 2
-            timeoutSeconds: 1
-          livenessProbe:
-            httpGet: { path: /health, port: 8080 }
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
           resources:
             requests:
               cpu: "500m"
