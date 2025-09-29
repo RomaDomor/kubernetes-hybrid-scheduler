@@ -1296,8 +1296,8 @@ def main():
         json.dumps(run_meta, indent=2)
     )
 
-    http_svc_url = f"http://http-latency.{ns_offloaded}.svc.cluster.local/"
-    stream_svc_url = f"http://stream-processor.{ns_offloaded}.svc.cluster.local:8080"
+    http_svc_url = f"http://http-latency.{ns_offloaded}/"
+    stream_svc_url = f"http://stream-processor.{ns_offloaded}:8080"
 
     log(f"Namespace (offloaded): {ns_offloaded}")
     log(f"Namespace (local): {ns_local}")
