@@ -347,7 +347,7 @@ summary = {
         "profiles": "${PROFILES_STR}".split(","),
         "sleep_between": ${SLEEP_BETWEEN},
         "job_timeout": ${JOB_TIMEOUT},
-        "pre_clean": ${PRE_CLEAN}
+        "pre_clean": $([[ "${PRE_CLEAN}" == "true" ]] && echo "True" || echo "False")
     },
     "profiles": {}
 }

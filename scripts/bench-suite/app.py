@@ -99,6 +99,14 @@ def apply_yaml_objects(docs: List[Dict[str, Any]], ns_offloaded: str, ns_local: 
         kind = doc.get("kind")
         name = (doc.get("metadata") or {}).get("name")
         if (kind, name) in CLIENT_WORKLOADS:
+            # Update PROCESSOR_URL for stream-data-generator
+            if name == "stream-data-generator" and kind == "Job":
+                containers = doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+                for container in containers:
+                    env_vars = container.get("env", [])
+                    for env_var in env_vars:
+                        if env_var.get("name") == "PROCESSOR_URL":
+                            env_var["value"] = f"http://stream-processor.{ns_offloaded}:8080"
             local_docs.append(doc)
         else:
             offloaded_docs.append(doc)
