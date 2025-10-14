@@ -83,11 +83,11 @@ Pods MUST include these annotations to be managed by the smart scheduler:
 
 | Annotation Key                  | Type    | Required | Description                                      | Example       |
 |---------------------------------|---------|----------|--------------------------------------------------|---------------|
-| `slo.example.io/deadlineMs`     | integer | No       | End-to-end deadline (milliseconds)               | `"200"`       |
-| `slo.example.io/latencyTargetMs`| integer | No       | Target p95 latency (milliseconds)                | `"50"`        |
-| `slo.example.io/class`          | string  | Yes      | Workload class: `latency`, `throughput`, `batch` | `"latency"`   |
-| `slo.example.io/priority`       | integer | No       | Priority (0–10, higher = more important)         | `"7"`         |
-| `slo.example.io/offloadAllowed` | boolean | No       | Can this pod be offloaded to cloud? (default: true) | `"true"`   |
+| `slo.hybrid.io/deadlineMs`     | integer | No       | End-to-end deadline (milliseconds)               | `"200"`       |
+| `slo.hybrid.io/latencyTargetMs`| integer | No       | Target p95 latency (milliseconds)                | `"50"`        |
+| `slo.hybrid.io/class`          | string  | Yes      | Workload class: `latency`, `throughput`, `batch` | `"latency"`   |
+| `slo.hybrid.io/priority`       | integer | No       | Priority (0–10, higher = more important)         | `"7"`         |
+| `slo.hybrid.io/offloadAllowed` | boolean | No       | Can this pod be offloaded to cloud? (default: true) | `"true"`   |
 
 **At least one of `deadlineMs` or `latencyTargetMs` MUST be present for SLO-aware scheduling.**
 
@@ -100,10 +100,10 @@ metadata:
   labels:
     scheduling.example.io/managed: "true"
   annotations:
-    slo.example.io/latencyTargetMs: "80"
-    slo.example.io/class: "latency"
-    slo.example.io/priority: "8"
-    slo.example.io/offloadAllowed: "true"
+    slo.hybrid.io/latencyTargetMs: "80"
+    slo.hybrid.io/class: "latency"
+    slo.hybrid.io/priority: "8"
+    slo.hybrid.io/offloadAllowed: "true"
 spec:
   containers:
     - name: handler
@@ -219,7 +219,7 @@ f(Pod, SLO, LocalState, WANState) → {EDGE, CLOUD}
 **Example placeholder:**
 ```python
 procTimeEdge(pod):
-  class = pod.annotations["slo.example.io/class"]
+  class = pod.annotations["slo.hybrid.io/class"]
   cpuRequest = pod.spec.containers[0].resources.requests.cpu  # in millicores
   
   if class == "latency":

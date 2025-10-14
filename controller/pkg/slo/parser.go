@@ -26,13 +26,13 @@ func ParseSLO(pod *corev1.Pod) (*SLO, error) {
 		OffloadAllowed: true,
 	}
 
-	if v, ok := annotations["slo.example.io/deadlineMs"]; ok {
+	if v, ok := annotations["slo.hybrid.io/deadlineMs"]; ok {
 		if val, err := strconv.Atoi(v); err == nil {
 			slo.DeadlineMs = val
 		}
 	}
 
-	if v, ok := annotations["slo.example.io/latencyTargetMs"]; ok {
+	if v, ok := annotations["slo.hybrid.io/latencyTargetMs"]; ok {
 		if val, err := strconv.Atoi(v); err == nil {
 			slo.LatencyTargetMs = val
 		}
@@ -47,18 +47,18 @@ func ParseSLO(pod *corev1.Pod) (*SLO, error) {
 		slo.DeadlineMs = slo.LatencyTargetMs
 	}
 
-	slo.Class = annotations["slo.example.io/class"]
+	slo.Class = annotations["slo.hybrid.io/class"]
 	if slo.Class == "" {
-		return nil, fmt.Errorf("slo.example.io/class annotation required")
+		return nil, fmt.Errorf("slo.hybrid.io/class annotation required")
 	}
 
-	if v, ok := annotations["slo.example.io/priority"]; ok {
+	if v, ok := annotations["slo.hybrid.io/priority"]; ok {
 		if val, err := strconv.Atoi(v); err == nil {
 			slo.Priority = val
 		}
 	}
 
-	if v, ok := annotations["slo.example.io/offloadAllowed"]; ok {
+	if v, ok := annotations["slo.hybrid.io/offloadAllowed"]; ok {
 		slo.OffloadAllowed = v != "false"
 	}
 

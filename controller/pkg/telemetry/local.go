@@ -67,7 +67,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 
 	pendingPerClass := make(map[string]int)
 	for _, pod := range pods.Items {
-		class := pod.Annotations["slo.example.io/class"]
+		class := pod.Annotations["slo.hybrid.io/class"]
 		pendingPerClass[class]++
 	}
 

@@ -104,7 +104,7 @@ func (e *Engine) estimateETACloud(pod *corev1.Pod, wan *telemetry.WANState) floa
 
 func (e *Engine) estimateProcTime(pod *corev1.Pod) float64 {
 	// Your Section 5.2 formula
-	class := pod.Annotations["slo.example.io/class"]
+	class := pod.Annotations["slo.hybrid.io/class"]
 	cpuRequest := float64(getCPURequest(pod)) // millicores
 
 	switch class {
@@ -121,7 +121,7 @@ func (e *Engine) estimateProcTime(pod *corev1.Pod) float64 {
 
 func (e *Engine) estimateQueueWait(pod *corev1.Pod, local *telemetry.LocalState) float64 {
 	// Simplified: pendingCount × avgProcTime
-	class := pod.Annotations["slo.example.io/class"]
+	class := pod.Annotations["slo.hybrid.io/class"]
 	pendingCount := local.PendingPodsPerClass[class]
 	avgProc := e.estimateProcTime(pod)
 	return float64(pendingCount) * avgProc
