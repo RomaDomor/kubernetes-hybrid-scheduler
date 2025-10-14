@@ -554,13 +554,13 @@ def evaluate_slos(
         results_dir: Path,
         latency_policy_metric: str,
 ) -> Dict[str, Any]:
-    rows = ["workload,kind,class,slo_target_ms,measure_ms,metric,pass"]
+    rows = ["workload,kind,class,slo_target_ms,measure_ms,metric,pass,reason"]
     report_lines: List[str] = []
     summary: Dict[str, Any] = {"items": [], "policy": {"latency_metric": latency_policy_metric}}
-
-    def add(workload, kind, klass, slo_ms, meas_ms, metric, passed):
-        rows.append(f"{workload},{kind},{klass},{slo_ms},{meas_ms},{metric},{str(passed).lower()}")
-        line = f"[{workload}] {klass or 'NA'} target {slo_ms}ms {metric} -> {meas_ms}ms: {'PASS' if passed else 'FAIL'}"
+    def add(workload, kind, klass, slo_ms, meas_ms, metric, passed, reason=""):
+        rows.append(f"{workload},{kind},{klass},{slo_ms},{meas_ms},{metric},{str(passed).lower()},{reason}")
+        rtxt = f" ({reason})" if (reason and not passed) else ""
+        line = f"[{workload}] {klass or 'NA'} target {slo_ms}ms {metric} -> {meas_ms}ms: {'PASS' if passed else 'FAIL'}{rtxt}"
         report_lines.append(line)
         summary["items"].append(
             {
@@ -571,6 +571,7 @@ def evaluate_slos(
                 "target_ms": slo_ms,
                 "measured_ms": meas_ms,
                 "pass": bool(passed),
+                "reason": reason or None,
             }
         )
 
@@ -592,6 +593,9 @@ def evaluate_slos(
             meas_ms = http_meas.get("p95_ms")
         if slo_lat and meas_ms is not None:
             add("http-latency", "Deployment", klass, slo_lat, round(meas_ms, 2), metric, meas_ms <= slo_lat)
+        elif slo_lat:
+            # Record missing measurement as FAIL
+            add("http-latency", "Deployment", klass, slo_lat, None, metric, False, reason="no_measurement")
 
     # Stream processor (Deployment) using avg_ms
     stream_meas = measures.get("stream-processor") or {}
@@ -602,6 +606,8 @@ def evaluate_slos(
         meas_ms = stream_meas.get("avg_ms")
         if slo_lat and meas_ms is not None:
             add("stream-processor", "Deployment", klass, slo_lat, round(meas_ms, 2), "avg", meas_ms <= slo_lat)
+        elif slo_lat:
+            add("stream-processor", "Deployment", klass, slo_lat, None, "avg", False, reason="no_measurement")
 
     # Jobs (batch): deadline_ms
     for job_name in ["cpu-batch", "io-job", "memory-intensive", "ml-infer", "build-job", "stream-data-generator"]:
@@ -636,6 +642,9 @@ def evaluate_slos(
                             pass
         if dur_ms is not None:
             add(job_name, "Job", klass, deadline, int(dur_ms), "duration_ms", int(dur_ms) <= int(deadline))
+        else:
+            # No duration captured at all -> explicit FAIL
+            add(job_name, "Job", klass, deadline, None, "duration_ms", False, reason="job_never_started_or_observed")
 
     # write files
     (results_dir / "slo_summary.csv").write_text("\n".join(rows))
