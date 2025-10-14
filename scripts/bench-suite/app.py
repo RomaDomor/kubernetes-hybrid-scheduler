@@ -355,10 +355,10 @@ def build_catalog_from_manifests(
             if not kind or not obj_name:
                 continue
             ann = get_annotations(doc)
-            slo_class = ann.get("slo.class")
-            lat_ms = to_int(ann.get("slo.latency.ms"))
+            slo_class = ann.get("slo.hybrid.io/class")
+            lat_ms = to_int(ann.get("slo.hybrid.io/latency.ms"))
             ddl_ms = to_int(ann.get("slo.deadline.ms"))
-            max_offload_ms = to_int(ann.get("slo.max-offload-penalty.ms"))
+            max_offload_ms = to_int(ann.get("slo.hybrid.io/max-offload-penalty.ms"))
             catalog.append(
                 {
                     "kind": kind,
@@ -554,13 +554,13 @@ def evaluate_slos(
         results_dir: Path,
         latency_policy_metric: str,
 ) -> Dict[str, Any]:
-    rows = ["workload,kind,class,slo_target_ms,measure_ms,metric,pass"]
+    rows = ["workload,kind,class,slo_target_ms,measure_ms,metric,pass,reason"]
     report_lines: List[str] = []
     summary: Dict[str, Any] = {"items": [], "policy": {"latency_metric": latency_policy_metric}}
-
-    def add(workload, kind, klass, slo_ms, meas_ms, metric, passed):
-        rows.append(f"{workload},{kind},{klass},{slo_ms},{meas_ms},{metric},{str(passed).lower()}")
-        line = f"[{workload}] {klass or 'NA'} target {slo_ms}ms {metric} -> {meas_ms}ms: {'PASS' if passed else 'FAIL'}"
+    def add(workload, kind, klass, slo_ms, meas_ms, metric, passed, reason=""):
+        rows.append(f"{workload},{kind},{klass},{slo_ms},{meas_ms},{metric},{str(passed).lower()},{reason}")
+        rtxt = f" ({reason})" if (reason and not passed) else ""
+        line = f"[{workload}] {klass or 'NA'} target {slo_ms}ms {metric} -> {meas_ms}ms: {'PASS' if passed else 'FAIL'}{rtxt}"
         report_lines.append(line)
         summary["items"].append(
             {
@@ -571,6 +571,7 @@ def evaluate_slos(
                 "target_ms": slo_ms,
                 "measured_ms": meas_ms,
                 "pass": bool(passed),
+                "reason": reason or None,
             }
         )
 
@@ -592,6 +593,9 @@ def evaluate_slos(
             meas_ms = http_meas.get("p95_ms")
         if slo_lat and meas_ms is not None:
             add("http-latency", "Deployment", klass, slo_lat, round(meas_ms, 2), metric, meas_ms <= slo_lat)
+        elif slo_lat:
+            # Record missing measurement as FAIL
+            add("http-latency", "Deployment", klass, slo_lat, None, metric, False, reason="no_measurement")
 
     # Stream processor (Deployment) using avg_ms
     stream_meas = measures.get("stream-processor") or {}
@@ -602,6 +606,8 @@ def evaluate_slos(
         meas_ms = stream_meas.get("avg_ms")
         if slo_lat and meas_ms is not None:
             add("stream-processor", "Deployment", klass, slo_lat, round(meas_ms, 2), "avg", meas_ms <= slo_lat)
+        elif slo_lat:
+            add("stream-processor", "Deployment", klass, slo_lat, None, "avg", False, reason="no_measurement")
 
     # Jobs (batch): deadline_ms
     for job_name in ["cpu-batch", "io-job", "memory-intensive", "ml-infer", "build-job", "stream-data-generator"]:
@@ -636,6 +642,9 @@ def evaluate_slos(
                             pass
         if dur_ms is not None:
             add(job_name, "Job", klass, deadline, int(dur_ms), "duration_ms", int(dur_ms) <= int(deadline))
+        else:
+            # No duration captured at all -> explicit FAIL
+            add(job_name, "Job", klass, deadline, None, "duration_ms", False, reason="job_never_started_or_observed")
 
     # write files
     (results_dir / "slo_summary.csv").write_text("\n".join(rows))
@@ -645,6 +654,72 @@ def evaluate_slos(
 
 
 # -------------------- Orchestration --------------------
+def deploy_local_load(
+        apps_v1: client.AppsV1Api, ns: str, profile: str
+):
+    """Deploys a continuous CPU load generator to the local namespace."""
+    if profile == "none":
+        return
+
+    log(f"Deploying local CPU load profile: {profile}")
+
+    profiles = {
+        "low": {"replicas": 1, "cpu_load": 50, "cpu_request": "500m", "cpu_limit": "1"},
+        "medium": {"replicas": 2, "cpu_load": 75, "cpu_request": "750m", "cpu_limit": "1"},
+        "high": {"replicas": 4, "cpu_load": 90, "cpu_request": "900m", "cpu_limit": "1"},
+    }
+
+    config = profiles.get(profile)
+    if not config:
+        log(f"Unknown load profile '{profile}', skipping.")
+        return
+
+    body = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "local-cpu-load", "labels": {"app": "local-cpu-load"}},
+        "spec": {
+            "replicas": config["replicas"],
+            "selector": {"matchLabels": {"app": "local-cpu-load"}},
+            "template": {
+                "metadata": {"labels": {"app": "local-cpu-load"}},
+                "spec": {
+                    "restartPolicy": "Always",
+                    "containers": [
+                        {
+                            "name": "stress",
+                            "image": "debian:bookworm-slim",
+                            "command": [
+                                "bash",
+                                "-c",
+                                (
+                                    "apt-get update -y && apt-get install -y --no-install-recommends stress-ng && "
+                                    f"stress-ng --cpu 0 --cpu-load {config['cpu_load']} --timeout 0s"
+                                ),
+                            ],
+                            "resources": {
+                                "requests": {"cpu": config["cpu_request"], "memory": "128Mi"},
+                                "limits": {"cpu": config["cpu_limit"], "memory": "256Mi"},
+                            },
+                        }
+                    ],
+                },
+            },
+        },
+    }
+
+    try:
+        apps_v1.create_namespaced_deployment(namespace=ns, body=body)
+        wait_deployment_ready(apps_v1, ns, "local-cpu-load", 240)
+        log(f"Local CPU load profile '{profile}' is active.")
+    except ApiException as e:
+        if e.status == 409: # Already exists
+            log("Local load deployment already exists. Skipping creation.")
+        else:
+            log(f"Error deploying local load: {e}")
+            raise
+
+
 def deploy_and_wait(ns_offloaded: str, ns_local: str, manifests_dir: Path, args: argparse.Namespace):
     v1 = client.CoreV1Api()
     apps_v1 = client.AppsV1Api()
@@ -825,6 +900,18 @@ def get_nodes_info(v1: client.CoreV1Api) -> str:
 
 def cleanup_workloads(ns_offloaded: str, ns_local: str, manifests_dir: Path, args: argparse.Namespace):
     log(f"Cleaning up workloads in namespaces {ns_offloaded}, {ns_local}...")
+    # Clean up the local load generator if it was deployed
+    if args.local_load_profile != "none":
+        try:
+            apps_v1 = client.AppsV1Api()
+            log("Deleting local CPU load generator deployment...")
+            apps_v1.delete_namespaced_deployment(name="local-cpu-load", namespace=ns_local)
+        except ApiException as e:
+            if e.status != 404:
+                log(f"Warning: could not delete local-cpu-load deployment: {e}")
+        except Exception as e:
+            log(f"Warning: error during local load cleanup: {e}")
+
     paths = [
         manifests_dir / args.http_latency_file,
         manifests_dir / args.cpu_batch_file,
@@ -834,7 +921,7 @@ def cleanup_workloads(ns_offloaded: str, ns_local: str, manifests_dir: Path, arg
         manifests_dir / args.stream_processor_file,
         manifests_dir / args.build_job_file,
         manifests_dir / args.toolbox_file,
-    ]
+        ]
     for p in paths:
         if file_exists(p):
             k_delete(ns_offloaded, ns_local, p)
@@ -1120,7 +1207,7 @@ def wan_apply_and_record(results_dir: Path, router: str, profile: str) -> dict:
             router,
             "sudo -n /usr/local/sbin/wan/apply_wan.sh "
             + shlex.quote(profile),
-        )
+            )
         meta["applied"] = True
         # Save env
         env_txt = ssh_run(router, "cat /etc/wan/env || true", timeout=5)
@@ -1242,7 +1329,7 @@ def parse_args() -> argparse.Namespace:
     params.add_argument(
         "--timeout-job-sec",
         type=int,
-        default=900,
+        default=600,
         help="Timeout in seconds for waiting on batch jobs to complete.",
     )
     params.add_argument(
@@ -1271,6 +1358,15 @@ def parse_args() -> argparse.Namespace:
     wan.add_argument("--wan-verify", action="store_true", help="Verify WAN with a short ping from toolbox")
     wan.add_argument("--wan-verify-target", default="", help="IP to ping for verification (e.g., a cloud node IP)")
 
+    # Local Load Generation
+    load = parser.add_argument_group("Local Load Generation")
+    load.add_argument(
+        "--local-load-profile",
+        default="none",
+        choices=["none", "low", "medium", "high"],
+        help="Apply a CPU load profile to the local (edge) cluster to simulate background activity.",
+    )
+
     return parser.parse_args()
 
 
@@ -1293,6 +1389,7 @@ def main():
         "namespace_offloaded": ns_offloaded,
         "namespace_local": ns_local,
         "latency_policy": args.latency_policy_metric,
+        "local_load_profile": args.local_load_profile,
         "wan": {
             "router": args.wan_router,
             "profile": args.wan_profile,
@@ -1319,6 +1416,10 @@ def main():
 
     ensure_namespace(v1, ns_offloaded)
     ensure_namespace(v1, ns_local)
+
+    # Deploy local load generator BEFORE other workloads
+    if args.local_load_profile != "none":
+        deploy_local_load(apps_v1, ns_local, args.local_load_profile)
 
     # Optionally apply WAN profile on router BEFORE deployments
     if args.wan_router and args.wan_profile and args.wan_profile != "none":
@@ -1380,6 +1481,15 @@ def main():
         toolbox_exec(v1, ns_local, f"curl -sf {stream_svc_url}/health", check=False)
     except Exception:
         pass
+
+    api_gateway_url = f"http://api-gateway.{ns_offloaded}:8080/aggregate"
+    log(f"Testing API Gateway (multi-hop latency)...")
+    out = toolbox_exec(
+        v1, ns_local,
+        f"/hey -z 30s -q 10 -c 10 {api_gateway_url}",
+        check=False
+    )
+    (results_dir / "api_gateway_benchmark.txt").write_text(out)
 
     # Jobs (wait + logs)
     # Offloaded jobs

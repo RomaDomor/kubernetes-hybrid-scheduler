@@ -4,9 +4,9 @@ metadata:
   name: cpu-batch
   labels: { app: cpu-batch }
   annotations:
-    slo.class: "batch"
-    slo.deadline.ms: "180000"          # tightened from 300000
-    slo.max-offload-penalty.ms: "500"
+    slo.hybrid.io/class: "batch"
+    slo.deadline.ms: "100000"
+    slo.hybrid.io/max-offload-penalty.ms: "500"
 spec:
   backoffLimit: 0
   template:
@@ -16,23 +16,23 @@ spec:
       restartPolicy: Never
       containers:
         - name: worker
-          image: debian:bookworm-slim
+          image: wdhif/stress-ng:latest  # pin a specific tag for reproducibility
           env:
             - name: CPU_WKRS
-              value: "4"
+              value: "2"
             - name: CPU_LOAD
-              value: "90"
+              value: "95"
             - name: CPU_SEC
-              value: "180"
-          command:
-            - bash
-            - -c
-            - |
-              set -euo pipefail
-              apt-get update -y
-              apt-get install -y --no-install-recommends stress-ng ca-certificates
-              update-ca-certificates
-              stress-ng --cpu ${CPU_WKRS} --cpu-load ${CPU_LOAD} --timeout ${CPU_SEC}s --metrics-brief
+              value: "90"
+          # The image entrypoint is `stress-ng`, so we only pass args:
+          args:
+            - --cpu
+            - "$(CPU_WKRS)"
+            - --cpu-load
+            - "$(CPU_LOAD)"
+            - --timeout
+            - "$(CPU_SEC)s"
+            - --metrics-brief
           resources:
-            requests: { cpu: "800m", memory: "256Mi" }
-            limits:   { cpu: "2",    memory: "512Mi" }
+            requests: { cpu: "1500m", memory: "256Mi" }
+            limits:   { cpu: "2",      memory: "512Mi" }

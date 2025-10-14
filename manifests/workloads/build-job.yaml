@@ -4,11 +4,12 @@ metadata:
   name: build-job
   labels: { app: build-job }
   annotations:
-    slo.class: "batch"
-    slo.deadline.ms: "300000"          # 5 min
-    slo.max-offload-penalty.ms: "800"
+    slo.hybrid.io/class: "batch"
+    slo.deadline.ms: "150000"
+    slo.hybrid.io/max-offload-penalty.ms: "800"
 spec:
   backoffLimit: 0
+  parallelism: 2
   template:
     spec:
       restartPolicy: Never
