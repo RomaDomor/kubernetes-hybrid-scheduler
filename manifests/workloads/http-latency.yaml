@@ -6,7 +6,7 @@ metadata:
     app: http-latency
   annotations:
     slo.class: "latency"
-    slo.latency.ms: "80"               # tightened from 120
+    slo.latency.ms: "100"  # Up from 80
     slo.max-offload-penalty.ms: "25"
 spec:
   replicas: 1
@@ -25,7 +25,7 @@ spec:
             - containerPort: 80
           env:
             - name: CPU_SPIN_ITERS
-              value: "200000"          # tune compute in Lua loop
+              value: "50000"          # tune compute in Lua loop
           volumeMounts:
             - name: nginx-conf
               mountPath: /usr/local/openresty/nginx/conf/nginx.conf
@@ -64,7 +64,7 @@ data:
         location = /ping { return 200 "ok"; }
         location / {
           content_by_lua_block {
-            local iters = tonumber(os.getenv("CPU_SPIN_ITERS") or "200000")
+            local iters = tonumber(os.getenv("CPU_SPIN_ITERS") or "50000")
             for i=1,iters do local x = math.sin(i) end
             ngx.say("ok")
           }
