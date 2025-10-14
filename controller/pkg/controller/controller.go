@@ -67,12 +67,16 @@ func NewController(
 	klog.Info("Setting up event handlers")
 
 	// Watch for new or updated Pods
-	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err := podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueuePod,
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueuePod(new)
 		},
 	})
+
+	if err != nil {
+		return nil
+	}
 
 	return controller
 }

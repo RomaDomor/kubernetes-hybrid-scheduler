@@ -124,7 +124,7 @@ func replaceAll(s, old, new string) string {
 }
 
 func (c *Controller) recordEvent(pod *corev1.Pod, eventType, reason, message string) {
-	c.kubeclientset.CoreV1().Events(pod.Namespace).Create(
+	_, err := c.kubeclientset.CoreV1().Events(pod.Namespace).Create(
 		context.TODO(),
 		&corev1.Event{
 			ObjectMeta: metav1.ObjectMeta{
@@ -147,4 +147,7 @@ func (c *Controller) recordEvent(pod *corev1.Pod, eventType, reason, message str
 		},
 		metav1.CreateOptions{},
 	)
+	if err != nil {
+		return
+	}
 }
