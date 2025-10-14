@@ -16,7 +16,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: worker
-          image: debian:bookworm-slim
+          image: wdhif/stress-ng:latest  # pin a specific tag for reproducibility
           env:
             - name: CPU_WKRS
               value: "2"
@@ -24,15 +24,15 @@ spec:
               value: "95"
             - name: CPU_SEC
               value: "90"
-          command:
-            - bash
-            - -c
-            - |
-              set -euo pipefail
-              apt-get update -y
-              apt-get install -y --no-install-recommends stress-ng ca-certificates
-              update-ca-certificates
-              stress-ng --cpu ${CPU_WKRS} --cpu-load ${CPU_LOAD} --timeout ${CPU_SEC}s --metrics-brief
+          # The image entrypoint is `stress-ng`, so we only pass args:
+          args:
+            - --cpu
+            - "$(CPU_WKRS)"
+            - --cpu-load
+            - "$(CPU_LOAD)"
+            - --timeout
+            - "$(CPU_SEC)s"
+            - --metrics-brief
           resources:
-            requests: { cpu: "1500m", memory: "256Mi" }  # Up from 800m
+            requests: { cpu: "1500m", memory: "256Mi" }
             limits:   { cpu: "2",      memory: "512Mi" }
