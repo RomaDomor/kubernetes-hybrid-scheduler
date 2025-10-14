@@ -5,9 +5,9 @@ metadata:
   labels:
     app: http-latency
   annotations:
-    slo.class: "latency"
-    slo.latency.ms: "100"  # Up from 80
-    slo.max-offload-penalty.ms: "25"
+    slo.hybrid.io/class: "latency"
+    slo.hybrid.io/latency.ms: "100"  # Up from 80
+    slo.hybrid.io/max-offload-penalty.ms: "25"
 spec:
   replicas: 1
   selector:

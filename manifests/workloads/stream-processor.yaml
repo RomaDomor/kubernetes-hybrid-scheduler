@@ -5,9 +5,9 @@ metadata:
   labels:
     app: stream-processor
   annotations:
-    slo.class: "latency"
-    slo.latency.ms: "50"
-    slo.max-offload-penalty.ms: "15"
+    slo.hybrid.io/class: "latency"
+    slo.hybrid.io/latency.ms: "50"
+    slo.hybrid.io/max-offload-penalty.ms: "15"
 spec:
   replicas: 1
   selector:
@@ -114,9 +114,9 @@ metadata:
   labels:
     app: stream-data-generator
   annotations:
-    slo.class: "latency"
-    slo.latency.ms: "100"
-    slo.max-offload-penalty.ms: "25"
+    slo.hybrid.io/class: "latency"
+    slo.hybrid.io/latency.ms: "100"
+    slo.hybrid.io/max-offload-penalty.ms: "25"
 spec:
   backoffLimit: 0
   template:
@@ -134,7 +134,7 @@ spec:
             - name: TEST_SEC
               value: "120"
             - name: RATE_HZ
-              value: "10"
+              value: "20"
           command:
             - bash
             - -c

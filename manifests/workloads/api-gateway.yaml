@@ -4,9 +4,9 @@ metadata:
   name: api-gateway
   labels: { app: api-gateway }
   annotations:
-    slo.class: "latency"
-    slo.latency.ms: "150"
-    slo.max-offload-penalty.ms: "50"
+    slo.hybrid.io/class: "latency"
+    slo.hybrid.io/latency.ms: "150"
+    slo.hybrid.io/max-offload-penalty.ms: "50"
 spec:
   replicas: 1
   selector:

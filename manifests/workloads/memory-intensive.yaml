@@ -4,9 +4,9 @@ metadata:
   name: memory-intensive
   labels: { app: memory-intensive }
   annotations:
-    slo.class: "batch"
-    slo.deadline.ms: "150000"          # from 180000
-    slo.max-offload-penalty.ms: "800"
+    slo.hybrid.io/class: "batch"
+    slo.deadline.ms: "100000"
+    slo.hybrid.io/max-offload-penalty.ms: "800"
 spec:
   backoffLimit: 0
   template:

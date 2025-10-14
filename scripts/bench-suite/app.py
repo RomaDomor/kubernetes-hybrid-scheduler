@@ -355,10 +355,10 @@ def build_catalog_from_manifests(
             if not kind or not obj_name:
                 continue
             ann = get_annotations(doc)
-            slo_class = ann.get("slo.class")
-            lat_ms = to_int(ann.get("slo.latency.ms"))
+            slo_class = ann.get("slo.hybrid.io/class")
+            lat_ms = to_int(ann.get("slo.hybrid.io/latency.ms"))
             ddl_ms = to_int(ann.get("slo.deadline.ms"))
-            max_offload_ms = to_int(ann.get("slo.max-offload-penalty.ms"))
+            max_offload_ms = to_int(ann.get("slo.hybrid.io/max-offload-penalty.ms"))
             catalog.append(
                 {
                     "kind": kind,

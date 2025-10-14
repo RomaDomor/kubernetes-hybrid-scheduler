@@ -5,9 +5,9 @@ metadata:
   labels:
     app: io-job
   annotations:
-    slo.class: "batch"
+    slo.hybrid.io/class: "batch"
     slo.deadline.ms: "180000"
-    slo.max-offload-penalty.ms: "1200"
+    slo.hybrid.io/max-offload-penalty.ms: "1200"
 spec:
   backoffLimit: 0
   template:

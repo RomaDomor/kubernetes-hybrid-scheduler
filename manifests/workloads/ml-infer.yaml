@@ -5,10 +5,10 @@ metadata:
   labels:
     app: ml-infer
   annotations:
-    slo.class: "ml"
-    slo.latency.ms: "250"
-    slo.deadline.ms: "60000"
-    slo.max-offload-penalty.ms: "60"
+    slo.hybrid.io/class: "ml"
+    slo.hybrid.io/latency.ms: "250"
+    slo.deadline.ms: "30000"
+    slo.hybrid.io/max-offload-penalty.ms: "60"
 spec:
   backoffLimit: 0
   template:

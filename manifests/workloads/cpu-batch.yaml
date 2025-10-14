@@ -4,9 +4,9 @@ metadata:
   name: cpu-batch
   labels: { app: cpu-batch }
   annotations:
-    slo.class: "batch"
-    slo.deadline.ms: "120000"
-    slo.max-offload-penalty.ms: "500"
+    slo.hybrid.io/class: "batch"
+    slo.deadline.ms: "100000"
+    slo.hybrid.io/max-offload-penalty.ms: "500"
 spec:
   backoffLimit: 0
   template:
