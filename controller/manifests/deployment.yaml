@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smart-scheduler-controller
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: smart-scheduler-controller
+  template:
+    metadata:
+      labels:
+        app: smart-scheduler-controller
+    spec:
+      serviceAccountName: smart-scheduler-controller
+      containers:
+        - name: controller
+          image: your-registry/smart-scheduler:v0.1
+          command:
+            - /smart-scheduler
+          args:
+            - --cloud-endpoint=$(CLOUD_ENDPOINT)
+            - --rtt-threshold=$(RTT_THRESHOLD)
+            - --loss-threshold=$(LOSS_THRESHOLD)
+            - --v=4
+          env:
+            - name: CLOUD_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: cloudEndpoint
+            - name: RTT_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: rttThresholdMs
+            - name: LOSS_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: lossThresholdPct
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
