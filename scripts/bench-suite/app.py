@@ -1473,6 +1473,15 @@ def main():
     except Exception:
         pass
 
+    api_gateway_url = f"http://api-gateway.{ns_offloaded}:8080/aggregate"
+    log(f"Testing API Gateway (multi-hop latency)...")
+    out = toolbox_exec(
+        v1, ns_local,
+        f"/hey -z 30s -q 10 -c 10 {api_gateway_url}",
+        check=False
+    )
+    (results_dir / "api_gateway_benchmark.txt").write_text(out)
+
     # Jobs (wait + logs)
     # Offloaded jobs
     for job in ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job"]:
