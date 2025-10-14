@@ -1329,7 +1329,7 @@ def parse_args() -> argparse.Namespace:
     params.add_argument(
         "--timeout-job-sec",
         type=int,
-        default=900,
+        default=600,
         help="Timeout in seconds for waiting on batch jobs to complete.",
     )
     params.add_argument(
