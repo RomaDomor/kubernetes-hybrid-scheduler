@@ -178,18 +178,9 @@ Query for free CPU: sum(kube_node_status_allocatable{resource="cpu"}) - sum(kube
 - Available bandwidth estimate (optional, future).
 
 **Source:**  
-[GUIDANCE: Specify your WAN probe mechanism. Options:
-- Simple periodic `ping` from controller pod to cloud endpoint
-- Dedicated sidecar/daemonset that runs `ping`/`iperf` and exports metrics
-- Pre-configured static values for initial testing
-  Fill in your implementation here.]
-
-**Example placeholder:**
-```
-Method: Controller runs `ping -c 5 <cloud-endpoint-ip>` every 10 seconds
-Parses avg RTT and loss% from output
+Method: Controller runs `ping -c 5 <cloud-endpoint-ip>` every 10 seconds.
+Parses avg RTT and loss% from output.
 Falls back to cached value if ping fails
-```
 
 ### 4.3 Cloud State (Optional)
 

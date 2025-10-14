@@ -3,13 +3,11 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
 
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 )
@@ -68,9 +66,9 @@ func (c *Controller) patchPod(pod *corev1.Pod, result decision.Result) error {
 
 		// Add toleration for cloud taint
 		toleration := corev1.Toleration{
-			Key:      "cloud",
+			Key:      "virtual-node.liqo.io/not-allowed",
 			Operator: corev1.TolerationOpEqual,
-			Value:    "cloud",
+			Value:    "true",
 			Effect:   corev1.TaintEffectNoSchedule,
 		}
 

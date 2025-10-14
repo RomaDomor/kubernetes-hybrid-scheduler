@@ -7,7 +7,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	coreinformers "k8s.io/client-go/informers/core/v1"
@@ -18,6 +17,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
+	"kubernetes-hybrid-scheduler/controller/pkg/slo"
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 )
 
@@ -189,7 +189,7 @@ func (c *Controller) syncHandler(key string) error {
 	}
 
 	// Parse SLO
-	slo, err := slo.ParseSLO(pod)
+	sloData, err := slo.ParseSLO(pod)
 	if err != nil {
 		c.recordEvent(pod, corev1.EventTypeWarning, "InvalidSLO", err.Error())
 		return err
@@ -209,7 +209,7 @@ func (c *Controller) syncHandler(key string) error {
 	}
 
 	// Make decision
-	result := c.decisionEngine.Decide(pod, slo, localState, wanState)
+	result := c.decisionEngine.Decide(pod, sloData, localState, wanState)
 
 	// Patch pod
 	if err := c.patchPod(pod, result); err != nil {
