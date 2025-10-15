@@ -1,4 +1,4 @@
-IMAGE = your-registry/smart-scheduler:v0.1
+IMAGE = RomaDomor/smart-scheduler:v0.1
 
 .PHONY: build
 build:
