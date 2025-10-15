@@ -1,4 +1,4 @@
-IMAGE ?= romadomor/smart-scheduler:v0.1
+IMAGE ?= romadomor/smart-scheduler:v0.2
 PLATFORM ?= linux/amd64
 LATEST_IMAGE := $(firstword $(subst :, ,$(IMAGE))):latest
 
