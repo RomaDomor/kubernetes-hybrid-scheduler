@@ -132,10 +132,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"path":  "/spec/nodeSelector/node.role~1cloud",
 			"value": "true",
 		})
-		// Add toleration for cloud taint (cloud=cloud:NoSchedule)
+		// Add toleration for cloud taint
 		tol := map[string]string{
-			"key": "cloud", "operator": "Equal", "value": "cloud", "effect": "NoSchedule",
+			"key":      "virtual-node.liqo.io/not-allowed",
+			"operator": "Equal",
+			"value":    "true",
+			"effect":   "NoSchedule",
 		}
+
 		if len(pod.Spec.Tolerations) == 0 {
 			patchOps = append(patchOps, map[string]interface{}{
 				"op":    "add",
