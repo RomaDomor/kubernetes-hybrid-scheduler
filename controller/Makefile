@@ -28,7 +28,7 @@ deploy:
 	kubectl apply -f manifests/configmap.yaml
 	kubectl apply -f manifests/service.yaml
 	@echo "=== Generating self-signed certs and applying webhook config ==="
-	./scripts/gen-certs.sh WEBHOOK_CFG=$(PWD)/manifests/webhook-config.yaml
+	WEBHOOK_CFG="$(PWD)/manifests/webhook-config.yaml" ./scripts/gen-certs.sh
 	@echo "=== Deploying controller ==="
 	kubectl apply -f manifests/deployment.yaml
 	kubectl rollout status deploy/smart-scheduler-controller -n kube-system --timeout=120s
