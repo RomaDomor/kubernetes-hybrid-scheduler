@@ -25,7 +25,7 @@ spec:
           command:
             - /smart-scheduler
           args:
-            - --v=8
+            - --v=6
           livenessProbe:
             httpGet:
               path: /healthz
