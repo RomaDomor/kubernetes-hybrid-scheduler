@@ -1,0 +1,26 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: smart-scheduler-webhook
+webhooks:
+  - name: mutate-pods.scheduling.example.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: "*"
+    objectSelector:
+      matchLabels:
+        scheduling.example.io/managed: "true"
+    clientConfig:
+      service:
+        name: smart-scheduler-webhook
+        namespace: kube-system
+        path: /mutate
+        port: 443
+      caBundle: CA_BUNDLE_PLACEHOLDER

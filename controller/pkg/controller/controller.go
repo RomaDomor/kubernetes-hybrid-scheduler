@@ -233,10 +233,10 @@ func (c *Controller) syncHandler(key string) error {
 	result := c.decisionEngine.Decide(pod, sloData, localState, wanState)
 	decisionsTotal.WithLabelValues(string(result.Location), result.Reason).Inc()
 
-	// Patch pod
-	if err := c.patchPod(pod, result); err != nil {
-		return err
-	}
+	//// Patch pod
+	//if err := c.patchPod(pod, result); err != nil {
+	//	return err
+	//}
 
 	// Log and emit event
 	klog.Infof("Scheduled pod %s/%s to %s (reason: %s, RTT: %dms)",

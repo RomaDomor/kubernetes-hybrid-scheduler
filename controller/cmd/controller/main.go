@@ -2,20 +2,23 @@ package main
 
 import (
 	"flag"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 
-	"kubernetes-hybrid-scheduler/controller/pkg/controller"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/signals"
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
+	"kubernetes-hybrid-scheduler/controller/pkg/webhook"
 )
 
 var (
@@ -91,20 +94,52 @@ func main() {
 		LossThresholdPct: lossThreshold,
 	})
 
-	// Create controller
-	ctrl := controller.NewController(
-		kubeClient,
-		podInformer,
-		nodeInformer,
-		decisionEngine,
-		telemetryCollector,
-	)
-
-	// Start informers
+	// Start informers (needed for webhook to access cached data)
+	klog.Info("Starting informers")
 	kubeInformerFactory.Start(stopCh)
 
-	// Run controller
-	if err = ctrl.Run(2, stopCh); err != nil {
-		klog.Fatalf("Error running controller: %s", err.Error())
+	// Wait for cache sync
+	klog.Info("Waiting for informer caches to sync")
+	if ok := cache.WaitForCacheSync(stopCh,
+		podInformer.Informer().HasSynced,
+		nodeInformer.Informer().HasSynced,
+	); !ok {
+		klog.Fatal("Failed to sync caches")
 	}
+	klog.Info("Caches synced successfully")
+
+	// Setup webhook and health server
+	wh := webhook.NewServer(decisionEngine, telemetryCollector)
+	mux := http.NewServeMux()
+	mux.Handle("/mutate", wh)
+	mux.HandleFunc("/healthz", healthHandler)
+	mux.HandleFunc("/readyz", readyHandler)
+	mux.Handle("/metrics", promhttp.Handler())
+
+	// Start webhook server with TLS
+	go func() {
+		srv := &http.Server{
+			Addr:    ":8443",
+			Handler: mux,
+		}
+		klog.Info("Starting webhook server on :8443")
+		if err := srv.ListenAndServeTLS("/certs/tls.crt", "/certs/tls.key"); err != nil {
+			klog.Fatalf("webhook server error: %v", err)
+		}
+	}()
+
+	// Block until signal
+	klog.Info("Webhook server running, waiting for requests...")
+	<-stopCh
+	klog.Info("Shutting down")
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ok"))
+}
+
+func readyHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ready"))
 }

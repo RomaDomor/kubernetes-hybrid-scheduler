@@ -18,8 +18,9 @@ spec:
         - name: controller
           image: romadomor/smart-scheduler:v0.1
           ports:
-            - containerPort: 8080
-              name: http
+            - containerPort: 8443
+              name: webhook
+              protocol: TCP
           command:
             - /smart-scheduler
           args:
@@ -30,13 +31,17 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8080
-            initialDelaySeconds: 10
+              port: 8443
+              scheme: HTTPS
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8080
-            periodSeconds: 5
+              port: 8443
+              scheme: HTTPS
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+              readOnly: true
           env:
             - name: CLOUD_ENDPOINT
               valueFrom:
@@ -57,3 +62,7 @@ spec:
             requests:
               cpu: 100m
               memory: 128Mi
+      volumes:
+        - name: certs
+          secret:
+            secretName: smart-scheduler-certs
