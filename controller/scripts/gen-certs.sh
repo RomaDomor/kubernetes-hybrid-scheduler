@@ -43,7 +43,7 @@ metadata:
   name: ${CSR_NAME}
 spec:
   request: $(cat server.csr | base64 | tr -d '\n')
-  signerName: kubernetes.io/kubelet-serving
+  signerName: kubernetes.io/kube-apiserver-client
   usages:
   - digital signature
   - key encipherment
