@@ -40,7 +40,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req := review.Request
 	if req == nil || req.Kind.Kind != "Pod" || req.Operation != admissionv1.Create {
 		// Allow by default if not a Pod CREATE
-		writeResponse(w, review, allow(nil))
+		writeResponse(w, review, allow())
 		return
 	}
 
@@ -53,13 +53,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Only handle managed pods
 	if pod.Labels["scheduling.example.io/managed"] != "true" {
-		writeResponse(w, review, allow(nil))
+		writeResponse(w, review, allow())
 		return
 	}
 
 	// If already decided or has nodeSelector, skip
 	if pod.Annotations != nil && pod.Annotations["scheduling.example.io/decision"] != "" {
-		writeResponse(w, review, allow(nil))
+		writeResponse(w, review, allow())
 		return
 	}
 
@@ -89,12 +89,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Deny with message? Safer: allow unchanged (fall back to default scheduler)
 		klog.Warningf("Invalid SLO for %s/%s: %v", pod.Namespace, pod.Name, err)
-		writeResponse(w, review, allow(nil))
+		writeResponse(w, review, allow())
 		return
 	}
 
 	// Decide
+	klog.Infof("SLO: deadline=%d class=%s prio=%d, WAN: rtt=%dms loss=%.2f%%",
+		sloData.DeadlineMs, sloData.Class, sloData.Priority, wan.RTTMs, wan.LossPct)
 	res := s.dec.Decide(&pod, sloData, local, wan)
+	klog.Infof("Decision for %s/%s: %s (reason=%s)", pod.Namespace, pod.Name, res.Location, res.Reason)
 
 	// Build JSON patch
 	patchOps := make([]map[string]interface{}, 0)
@@ -188,7 +191,7 @@ func writeResponse(w http.ResponseWriter, in admissionv1.AdmissionReview, resp *
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-func allow(patch []byte) *admissionv1.AdmissionResponse {
+func allow() *admissionv1.AdmissionResponse {
 	return &admissionv1.AdmissionResponse{Allowed: true}
 }
 
