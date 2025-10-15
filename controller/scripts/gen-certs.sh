@@ -4,7 +4,7 @@ set -euo pipefail
 NAMESPACE=${NAMESPACE:-kube-system}
 SERVICE=${SERVICE:-smart-scheduler-webhook}
 SECRET=${SECRET:-smart-scheduler-certs}
-WEBHOOK_CFG=${WEBHOOK_CFG:-../manifests/webhook-config.yaml}
+WEBHOOK_CFG=${WEBHOOK_CFG:-./manifests/webhook-config.yaml}
 
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
