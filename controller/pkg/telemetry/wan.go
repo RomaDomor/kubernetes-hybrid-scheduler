@@ -2,12 +2,10 @@ package telemetry
 
 import (
 	"context"
-	"os/exec"
-	"regexp"
-	"strconv"
 	"sync"
 	"time"
 
+	"github.com/go-ping/ping"
 	"k8s.io/klog/v2"
 )
 
@@ -44,21 +42,46 @@ func (w *WANProbe) startProbeLoop() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = w.refreshWANState(ctx)
 		cancel()
 	}
 }
 
-// refreshWANState performs the ping once and updates the cache
+// refreshWANState performs ICMP pings using go-ping and updates the cache
 func (w *WANProbe) refreshWANState(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "ping", "-c", "3", "-W", "2", w.cloudEndpoint)
-	output, err := cmd.CombinedOutput()
+	pinger, err := ping.NewPinger(w.cloudEndpoint)
 	if err != nil {
-		klog.Warningf("Ping failed: %v", err)
+		klog.Warningf("NewPinger failed: %v", err)
 		return err
 	}
-	rtt, loss := parsePingOutput(string(output))
+	// If running without CAP_NET_RAW, unprivileged mode uses UDP fallback on many platforms.
+	// SetPrivileged(true) if you add NET_RAW and want raw ICMP.
+	pinger.SetPrivileged(false)
+	pinger.Count = 3
+	pinger.Timeout = 3 * time.Second
+	pinger.Interval = 300 * time.Millisecond
+
+	// Respect context cancellation (optional)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			pinger.Stop()
+		case <-done:
+		}
+	}()
+
+	if err := pinger.Run(); err != nil {
+		klog.Warningf("Ping run failed: %v", err)
+		return err
+	}
+	close(done)
+
+	stats := pinger.Statistics()
+	// Average RTT in ms; packet loss in percent
+	rtt := int(stats.AvgRtt.Milliseconds())
+	loss := float64(stats.PacketLoss)
 
 	w.cacheMu.Lock()
 	w.cache = &WANState{
@@ -72,7 +95,11 @@ func (w *WANProbe) refreshWANState(ctx context.Context) error {
 }
 
 func (w *WANProbe) GetWANState(ctx context.Context) (*WANState, error) {
-	if time.Since(w.cache.Timestamp) > w.cacheTTL {
+	w.cacheMu.RLock()
+	stale := time.Since(w.cache.Timestamp) > w.cacheTTL
+	w.cacheMu.RUnlock()
+
+	if stale {
 		klog.Warning("WAN cache stale, using pessimistic defaults")
 		return &WANState{RTTMs: 999, LossPct: 100}, nil
 	}
@@ -88,26 +115,4 @@ func (w *WANProbe) GetCachedWANState() *WANState {
 		return &WANState{RTTMs: 999, LossPct: 100}
 	}
 	return w.cache
-}
-
-func parsePingOutput(output string) (rtt int, loss float64) {
-	// Example: "rtt min/avg/max/mdev = 12.345/23.456/34.567/5.678 ms"
-	rttRegex := regexp.MustCompile(`rtt min/avg/max/mdev = [\d.]+/([\d.]+)/`)
-	if match := rttRegex.FindStringSubmatch(output); len(match) > 1 {
-		if val, err := strconv.ParseFloat(match[1], 64); err == nil {
-			rtt = int(val)
-		}
-	}
-
-	// Example: "3 packets transmitted, 2 received, 33% packet loss"
-	lossRegex := regexp.MustCompile(`([\d.]+)% packet loss`)
-	if match := lossRegex.FindStringSubmatch(output); len(match) > 1 {
-		loss, _ = strconv.ParseFloat(match[1], 64)
-	}
-
-	if rtt == 0 {
-		rtt = 999 // fallback
-	}
-
-	return rtt, loss
 }
