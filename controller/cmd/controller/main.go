@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
@@ -49,12 +52,39 @@ func main() {
 
 	stopCh := signals.SetupSignalHandler()
 
-	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
-	if err != nil {
-		klog.Fatalf("Error building kubeconfig: %v", err)
+	var cfg *rest.Config
+	var err error
+	if masterURL == "" && kubeconfig == "" {
+		cfg, err = rest.InClusterConfig()
+		if err != nil {
+			klog.Fatalf("Error building in-cluster config: %v", err)
+		}
+	} else {
+		cfg, err = clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
+		if err != nil {
+			klog.Fatalf("Error building kubeconfig: %v", err)
+		}
 	}
+	klog.Infof("Using API host: %s", cfg.Host)
+
+	discoveryClient := discovery.NewDiscoveryClientForConfigOrDie(cfg)
+	_, serverVersionErr := discoveryClient.ServerVersion()
+	if serverVersionErr != nil {
+		klog.Errorf("Direct API call failed: %v", serverVersionErr)
+	}
+
 	kubeClient := kubernetes.NewForConfigOrDie(cfg)
 	metricsClient := metricsv.NewForConfigOrDie(cfg)
+
+	// Sanity check API access to surface RBAC/network errors early
+	ctx, cancelList := context.WithTimeout(context.Background(), 10*time.Second)
+	if _, err := kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		klog.Errorf("Preflight: listing nodes failed: %v", err)
+	}
+	if _, err := kubeClient.CoreV1().Pods("").List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		klog.Errorf("Preflight: listing pods failed: %v", err)
+	}
+	cancelList()
 
 	informerFactory := informers.NewSharedInformerFactory(kubeClient, 30*time.Second)
 	podInformer := informerFactory.Core().V1().Pods()
@@ -62,19 +92,30 @@ func main() {
 
 	klog.Info("Starting informers")
 	informerFactory.Start(stopCh)
-	synced := cache.WaitForCacheSync(
-		stopCh,
-		podInformer.Informer().HasSynced,
-		nodeInformer.Informer().HasSynced,
-	)
+	podsHasSynced := podInformer.Informer().HasSynced
+	nodesHasSynced := nodeInformer.Informer().HasSynced
+
+	// Try once and log per-informer status to aid debugging
+	synced := cache.WaitForCacheSync(stopCh, podsHasSynced, nodesHasSynced)
 	if !synced {
-		klog.Errorf("Cache sync failed. podsSynced=%v nodesSynced=%v",
-			podInformer.Informer().HasSynced(),
-			nodeInformer.Informer().HasSynced(),
-		)
-		klog.Fatal("Failed to sync informer caches")
+		klog.Warning("WaitForCacheSync returned false; continuing to retry in background")
+		// Keep retrying without crashing; emit periodic status
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					klog.Warningf("Informer sync status: pods=%v nodes=%v",
+						podsHasSynced(), nodesHasSynced())
+				case <-stopCh:
+					return
+				}
+			}
+		}()
+	} else {
+		klog.Info("Informer caches synced")
 	}
-	klog.Info("Informer caches synced")
 
 	localCollector := telemetry.NewLocalCollector(kubeClient, metricsClient, podInformer, nodeInformer)
 	wanProbe := telemetry.NewWANProbe(cloudEndpoint, 60*time.Second)
@@ -86,6 +127,20 @@ func main() {
 		RTTThresholdMs:   rttThreshold,
 		LossThresholdPct: lossThreshold,
 	})
+
+	// Preflight API checks to surface RBAC/network issues early (non-fatal)
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err1 := kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 1})
+		_, err2 := kubeClient.CoreV1().Pods("").List(ctx, metav1.ListOptions{Limit: 1})
+		if err1 != nil {
+			klog.Errorf("Preflight: list nodes failed: %v", err1)
+		}
+		if err2 != nil {
+			klog.Errorf("Preflight: list pods failed: %v", err2)
+		}
+		cancel()
+	}
 
 	// TLS webhook server (8443)
 	wh := webhook.NewServer(decisionEngine, telemetryCollector)
@@ -104,6 +159,20 @@ func main() {
 		klog.Info("Starting webhook server on :8443 (TLS)")
 		if err := webhookSrv.ListenAndServeTLS("/certs/tls.crt", "/certs/tls.key"); err != nil {
 			klog.Fatalf("Webhook server failed: %v", err)
+		}
+	}()
+
+	// Periodic log of sync status (helps diagnose if stuck)
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				klog.V(3).Infof("Informer sync status: pods=%v nodes=%v", podsHasSynced(), nodesHasSynced())
+			case <-stopCh:
+				return
+			}
 		}
 	}()
 
