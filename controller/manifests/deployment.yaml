@@ -27,17 +27,23 @@ spec:
           args:
             - --v=8
           livenessProbe:
-            initialDelaySeconds: 20
             httpGet:
               path: /healthz
               port: 8443
               scheme: HTTPS
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
           readinessProbe:
-            initialDelaySeconds: 15
             httpGet:
               path: /readyz
               port: 8443
               scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
           volumeMounts:
             - name: certs
               mountPath: /certs
