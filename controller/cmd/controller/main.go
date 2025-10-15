@@ -62,9 +62,16 @@ func main() {
 
 	klog.Info("Starting informers")
 	informerFactory.Start(stopCh)
-	if !cache.WaitForCacheSync(stopCh,
+	synced := cache.WaitForCacheSync(
+		stopCh,
 		podInformer.Informer().HasSynced,
-		nodeInformer.Informer().HasSynced) {
+		nodeInformer.Informer().HasSynced,
+	)
+	if !synced {
+		klog.Errorf("Cache sync failed. podsSynced=%v nodesSynced=%v",
+			podInformer.Informer().HasSynced(),
+			nodeInformer.Informer().HasSynced(),
+		)
 		klog.Fatal("Failed to sync informer caches")
 	}
 	klog.Info("Informer caches synced")
