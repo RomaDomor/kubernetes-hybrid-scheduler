@@ -17,7 +17,7 @@ type WANProbe struct {
 }
 
 func NewWANProbe(endpoint string, ttl time.Duration) *WANProbe {
-	return &WANProbe{
+	p := &WANProbe{
 		cloudEndpoint: endpoint,
 		cacheTTL:      ttl,
 		cache: &WANState{
@@ -25,33 +25,51 @@ func NewWANProbe(endpoint string, ttl time.Duration) *WANProbe {
 			LossPct: 100,
 		},
 	}
+	go p.startProbeLoop()
+	return p
 }
 
-func (w *WANProbe) GetWANState(ctx context.Context) (*WANState, error) {
-	// Run ping
+// Background loop that refreshes the WAN cache periodically
+func (w *WANProbe) startProbeLoop() {
+	// Small random initial delay helps avoid sync if multiple replicas run
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		_ = w.refreshWANState(ctx)
+		cancel()
+	}
+}
+
+// refreshWANState performs the ping once and updates the cache
+func (w *WANProbe) refreshWANState(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "ping", "-c", "3", "-W", "2", w.cloudEndpoint)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		klog.Warningf("Ping failed: %v", err)
-		return w.cache, err
+		return err
 	}
-
-	// Parse output (Linux format)
 	rtt, loss := parsePingOutput(string(output))
-
-	state := &WANState{
+	w.cache = &WANState{
 		RTTMs:     rtt,
 		LossPct:   loss,
 		Timestamp: time.Now(),
 	}
-
-	w.cache = state
-	return state, nil
+	return nil
 }
 
-func (w *WANProbe) GetCachedWANState() *WANState {
+func (w *WANProbe) GetWANState(ctx context.Context) (*WANState, error) {
 	if time.Since(w.cache.Timestamp) > w.cacheTTL {
 		klog.Warning("WAN cache stale, using pessimistic defaults")
+		return &WANState{RTTMs: 999, LossPct: 100}, nil
+	}
+	return w.cache, nil
+}
+
+// GetCachedWANState returns the last cached WAN state without any freshness check.
+// Used as a fallback by the controller when active collection fails.
+func (w *WANProbe) GetCachedWANState() *WANState {
+	if w.cache == nil {
 		return &WANState{RTTMs: 999, LossPct: 100}
 	}
 	return w.cache

@@ -2,6 +2,8 @@ package main
 
 import (
 	"flag"
+	"os"
+	"strconv"
 	"time"
 
 	"k8s.io/client-go/informers"
@@ -26,6 +28,22 @@ var (
 
 func main() {
 	klog.InitFlags(nil)
+
+	// Set defaults from env vars first
+	if val := os.Getenv("RTT_THRESHOLD"); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil {
+			rttThreshold = parsed
+		}
+	}
+	if val := os.Getenv("LOSS_THRESHOLD"); val != "" {
+		if parsed, err := strconv.ParseFloat(val, 64); err == nil {
+			lossThreshold = parsed
+		}
+	}
+	if val := os.Getenv("CLOUD_ENDPOINT"); val != "" {
+		cloudEndpoint = val
+	}
+
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig")
 	flag.StringVar(&masterURL, "master", "", "Kubernetes API server URL")
 	flag.StringVar(&cloudEndpoint, "cloud-endpoint", "10.0.1.100", "Cloud endpoint IP for WAN probe")
@@ -58,7 +76,12 @@ func main() {
 	nodeInformer := kubeInformerFactory.Core().V1().Nodes()
 
 	// Create telemetry collectors
-	localCollector := telemetry.NewLocalCollector(kubeClient, metricsClient)
+	localCollector := telemetry.NewLocalCollector(
+		kubeClient,
+		metricsClient,
+		podInformer,
+		nodeInformer,
+	)
 	wanProbe := telemetry.NewWANProbe(cloudEndpoint, time.Second*60)
 	telemetryCollector := telemetry.NewCombinedCollector(localCollector, wanProbe)
 

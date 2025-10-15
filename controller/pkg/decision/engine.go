@@ -122,6 +122,9 @@ func (e *Engine) estimateProcTime(pod *corev1.Pod) float64 {
 func (e *Engine) estimateQueueWait(pod *corev1.Pod, local *telemetry.LocalState) float64 {
 	// Simplified: pendingCount × avgProcTime
 	class := pod.Annotations["slo.hybrid.io/class"]
+	if local.PendingPodsPerClass == nil {
+		return 0
+	}
 	pendingCount := local.PendingPodsPerClass[class]
 	avgProc := e.estimateProcTime(pod)
 	return float64(pendingCount) * avgProc

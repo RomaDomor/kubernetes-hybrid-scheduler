@@ -157,18 +157,14 @@ After making a decision, the controller annotates the pod:
 - Number of pending pods of the same SLO class.
 - Historical average processing time per workload class.
 
-**Source:**  
-[GUIDANCE: Specify how you will collect this. Options:
-- Kubernetes Metrics API (`kubectl top nodes`)
-- Prometheus with node-exporter and kube-state-metrics
-- Custom metrics adapter
-  Fill in your choice and endpoint/query here.]
+**Source:** Kubernetes Metrics API via metrics.k8s.io client.
 
-**Example placeholder:**
-```
-Source: Prometheus at http://prometheus.edge-cluster.svc:9090
-Query for free CPU: sum(kube_node_status_allocatable{resource="cpu"}) - sum(kube_pod_container_resource_requests{resource="cpu"})
-```
+**Implementation:**
+- CPU/Memory: NodeMetricses() API with label selector `node.role/edge=true`
+- Pending pods: In-memory filtering via informer cache (PodLister)
+- Fallback: Returns last cached state if metrics unavailable (warn + continue)
+
+**Code:** See pkg/telemetry/local.go GetLocalState()
 
 ### 4.2 WAN State
 
@@ -177,10 +173,15 @@ Query for free CPU: sum(kube_node_status_allocatable{resource="cpu"}) - sum(kube
 - Packet loss percentage (optional).
 - Available bandwidth estimate (optional, future).
 
-**Source:**  
-Method: Controller runs `ping -c 5 <cloud-endpoint-ip>` every 10 seconds.
-Parses avg RTT and loss% from output.
-Falls back to cached value if ping fails
+**Source:** Direct ping execution in background goroutine.
+
+**Implementation:**
+- Command: `ping -c 3 -W 2 <cloudEndpoint>`
+- Frequency: Every 10 seconds (configurable via cacheTTL)
+- Parsing: Regex extraction of avg RTT and packet loss%
+- Fallback: Pessimistic defaults (RTT=999ms, Loss=100%) if stale >60s
+
+**Code:** See pkg/telemetry/wan.go refreshWANState()
 
 ### 4.3 Cloud State (Optional)
 
@@ -208,52 +209,34 @@ f(Pod, SLO, LocalState, WANState) → {EDGE, CLOUD}
 
 ### 5.2 Estimation Models
 
-**Processing Time Estimates:**
-
-[GUIDANCE: Define how you estimate execution time. Options:
-- Use a fixed lookup table per workload class
-- Linear model based on CPU request: `procTime = α × cpuRequest + β`
-- Historical profiling from previous runs (requires database)
-  Start simple; fill in your model here.]
-
-**Example placeholder:**
-```python
-procTimeEdge(pod):
-  class = pod.annotations["slo.hybrid.io/class"]
-  cpuRequest = pod.spec.containers[0].resources.requests.cpu  # in millicores
-  
-  if class == "latency":
-    return 0.5 * cpuRequest + 20  # ms
-  elif class == "throughput":
-    return 1.0 * cpuRequest + 50
-  elif class == "batch":
-    return 2.0 * cpuRequest + 100
+**Processing Time:**
+```go
+procTime(class, cpuRequest) = {
+latency:    0.5 × cpuRequest + 20 ms
+throughput: 1.0 × cpuRequest + 50 ms
+batch:      2.0 × cpuRequest + 100 ms
+}
 ```
 
-**Queue Wait Estimates:**
+**Queue Wait:**
 
-[GUIDANCE: Model congestion. Simple approach:
-`queueWait = pendingPodsOfSameClass × avgProcTime`
-Fill in your formula.]
-
-**Example placeholder:**
-```python
-queueWaitEdge(pod):
-  pendingCount = len(getPendingPods(class=pod.class, location="edge"))
-  return pendingCount * avgProcTimeEdge(pod.class)
+```go
+queueWait(class) = pendingPodsOfClass × avgProcTime(class)
 ```
 
 **WAN Overhead:**
 
 For request-response workloads:
 ```
-wanOverhead = 2 × RTT  (round-trip)
+wanOverhead = 2 × RTT  (round-trip for request-response)
 ```
 
 For batch jobs:
 ```
 wanOverhead = RTT  (data upload/result download; simplify for now)
 ```
+**Code:** See pkg/decision/engine.go estimation functions
+
 
 ### 5.3 Feasibility Checks
 
@@ -278,7 +261,6 @@ def isCloudFeasible(pod, wanState, slo):
 
 **Thresholds (initial):**
 
-[GUIDANCE: Set initial conservative values; tune after experiments. Fill these in based on your testbed WAN profile.]
 
 ```python
 RTT_THRESHOLD = 100  # ms

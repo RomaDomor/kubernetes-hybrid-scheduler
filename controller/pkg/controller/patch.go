@@ -3,11 +3,13 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 )
@@ -104,23 +106,9 @@ func (c *Controller) patchPod(pod *corev1.Pod, result decision.Result) error {
 }
 
 func escapeJSONPointer(s string) string {
-	// JSON Pointer escaping: / -> ~1, ~ -> ~0
-	s = replaceAll(s, "~", "~0")
-	s = replaceAll(s, "/", "~1")
+	s = strings.ReplaceAll(s, "~", "~0")
+	s = strings.ReplaceAll(s, "/", "~1")
 	return s
-}
-
-func replaceAll(s, old, new string) string {
-	result := ""
-	for i := 0; i < len(s); i++ {
-		if i+len(old) <= len(s) && s[i:i+len(old)] == old {
-			result += new
-			i += len(old) - 1
-		} else {
-			result += string(s[i])
-		}
-	}
-	return result
 }
 
 func (c *Controller) recordEvent(pod *corev1.Pod, eventType, reason, message string) {
@@ -148,6 +136,6 @@ func (c *Controller) recordEvent(pod *corev1.Pod, eventType, reason, message str
 		metav1.CreateOptions{},
 	)
 	if err != nil {
-		return
+		klog.Warningf("Failed to record event: %v", err)
 	}
 }

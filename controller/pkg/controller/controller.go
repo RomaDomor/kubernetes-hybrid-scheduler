@@ -3,10 +3,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	coreinformers "k8s.io/client-go/informers/core/v1"
@@ -117,6 +121,12 @@ func (c *Controller) Run(workers int, stopCh <-chan struct{}) error {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
+	if err := c.validateNodeLabels(); err != nil {
+		return fmt.Errorf("node validation failed: %w", err)
+	}
+
+	go c.startHealthServer()
+
 	klog.Info("Starting workers")
 	for i := 0; i < workers; i++ {
 		go wait.Until(c.runWorker, time.Millisecond*200, stopCh) // Your polling interval
@@ -171,6 +181,11 @@ func (c *Controller) processNextWorkItem() bool {
 }
 
 func (c *Controller) syncHandler(key string) error {
+	start := time.Now()
+	defer func() {
+		decisionDuration.Observe(time.Since(start).Seconds())
+	}()
+
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))
@@ -203,17 +218,20 @@ func (c *Controller) syncHandler(key string) error {
 	localState, err := c.telemetry.GetLocalState(context.Background())
 	if err != nil {
 		klog.Warningf("Failed to get local telemetry, using fallback: %v", err)
+		telemetryErrors.WithLabelValues("local").Inc()
 		localState = c.telemetry.GetCachedLocalState()
 	}
 
 	wanState, err := c.telemetry.GetWANState(context.Background())
 	if err != nil {
 		klog.Warningf("Failed to get WAN telemetry, using fallback: %v", err)
+		telemetryErrors.WithLabelValues("wan").Inc()
 		wanState = c.telemetry.GetCachedWANState()
 	}
 
 	// Make decision
 	result := c.decisionEngine.Decide(pod, sloData, localState, wanState)
+	decisionsTotal.WithLabelValues(string(result.Location), result.Reason).Inc()
 
 	// Patch pod
 	if err := c.patchPod(pod, result); err != nil {
@@ -227,4 +245,70 @@ func (c *Controller) syncHandler(key string) error {
 		fmt.Sprintf("Assigned to %s: %s", result.Location, result.Reason))
 
 	return nil
+}
+
+func (c *Controller) validateNodeLabels() error {
+	edgeSelector, _ := labels.Parse("node.role/edge=true")
+	edgeNodes, err := c.nodesLister.List(edgeSelector)
+	if err != nil || len(edgeNodes) == 0 {
+		return fmt.Errorf("no edge nodes found with label node.role/edge=true")
+	}
+	klog.Infof("Found %d edge nodes", len(edgeNodes))
+
+	cloudSelector, _ := labels.Parse("node.role/cloud=true")
+	cloudNodes, err := c.nodesLister.List(cloudSelector)
+	if err != nil || len(cloudNodes) == 0 {
+		klog.Warning("No cloud nodes found; offloading will fail")
+	} else {
+		klog.Infof("Found %d cloud nodes", len(cloudNodes))
+	}
+	return nil
+}
+
+func (c *Controller) startHealthServer() {
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		// If informers are synced, we're ready
+		if c.podsSynced() && c.nodesSynced() {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	http.Handle("/metrics", promhttp.Handler())
+
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		klog.Errorf("Failed to start health server: %s", err)
+	}
+}
+
+var (
+	decisionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scheduler_decisions_total",
+			Help: "Total scheduling decisions by location and reason",
+		},
+		[]string{"location", "reason"},
+	)
+	decisionDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "scheduler_decision_duration_seconds",
+			Help:    "Time to compute scheduling decision",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+		},
+	)
+	telemetryErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scheduler_telemetry_errors_total",
+			Help: "Telemetry collection errors by type",
+		},
+		[]string{"type"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(decisionsTotal, decisionDuration, telemetryErrors)
 }

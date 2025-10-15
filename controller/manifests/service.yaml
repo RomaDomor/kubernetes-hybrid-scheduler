@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: smart-scheduler-metrics
+  namespace: kube-system
+  labels:
+    app: smart-scheduler-controller
+spec:
+  selector:
+    app: smart-scheduler-controller
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

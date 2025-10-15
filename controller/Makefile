@@ -12,6 +12,7 @@ push: build
 deploy:
 	kubectl apply -f manifests/rbac.yaml
 	kubectl apply -f manifests/configmap.yaml
+	kubectl apply -f manifests/service.yaml
 	kubectl apply -f manifests/deployment.yaml
 
 .PHONY: logs
