@@ -27,11 +27,13 @@ spec:
           args:
             - --v=6
           livenessProbe:
+            initialDelaySeconds: 20
             httpGet:
               path: /healthz
               port: 8443
               scheme: HTTPS
           readinessProbe:
+            initialDelaySeconds: 15
             httpGet:
               path: /readyz
               port: 8443
