@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +19,7 @@ type LocalCollector struct {
 	kubeClient    kubernetes.Interface
 	metricsClient metricsv.Interface
 	cache         *LocalState
+	cacheMu       sync.RWMutex // ADD THIS
 	podLister     corelisters.PodLister
 	nodeLister    corelisters.NodeLister
 }
@@ -91,10 +93,15 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		Timestamp:           time.Now(),
 	}
 
+	l.cacheMu.Lock()
 	l.cache = state
+	l.cacheMu.Unlock()
+
 	return state, nil
 }
 
 func (l *LocalCollector) GetCachedLocalState() *LocalState {
+	l.cacheMu.RLock()
+	defer l.cacheMu.RUnlock()
 	return l.cache
 }

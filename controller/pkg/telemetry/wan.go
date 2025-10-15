@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -13,6 +14,7 @@ import (
 type WANProbe struct {
 	cloudEndpoint string
 	cache         *WANState
+	cacheMu       sync.RWMutex
 	cacheTTL      time.Duration
 }
 
@@ -21,10 +23,17 @@ func NewWANProbe(endpoint string, ttl time.Duration) *WANProbe {
 		cloudEndpoint: endpoint,
 		cacheTTL:      ttl,
 		cache: &WANState{
-			RTTMs:   999, // pessimistic default
-			LossPct: 100,
+			RTTMs:     999,
+			LossPct:   100,
+			Timestamp: time.Now(),
 		},
 	}
+	// Single initial probe
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = p.refreshWANState(ctx)
+	cancel()
+
+	// Background refresh
 	go p.startProbeLoop()
 	return p
 }
@@ -50,11 +59,15 @@ func (w *WANProbe) refreshWANState(ctx context.Context) error {
 		return err
 	}
 	rtt, loss := parsePingOutput(string(output))
+
+	w.cacheMu.Lock()
 	w.cache = &WANState{
 		RTTMs:     rtt,
 		LossPct:   loss,
 		Timestamp: time.Now(),
 	}
+	w.cacheMu.Unlock()
+
 	return nil
 }
 
@@ -69,6 +82,8 @@ func (w *WANProbe) GetWANState(ctx context.Context) (*WANState, error) {
 // GetCachedWANState returns the last cached WAN state without any freshness check.
 // Used as a fallback by the controller when active collection fails.
 func (w *WANProbe) GetCachedWANState() *WANState {
+	w.cacheMu.RLock()
+	defer w.cacheMu.RUnlock()
 	if w.cache == nil {
 		return &WANState{RTTMs: 999, LossPct: 100}
 	}

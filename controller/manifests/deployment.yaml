@@ -25,9 +25,6 @@ spec:
           command:
             - /smart-scheduler
           args:
-            - --cloud-endpoint=$(CLOUD_ENDPOINT)
-            - --rtt-threshold=$(RTT_THRESHOLD)
-            - --loss-threshold=$(LOSS_THRESHOLD)
             - --v=4
           livenessProbe:
             httpGet:
