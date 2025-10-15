@@ -28,7 +28,6 @@ deploy:
 	kubectl apply -f manifests/rbac.yaml
 	kubectl apply -f manifests/configmap.yaml
 	kubectl apply -f manifests/service.yaml
-	kubectl apply -f manifests/webhook-service.yaml
 	kubectl apply -f manifests/deployment.yaml
 	./scripts/gen-certs.sh
 	kubectl rollout status deploy/smart-scheduler-controller -n kube-system
