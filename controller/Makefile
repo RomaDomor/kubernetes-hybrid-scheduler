@@ -1,4 +1,4 @@
-IMAGE = RomaDomor/smart-scheduler:v0.1
+IMAGE = romadomor/smart-scheduler:v0.1
 
 .PHONY: build
 build:

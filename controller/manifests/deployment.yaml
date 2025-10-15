@@ -16,7 +16,7 @@ spec:
       serviceAccountName: smart-scheduler-controller
       containers:
         - name: controller
-          image: your-registry/smart-scheduler:v0.1
+          image: romadomor/smart-scheduler:latest
           ports:
             - containerPort: 8080
               name: http
