@@ -67,7 +67,7 @@ This document specifies the architecture, data model, and decision logic for a K
 
 **Behavior:**
 1. Controller runs as a Deployment in the edge cluster control plane.
-2. Watches Pods in `Pending` state with label `scheduling.example.io/managed: "true"`.
+2. Watches Pods in `Pending` state with label `scheduling.hybrid.io/managed: "true"`.
 3. Reads SLO annotations and telemetry.
 4. Computes decision (EDGE or CLOUD).
 5. Patches pod with appropriate `nodeSelector` and `tolerations`.
@@ -98,7 +98,7 @@ kind: Pod
 metadata:
   name: user-request-handler
   labels:
-    scheduling.example.io/managed: "true"
+    scheduling.hybrid.io/managed: "true"
   annotations:
     slo.hybrid.io/latencyTargetMs: "80"
     slo.hybrid.io/class: "latency"
@@ -141,10 +141,10 @@ After making a decision, the controller annotates the pod:
 
 | Annotation Key                     | Example Value                          |
 |------------------------------------|----------------------------------------|
-| `scheduling.example.io/decision`   | `"edge"` or `"cloud"`                  |
-| `scheduling.example.io/timestamp`  | `"2025-10-14T16:00:00Z"`               |
-| `scheduling.example.io/reason`     | `"edge_feasible_slo_met"`              |
-| `scheduling.example.io/wanRttMs`   | `"45"`                                 |
+| `scheduling.hybrid.io/decision`   | `"edge"` or `"cloud"`                  |
+| `scheduling.hybrid.io/timestamp`  | `"2025-10-14T16:00:00Z"`               |
+| `scheduling.hybrid.io/reason`     | `"edge_feasible_slo_met"`              |
+| `scheduling.hybrid.io/wanRttMs`   | `"45"`                                 |
 
 ---
 
@@ -303,9 +303,9 @@ def decide(pod, slo, localState, wanState):
 **Reconciliation Loop:**
 1. List all Pods with:
     - Phase: `Pending`
-    - Label: `scheduling.example.io/managed: "true"`
+    - Label: `scheduling.hybrid.io/managed: "true"`
     - Field: `spec.nodeName` is empty
-2. Filter out pods that already have annotation `scheduling.example.io/decision`.
+2. Filter out pods that already have annotation `scheduling.hybrid.io/decision`.
 3. For each remaining pod, run decision function.
 4. Patch pod with nodeSelector, tolerations, and decision annotation.
 
@@ -318,9 +318,9 @@ def decide(pod, slo, localState, wanState):
 {
   "metadata": {
     "annotations": {
-      "scheduling.example.io/decision": "edge",
-      "scheduling.example.io/timestamp": "<iso8601>",
-      "scheduling.example.io/reason": "<reason-string>"
+      "scheduling.hybrid.io/decision": "edge",
+      "scheduling.hybrid.io/timestamp": "<iso8601>",
+      "scheduling.hybrid.io/reason": "<reason-string>"
     }
   },
   "spec": {
@@ -336,10 +336,10 @@ def decide(pod, slo, localState, wanState):
 {
   "metadata": {
     "annotations": {
-      "scheduling.example.io/decision": "cloud",
-      "scheduling.example.io/timestamp": "<iso8601>",
-      "scheduling.example.io/reason": "<reason-string>",
-      "scheduling.example.io/wanRttMs": "<value>"
+      "scheduling.hybrid.io/decision": "cloud",
+      "scheduling.hybrid.io/timestamp": "<iso8601>",
+      "scheduling.hybrid.io/reason": "<reason-string>",
+      "scheduling.hybrid.io/wanRttMs": "<value>"
     }
   },
   "spec": {

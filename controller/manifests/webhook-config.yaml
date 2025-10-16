@@ -3,7 +3,7 @@ kind: MutatingWebhookConfiguration
 metadata:
   name: smart-scheduler-webhook
 webhooks:
-  - name: mutate-pods.scheduling.example.io
+  - name: mutate-pods.scheduling.hybrid.io
     admissionReviewVersions: ["v1"]
     sideEffects: None
     failurePolicy: Ignore
@@ -16,7 +16,7 @@ webhooks:
         scope: "*"
     objectSelector:
       matchLabels:
-        scheduling.example.io/managed: "true"
+        scheduling.hybrid.io/managed: "true"
     clientConfig:
       service:
         name: smart-scheduler-webhook

@@ -72,7 +72,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	// Count pending pods by class using the informer cache
 	// Note: PodLister does not support field selectors; filter in-memory
 	pods, err := l.podLister.List(labels.SelectorFromSet(labels.Set{
-		"scheduling.example.io/managed": "true",
+		"scheduling.hybrid.io/managed": "true",
 	}))
 	if err != nil {
 		return l.cache, err

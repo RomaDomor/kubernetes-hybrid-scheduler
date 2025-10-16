@@ -68,7 +68,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Only process managed pods
-	if pod.Labels["scheduling.example.io/managed"] != "true" {
+	if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
 		klog.V(4).Infof("Pod %s/%s not managed, skipping",
 			pod.Namespace, pod.Name)
 		writeResponse(w, review, allow())
@@ -77,7 +77,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Skip if already decided
 	if pod.Annotations != nil &&
-		pod.Annotations["scheduling.example.io/decision"] != "" {
+		pod.Annotations["scheduling.hybrid.io/decision"] != "" {
 		klog.V(4).Infof("Pod %s/%s already decided, skipping",
 			pod.Namespace, pod.Name)
 		writeResponse(w, review, allow())
@@ -138,11 +138,11 @@ func (s *Server) buildPatchResponse(
 
 	// Add decision annotations
 	patches = append(patches,
-		addAnnotation("scheduling.example.io/decision",
+		addAnnotation("scheduling.hybrid.io/decision",
 			string(res.Location)),
-		addAnnotation("scheduling.example.io/timestamp",
+		addAnnotation("scheduling.hybrid.io/timestamp",
 			time.Now().Format(time.RFC3339)),
-		addAnnotation("scheduling.example.io/reason", res.Reason),
+		addAnnotation("scheduling.hybrid.io/reason", res.Reason),
 	)
 
 	// Ensure nodeSelector exists
