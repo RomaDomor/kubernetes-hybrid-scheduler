@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: smart-scheduler-webhook
+  namespace: kube-system
+spec:
+  selector:
+    app: smart-scheduler-controller
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+    - name: metrics
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
