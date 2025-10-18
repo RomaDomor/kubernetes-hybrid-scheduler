@@ -356,8 +356,8 @@ def build_catalog_from_manifests(
                 continue
             ann = get_annotations(doc)
             slo_class = ann.get("slo.hybrid.io/class")
-            lat_ms = to_int(ann.get("slo.hybrid.io/latency.ms"))
-            ddl_ms = to_int(ann.get("slo.deadline.ms"))
+            lat_ms = to_int(ann.get("slo.hybrid.io/latencyTargetMs"))
+            ddl_ms = to_int(ann.get("slo.hybrid.io/deadlineMs"))
             max_offload_ms = to_int(ann.get("slo.hybrid.io/max-offload-penalty.ms"))
             catalog.append(
                 {
