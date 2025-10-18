@@ -2,13 +2,16 @@ package decision
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -115,7 +118,10 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	// Check SLO compliance
 	deadlineMs, _ := parseFloat64(pod.Annotations["slo.hybrid.io/deadlineMs"])
 	totalTime := float64(queueWait) + float64(actualDuration)
-	sloMet := totalTime <= deadlineMs
+	sloMet := true
+	if deadlineMs != 0 {
+		sloMet = totalTime <= deadlineMs
+	}
 
 	// Update profile
 	key := GetProfileKey(pod, decision)
@@ -134,19 +140,41 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 }
 
 func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
-	}
-	pod.Annotations[key] = value
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	_, err := o.kubeClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
-	if err != nil {
-		klog.V(4).Infof("Failed to annotate pod %s/%s: %v",
-			pod.Namespace, pod.Name, err)
+	// Build JSON Patch ops
+	ops := []map[string]interface{}{}
+	if pod.Annotations == nil {
+		ops = append(ops, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/annotations",
+			"value": map[string]string{},
+		})
 	}
+	ops = append(ops, map[string]interface{}{
+		"op":    "add",
+		"path":  "/metadata/annotations/" + escapeJSONPointer(key),
+		"value": value,
+	})
+	patchBytes, _ := json.Marshal(ops)
+
+	for i := 0; i < 3; i++ {
+		_, err := o.kubeClient.CoreV1().Pods(pod.Namespace).Patch(
+			ctx,
+			pod.Name,
+			types.JSONPatchType,
+			patchBytes,
+			metav1.PatchOptions{},
+		)
+		if err == nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+		klog.V(5).Infof("Retrying pod annotation patch due to: %v", err)
+	}
+
+	klog.V(4).Infof("Failed to patch annotations on pod %s/%s after retries", pod.Namespace, pod.Name)
 }
 
 // Helpers
@@ -162,4 +190,10 @@ func parseFloat64(s string) (float64, error) {
 		return 0, fmt.Errorf("empty float string")
 	}
 	return strconv.ParseFloat(s, 64)
+}
+
+func escapeJSONPointer(s string) string {
+	s = strings.ReplaceAll(s, "~", "~0")
+	s = strings.ReplaceAll(s, "/", "~1")
+	return s
 }
