@@ -58,7 +58,7 @@ spec:
                 [ -n "$ok" ] && break
               done
 
-              if [ -z "$ok" ], then
+              if [ -z "$ok" ]; then
                 echo "All downloads failed - generating ${BYTES_MB:-100}MB locally"
                 dd if=/dev/urandom of=/work/blob.bin bs=1M count=${BYTES_MB:-100} status=none
               fi
