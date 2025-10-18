@@ -106,8 +106,8 @@ func main() {
 	go profileStore.StartAutoSave(kubeClient, 5*time.Minute, stopCh)
 
 	// Start pod observer for feedback collection
-	podObserver := decision.NewPodObserver(kubeClient, profileStore)
-	go podObserver.Watch(stopCh)
+	podObserver := decision.NewPodObserver(kubeClient, profileStore, podInformer)
+	go podObserver.Watch()
 
 	// Create decision engine with profile store
 	decisionEngine := decision.NewEngine(decision.Config{

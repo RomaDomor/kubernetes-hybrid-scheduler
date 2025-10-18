@@ -12,7 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/informers"
+	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
@@ -20,28 +20,36 @@ import (
 
 // PodObserver watches pod lifecycle and extracts ground truth
 type PodObserver struct {
-	kubeClient kubernetes.Interface
-	store      *ProfileStore
+	kubeClient  kubernetes.Interface
+	store       *ProfileStore
+	podInformer cache.SharedIndexInformer
 }
 
 func NewPodObserver(
 	kubeClient kubernetes.Interface,
 	profileStore *ProfileStore,
+	podInf coreinformers.PodInformer,
 ) *PodObserver {
 	return &PodObserver{
-		kubeClient: kubeClient,
-		store:      profileStore,
+		kubeClient:  kubeClient,
+		store:       profileStore,
+		podInformer: podInf.Informer(),
 	}
 }
 
 // Watch starts monitoring pod lifecycle events
-func (o *PodObserver) Watch(stopCh <-chan struct{}) {
-	factory := informers.NewSharedInformerFactory(o.kubeClient, 30*time.Second)
-	podInformer := factory.Core().V1().Pods().Informer()
-
-	_, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+func (o *PodObserver) Watch() {
+	klog.Info("PodObserver registering handlers")
+	_, err := o.podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			pod := obj.(*corev1.Pod)
+			klog.V(6).Infof("Pod add: %s phase=%s node=%s",
+				podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), pod.Status.Phase, pod.Spec.NodeName)
+		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			pod := newObj.(*corev1.Pod)
+			klog.V(6).Infof("Pod update: %s phase=%s node=%s",
+				podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), pod.Status.Phase, pod.Spec.NodeName)
 
 			// Only track managed pods with scheduling decision
 			if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
@@ -69,8 +77,7 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 		return
 	}
 
-	factory.Start(stopCh)
-	factory.WaitForCacheSync(stopCh)
+	klog.Info("PodObserver handlers registered")
 }
 
 func (o *PodObserver) recordStart(pod *corev1.Pod) {
