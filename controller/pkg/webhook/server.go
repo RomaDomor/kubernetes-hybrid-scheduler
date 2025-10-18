@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -102,18 +103,22 @@ func (s *Server) processScheduling(
 	local := s.tel.GetCachedLocalState()
 	wan := s.tel.GetCachedWANState()
 
-	// Try fresh data with timeout
-	if ls, err := s.tel.GetLocalState(ctx); err == nil {
+	// One bounded live refresh to keep admission snappy
+	ctxBound, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
+	if ls, err := s.tel.GetLocalState(ctxBound); err == nil {
 		local = ls
 	}
+	cancel()
+
+	// WAN live refresh
 	if ws, err := s.tel.GetWANState(ctx); err == nil {
 		wan = ws
 	}
 
 	// Decide
 	result := s.dec.Decide(pod, sloData, local, wan)
-	klog.Infof("Decision for %s/%s: %s (reason=%s, rtt=%dms)",
-		pod.Namespace, pod.Name, result.Location, result.Reason, wan.RTTMs)
+	klog.Infof("Decision for %s: %s (reason=%s, rtt=%dms)",
+		decision.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Location, result.Reason, wan.RTTMs)
 
 	// Build patch
 	return s.buildPatchResponse(pod, result)

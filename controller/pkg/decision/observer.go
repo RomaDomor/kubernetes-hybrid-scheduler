@@ -44,12 +44,12 @@ func (o *PodObserver) Watch() {
 		AddFunc: func(obj interface{}) {
 			pod := obj.(*corev1.Pod)
 			klog.V(6).Infof("Pod add: %s phase=%s node=%s",
-				podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), pod.Status.Phase, pod.Spec.NodeName)
+				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), pod.Status.Phase, pod.Spec.NodeName)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			pod := newObj.(*corev1.Pod)
 			klog.V(6).Infof("Pod update: %s phase=%s node=%s",
-				podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), pod.Status.Phase, pod.Spec.NodeName)
+				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), pod.Status.Phase, pod.Spec.NodeName)
 
 			// Only track managed pods with scheduling decision
 			if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
@@ -86,7 +86,7 @@ func (o *PodObserver) recordStart(pod *corev1.Pod) {
 	decisionTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/timestamp"])
 	if err != nil {
 		klog.V(4).Infof("Failed to parse decision timestamp for %s: %v",
-			podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
+			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
 		return
 	}
 
@@ -97,7 +97,7 @@ func (o *PodObserver) recordStart(pod *corev1.Pod) {
 	o.annotate(pod, "scheduling.hybrid.io/queueWaitMs", fmt.Sprintf("%d", queueWait))
 
 	klog.V(4).Infof("Pod %s started after %dms queue wait",
-		podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), queueWait)
+		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), queueWait)
 }
 
 func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
@@ -108,7 +108,7 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	startTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/actualStart"])
 	if err != nil {
 		klog.V(4).Infof("Pod %s missing start time annotation: %s",
-			podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
+			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
 		return
 	}
 
@@ -142,7 +142,7 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	recordPredictionError(key, predErr)
 
 	klog.V(3).Infof("Pod %s completed: actual=%dms predicted=%.0fms slo=%v",
-		podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), actualDuration, predictedETA, sloMet)
+		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), actualDuration, predictedETA, sloMet)
 }
 
 func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
@@ -180,7 +180,7 @@ func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
 		klog.V(5).Infof("Retrying pod annotation patch due to: %v", err)
 	}
 
-	klog.V(4).Infof("Failed to patch annotations on pod %s after retries", podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
+	klog.V(4).Infof("Failed to patch annotations on pod %s after retries", PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 }
 
 // Helpers

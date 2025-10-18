@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,6 +15,11 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+)
+
+var (
+	headroomCPUm  = int64(getEnvInt("HEADROOM_CPU_M", 200))  // 200m default
+	headroomMemMi = int64(getEnvInt("HEADROOM_MEM_MI", 256)) // 256Mi default
 )
 
 type LocalCollector struct {
@@ -75,25 +82,26 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		totalUsedMem += nm.Usage.Memory().Value() / (1024 * 1024)
 	}
 
-	// Count pending pods by class using the informer cache
+	// Count pending managed pods by class (for scheduling model) and
+	// include all pending/not-ready pods (managed and non-managed) in capacity pressure
 	var pendingCPU, pendingMem int64
-	pods, err := l.podLister.List(labels.SelectorFromSet(labels.Set{
-		"scheduling.hybrid.io/managed": "true",
-	}))
+	pods, err := l.podLister.List(labels.Everything())
 	if err != nil {
 		return l.cache, err
 	}
 
 	pendingPerClass := make(map[string]int)
 	for _, pod := range pods {
-		class := pod.Annotations["slo.hybrid.io/class"]
-
-		// Count pending per class
-		if pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" {
-			pendingPerClass[class]++
+		// managed class counts (for your Edge queue model)
+		if pod.Labels["scheduling.hybrid.io/managed"] == "true" {
+			class := pod.Annotations["slo.hybrid.io/class"]
+			if pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" {
+				pendingPerClass[class]++
+			}
 		}
 
-		// Subtract requests from pods that are not Running on edge yet
+		// Subtract requests from pods that are Pending or Running-but-not-ready
+		// on edge nodes, regardless of managed label (anticipate imminent usage)
 		consume := false
 		// If pod is not Running, consume
 		if pod.Status.Phase != corev1.PodRunning {
@@ -117,8 +125,9 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 			// If pod is already bound to an edge node, or not bound yet (NodeName empty), we consider it against edge queue
 			_, ok := edgeNodes[pod.Spec.NodeName]
 			if pod.Spec.NodeName == "" || (pod.Spec.NodeName != "" && ok) {
-				if len(pod.Spec.Containers) > 0 {
-					req := pod.Spec.Containers[0].Resources.Requests
+				// sum requests of all containers (still cheap)
+				for _, c := range pod.Spec.Containers {
+					req := c.Resources.Requests
 					pendingCPU += req.Cpu().MilliValue()
 					pendingMem += req.Memory().Value() / (1024 * 1024)
 				}
@@ -128,10 +137,14 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 
 	freeCPU := (totalAllocatableCPU - totalUsedCPU) - pendingCPU
 	freeMem := (totalAllocatableMem - totalUsedMem) - pendingMem
-	if freeCPU < 0 {
+	if freeCPU > headroomCPUm {
+		freeCPU -= headroomCPUm
+	} else {
 		freeCPU = 0
 	}
-	if freeMem < 0 {
+	if freeMem > headroomMemMi {
+		freeMem -= headroomMemMi
+	} else {
 		freeMem = 0
 	}
 
@@ -153,4 +166,13 @@ func (l *LocalCollector) GetCachedLocalState() *LocalState {
 	l.cacheMu.RLock()
 	defer l.cacheMu.RUnlock()
 	return l.cache
+}
+
+func getEnvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return def
 }

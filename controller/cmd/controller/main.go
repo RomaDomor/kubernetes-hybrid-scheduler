@@ -206,7 +206,7 @@ func main() {
 }
 
 func refreshTelemetryLoop(tel telemetry.Collector, stopCh <-chan struct{}) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	// Perform an initial refresh right away
