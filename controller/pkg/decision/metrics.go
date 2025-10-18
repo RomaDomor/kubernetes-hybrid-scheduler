@@ -1,6 +1,8 @@
 package decision
 
 import (
+	"strings"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -44,15 +46,20 @@ func (ps *ProfileStore) UpdateMetrics() {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	for _, profile := range ps.profiles {
-		// Parse key back (keyStr format: "class-tier-location")
-		// For simplicity, we'll skip parsing and use keyStr directly
-		// In production, you'd want proper parsing
+	for keyStr, profile := range ps.profiles {
+		// keyStr format: "class-tier-location"
+		parts := strings.Split(keyStr, "-")
+		class, tier, location := "unknown", "unknown", "unknown"
+		if len(parts) >= 3 {
+			class = parts[0]
+			tier = parts[1]
+			location = parts[2]
+		}
 
 		labels := prometheus.Labels{
-			"class":    "unknown",
-			"tier":     "unknown",
-			"location": "unknown",
+			"class":    class,
+			"tier":     tier,
+			"location": location,
 		}
 
 		profileCount.With(labels).Set(float64(profile.Count))

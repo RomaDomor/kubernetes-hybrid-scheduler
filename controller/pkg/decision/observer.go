@@ -72,7 +72,7 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 
 func (o *PodObserver) recordStart(pod *corev1.Pod) {
 	startTime := time.Now()
-	decisionTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/decisionTimestamp"])
+	decisionTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/timestamp"])
 	if err != nil {
 		klog.V(4).Infof("Failed to parse decision timestamp for %s/%s: %v",
 			pod.Namespace, pod.Name, err)
@@ -126,8 +126,8 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	})
 
 	// Record prediction error for metrics
-	predictionError := math.Abs(float64(actualDuration) - predictedETA)
-	recordPredictionError(key, predictionError)
+	predErr := math.Abs(float64(actualDuration) - predictedETA)
+	recordPredictionError(key, predErr)
 
 	klog.V(3).Infof("Pod %s/%s completed: actual=%dms predicted=%.0fms slo=%v",
 		pod.Namespace, pod.Name, actualDuration, predictedETA, sloMet)
@@ -149,8 +149,7 @@ func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
 	}
 }
 
-// Helper functions
-
+// Helpers
 func parseTime(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, fmt.Errorf("empty time string")

@@ -2,12 +2,14 @@ package webhook
 
 import (
 	"encoding/json"
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
+	"fmt"
 	"strings"
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+
+	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 )
 
 func (s *Server) buildPatchResponse(
@@ -25,13 +27,13 @@ func (s *Server) buildPatchResponse(
 		})
 	}
 
-	// Add decision annotations
+	// Add decision annotations (include predicted ETA)
 	patches = append(patches,
-		addAnnotation("scheduling.hybrid.io/decision",
-			string(res.Location)),
-		addAnnotation("scheduling.hybrid.io/timestamp",
-			time.Now().Format(time.RFC3339)),
+		addAnnotation("scheduling.hybrid.io/decision", string(res.Location)),
+		addAnnotation("scheduling.hybrid.io/predictedETAMs", fmt.Sprintf("%.0f", res.PredictedETAMs)),
+		addAnnotation("scheduling.hybrid.io/timestamp", time.Now().Format(time.RFC3339)),
 		addAnnotation("scheduling.hybrid.io/reason", res.Reason),
+		addAnnotation("scheduling.hybrid.io/wanRttMs", fmt.Sprintf("%d", res.WanRttMs)),
 	)
 
 	// Ensure nodeSelector exists

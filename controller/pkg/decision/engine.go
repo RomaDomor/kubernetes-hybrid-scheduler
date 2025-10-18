@@ -21,6 +21,7 @@ type Result struct {
 	Location       Location
 	Reason         string
 	PredictedETAMs float64
+	WanRttMs       int
 }
 
 type Engine struct {
@@ -35,10 +36,15 @@ type Config struct {
 }
 
 func NewEngine(config Config) *Engine {
-	return &Engine{
+	e := &Engine{
 		config:       config,
 		profileStore: config.ProfileStore,
 	}
+	if e.profileStore == nil {
+		e.profileStore = NewProfileStore()
+		klog.Warning("ProfileStore not provided; using in-memory store without persistence")
+	}
+	return e
 }
 
 type ETAEstimate struct {
@@ -54,11 +60,11 @@ func (e *Engine) Decide(
 ) Result {
 	// 1. Hard safety constraints
 	if !slo.OffloadAllowed {
-		return Result{Edge, "offload_disabled", 0}
+		return Result{Edge, "offload_disabled", 0, wan.RTTMs}
 	}
 
 	if wan.RTTMs > 300 || wan.LossPct > 10 {
-		return Result{Edge, "wan_unusable", 0}
+		return Result{Edge, "wan_unusable", 0, wan.RTTMs}
 	}
 
 	// 2. Get historical profiles for both locations
@@ -80,7 +86,6 @@ func (e *Engine) Decide(
 	if edgeConf < 0.5 || cloudConf < 0.5 {
 		if rand.Float64() < 0.2 { // 20% exploration
 			explorationBonus = 50.0
-			klog.V(4).Infof("Exploration triggered for %s", pod.Name)
 		}
 	}
 
@@ -113,16 +118,16 @@ func (e *Engine) Decide(
 		cloudScore := e.computeScore(Cloud, cloudETA, cloudConf, slo)
 
 		if edgeScore >= cloudScore {
-			return Result{Edge, "edge_preferred", edgeETA.Mean}
+			return Result{Edge, "edge_preferred", edgeETA.Mean, wan.RTTMs}
 		}
-		return Result{Cloud, "cloud_faster", cloudETA.Mean}
+		return Result{Cloud, "cloud_faster", cloudETA.Mean, wan.RTTMs}
 	}
 
 	// 7. Neither feasible: best-effort with priority tie-break
 	if slo.Priority >= 7 && cloudETA.Mean < edgeETA.Mean {
-		return Result{Cloud, "best_effort_cloud", cloudETA.Mean}
+		return Result{Cloud, "best_effort_cloud", cloudETA.Mean, wan.RTTMs}
 	}
-	return Result{Edge, "best_effort_edge", edgeETA.Mean}
+	return Result{Edge, "best_effort_edge", edgeETA.Mean, wan.RTTMs}
 }
 
 func (e *Engine) predictETA(
