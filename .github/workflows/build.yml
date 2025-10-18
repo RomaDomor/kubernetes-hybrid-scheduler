@@ -63,6 +63,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Compute lowercase owner
+        id: owner
+        shell: bash
+        run: |
+          echo "lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set IMAGE_REPO env
+        run: echo "IMAGE_REPO=ghcr.io/${{ steps.owner.outputs.lc }}/kubernetes-smart-scheduler" >> $GITHUB_ENV
+
       - name: Derive version
         id: ver
         shell: bash
