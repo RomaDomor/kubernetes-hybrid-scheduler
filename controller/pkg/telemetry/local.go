@@ -56,21 +56,27 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		return l.cache, err
 	}
 
-	var totalAllocatableCPU, totalUsedCPU int64
-	var totalAllocatableMem, totalUsedMem int64
-
+	// Build a quick lookup for edge nodes
+	edgeNodes := make(map[string]struct{}, len(nodes))
+	var totalAllocatableCPU, totalAllocatableMem int64
 	for _, node := range nodes {
+		edgeNodes[node.Name] = struct{}{}
 		totalAllocatableCPU += node.Status.Allocatable.Cpu().MilliValue()
 		totalAllocatableMem += node.Status.Allocatable.Memory().Value() / (1024 * 1024)
 	}
 
+	// Sum used only for edge nodes
+	var totalUsedCPU, totalUsedMem int64
 	for _, nm := range nodeMetrics.Items {
+		if _, ok := edgeNodes[nm.Name]; !ok {
+			continue
+		}
 		totalUsedCPU += nm.Usage.Cpu().MilliValue()
 		totalUsedMem += nm.Usage.Memory().Value() / (1024 * 1024)
 	}
 
 	// Count pending pods by class using the informer cache
-	// Note: PodLister does not support field selectors; filter in-memory
+	var pendingCPU, pendingMem int64
 	pods, err := l.podLister.List(labels.SelectorFromSet(labels.Set{
 		"scheduling.hybrid.io/managed": "true",
 	}))
@@ -80,15 +86,58 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 
 	pendingPerClass := make(map[string]int)
 	for _, pod := range pods {
+		class := pod.Annotations["slo.hybrid.io/class"]
+
+		// Count pending per class
 		if pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" {
-			class := pod.Annotations["slo.hybrid.io/class"]
 			pendingPerClass[class]++
+		}
+
+		// Subtract requests from pods that are not Running on edge yet
+		consume := false
+		// If pod is not Running, consume
+		if pod.Status.Phase != corev1.PodRunning {
+			consume = true
+		} else {
+			// optionally, if Running but containers not ready, still consume
+			// This is optional:
+			allReady := true
+			for _, cs := range pod.Status.ContainerStatuses {
+				if !cs.Ready {
+					allReady = false
+					break
+				}
+			}
+			if !allReady {
+				consume = true
+			}
+		}
+
+		if consume {
+			// If pod is already bound to an edge node, or not bound yet (NodeName empty), we consider it against edge queue
+			_, ok := edgeNodes[pod.Spec.NodeName]
+			if pod.Spec.NodeName == "" || (pod.Spec.NodeName != "" && ok) {
+				if len(pod.Spec.Containers) > 0 {
+					req := pod.Spec.Containers[0].Resources.Requests
+					pendingCPU += req.Cpu().MilliValue()
+					pendingMem += req.Memory().Value() / (1024 * 1024)
+				}
+			}
 		}
 	}
 
+	freeCPU := (totalAllocatableCPU - totalUsedCPU) - pendingCPU
+	freeMem := (totalAllocatableMem - totalUsedMem) - pendingMem
+	if freeCPU < 0 {
+		freeCPU = 0
+	}
+	if freeMem < 0 {
+		freeMem = 0
+	}
+
 	state := &LocalState{
-		FreeCPU:             totalAllocatableCPU - totalUsedCPU,
-		FreeMem:             totalAllocatableMem - totalUsedMem,
+		FreeCPU:             freeCPU,
+		FreeMem:             freeMem,
 		PendingPodsPerClass: pendingPerClass,
 		Timestamp:           time.Now(),
 	}
