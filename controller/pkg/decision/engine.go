@@ -59,10 +59,28 @@ func (e *Engine) Decide(
 	local *telemetry.LocalState,
 	wan *telemetry.WANState,
 ) Result {
+	// Defensive defaults for nil telemetry to avoid panics in tests or degraded modes
+	if wan == nil {
+		wan = &telemetry.WANState{RTTMs: 999, LossPct: 100}
+	}
+	if local == nil {
+		local = &telemetry.LocalState{
+			FreeCPU:             0,
+			FreeMem:             0,
+			PendingPodsPerClass: map[string]int{},
+		}
+	}
+
 	// Inputs summary
-	klog.V(4).Infof("Decide pod=%s/%s class=%s prio=%d deadline=%d offload=%v wan={rtt=%dms loss=%.1f%%} edge={freeCPU=%dm freeMem=%dMi pending[%s]=%d}",
+	pending := 0
+	if local.PendingPodsPerClass != nil {
+		pending = local.PendingPodsPerClass[slo.Class]
+	}
+	klog.V(4).Infof(
+		"Decide pod=%s/%s class=%s prio=%d deadline=%d offload=%v wan={rtt=%dms loss=%.1f%%} edge={freeCPU=%dm freeMem=%dMi pending[%s]=%d}",
 		pod.Namespace, pod.Name, slo.Class, slo.Priority, slo.DeadlineMs, slo.OffloadAllowed,
-		wan.RTTMs, wan.LossPct, local.FreeCPU, local.FreeMem, slo.Class, local.PendingPodsPerClass[slo.Class])
+		wan.RTTMs, wan.LossPct, local.FreeCPU, local.FreeMem, slo.Class, pending,
+	)
 
 	// 1. Hard safety constraints
 	if !slo.OffloadAllowed {
