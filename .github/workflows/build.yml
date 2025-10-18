@@ -97,7 +97,7 @@ jobs:
             EXTRA_TAGS="latest"
           elif [[ "$ref_type" == "branch" && "$ref_name" == "main" ]]; then
             VERSION="main-${short_sha}"
-            EXTRA_TAGS="latest"
+            EXTRA_TAGS="nightly"
           else
             VERSION="dev-${safe_branch}-${short_sha}"
             EXTRA_TAGS=""
