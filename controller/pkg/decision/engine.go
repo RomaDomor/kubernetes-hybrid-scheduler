@@ -1,10 +1,13 @@
 package decision
 
 import (
-	"kubernetes-hybrid-scheduler/controller/pkg/slo"
-	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
+	"math/rand"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
+
+	"kubernetes-hybrid-scheduler/controller/pkg/slo"
+	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 )
 
 type Location string
@@ -15,22 +18,32 @@ const (
 )
 
 type Result struct {
-	Location Location
-	Reason   string
+	Location       Location
+	Reason         string
+	PredictedETAMs float64
 }
 
 type Engine struct {
-	config Config
+	config       Config
+	profileStore *ProfileStore
 }
 
 type Config struct {
 	RTTThresholdMs   int
 	LossThresholdPct float64
-	// Add from your Section 8 ConfigMap
+	ProfileStore     *ProfileStore
 }
 
 func NewEngine(config Config) *Engine {
-	return &Engine{config: config}
+	return &Engine{
+		config:       config,
+		profileStore: config.ProfileStore,
+	}
+}
+
+type ETAEstimate struct {
+	Mean float64
+	P95  float64
 }
 
 func (e *Engine) Decide(
@@ -39,95 +52,136 @@ func (e *Engine) Decide(
 	local *telemetry.LocalState,
 	wan *telemetry.WANState,
 ) Result {
-	// Step 1: Check if offload allowed
+	// 1. Hard safety constraints
 	if !slo.OffloadAllowed {
-		return Result{Edge, "offload_disabled"}
+		return Result{Edge, "offload_disabled", 0}
 	}
 
-	// Step 2: Check edge feasibility
-	if e.isEdgeFeasible(pod, local, slo) {
-		return Result{Edge, "edge_feasible_slo_met"}
+	if wan.RTTMs > 300 || wan.LossPct > 10 {
+		return Result{Edge, "wan_unusable", 0}
 	}
 
-	// Step 3: Check cloud feasibility
-	if e.isCloudFeasible(pod, wan, slo) {
-		return Result{Cloud, "edge_overload_cloud_feasible"}
-	}
+	// 2. Get historical profiles for both locations
+	edgeKey := GetProfileKey(pod, Edge)
+	cloudKey := GetProfileKey(pod, Cloud)
 
-	// Step 4: Fallback logic (Section 5.4)
-	if slo.Priority >= 7 {
-		etaEdge := e.estimateETAEdge(pod, local)
-		etaCloud := e.estimateETACloud(pod, wan)
-		if etaCloud < etaEdge {
-			return Result{Cloud, "best_effort_cloud_faster"}
+	edgeProfile := e.profileStore.GetOrDefault(edgeKey)
+	cloudProfile := e.profileStore.GetOrDefault(cloudKey)
+
+	// 3. Predict ETA for each location
+	edgeETA := e.predictETA(pod, Edge, edgeProfile, local, wan)
+	cloudETA := e.predictETA(pod, Cloud, cloudProfile, local, wan)
+
+	// 4. Confidence-aware exploration
+	edgeConf := edgeProfile.ConfidenceScore
+	cloudConf := cloudProfile.ConfidenceScore
+
+	explorationBonus := 0.0
+	if edgeConf < 0.5 || cloudConf < 0.5 {
+		if rand.Float64() < 0.2 { // 20% exploration
+			explorationBonus = 50.0
+			klog.V(4).Infof("Exploration triggered for %s", pod.Name)
 		}
 	}
 
-	return Result{Edge, "fallback_edge"}
+	// 5. Feasibility check
+	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs) &&
+		local.FreeCPU >= getCPURequest(pod)
+
+	cloudFeasible := (cloudETA.P95 + explorationBonus) <= float64(slo.DeadlineMs)
+
+	// 6. Decision logic
+	if edgeFeasible && !cloudFeasible {
+		return Result{
+			Location:       Edge,
+			Reason:         "edge_feasible_only",
+			PredictedETAMs: edgeETA.Mean,
+		}
+	}
+
+	if cloudFeasible && !edgeFeasible {
+		return Result{
+			Location:       Cloud,
+			Reason:         "cloud_feasible_only",
+			PredictedETAMs: cloudETA.Mean,
+		}
+	}
+
+	if edgeFeasible && cloudFeasible {
+		// Both feasible: score-based selection
+		edgeScore := e.computeScore(Edge, edgeETA, edgeConf, slo)
+		cloudScore := e.computeScore(Cloud, cloudETA, cloudConf, slo)
+
+		if edgeScore >= cloudScore {
+			return Result{Edge, "edge_preferred", edgeETA.Mean}
+		}
+		return Result{Cloud, "cloud_faster", cloudETA.Mean}
+	}
+
+	// 7. Neither feasible: best-effort with priority tie-break
+	if slo.Priority >= 7 && cloudETA.Mean < edgeETA.Mean {
+		return Result{Cloud, "best_effort_cloud", cloudETA.Mean}
+	}
+	return Result{Edge, "best_effort_edge", edgeETA.Mean}
 }
 
-func (e *Engine) isEdgeFeasible(pod *corev1.Pod, local *telemetry.LocalState, slo *slo.SLO) bool {
-	cpuReq := getCPURequest(pod)
-	memReq := getMemoryRequest(pod)
+func (e *Engine) predictETA(
+	pod *corev1.Pod,
+	loc Location,
+	profile *ProfileStats,
+	local *telemetry.LocalState,
+	wan *telemetry.WANState,
+) ETAEstimate {
+	// Base execution time from learned profile
+	execTime := profile.MeanDurationMs
+	execTimeP95 := profile.P95DurationMs
 
-	hasCPU := local.FreeCPU >= cpuReq
-	hasMem := local.FreeMem >= memReq
+	// Queue wait (location-specific)
+	queueWait := 0.0
+	if loc == Edge {
+		class := pod.Annotations["slo.hybrid.io/class"]
+		pendingCount := local.PendingPodsPerClass[class]
+		queueWait = float64(pendingCount) * profile.MeanDurationMs
+	}
 
-	eta := e.estimateETAEdge(pod, local)
-	meetsDeadline := eta <= float64(slo.DeadlineMs)
+	// WAN overhead for cloud
+	wanOverhead := 0.0
+	if loc == Cloud {
+		wanOverhead = 2.0 * float64(wan.RTTMs)
+	}
 
-	return hasCPU && hasMem && meetsDeadline
-}
-
-func (e *Engine) isCloudFeasible(pod *corev1.Pod, wan *telemetry.WANState, slo *slo.SLO) bool {
-	wanHealthy := wan.RTTMs < e.config.RTTThresholdMs && wan.LossPct < e.config.LossThresholdPct
-
-	eta := e.estimateETACloud(pod, wan)
-	meetsDeadline := eta <= float64(slo.DeadlineMs)
-
-	return wanHealthy && meetsDeadline
-}
-
-func (e *Engine) estimateETAEdge(pod *corev1.Pod, local *telemetry.LocalState) float64 {
-	// Implement Section 5.2 estimation models
-	queueWait := e.estimateQueueWait(pod, local)
-	procTime := e.estimateProcTime(pod)
-	return queueWait + procTime
-}
-
-func (e *Engine) estimateETACloud(pod *corev1.Pod, wan *telemetry.WANState) float64 {
-	wanOverhead := 2.0 * float64(wan.RTTMs) // Round-trip
-	procTime := e.estimateProcTime(pod)
-	// Assume cloud has no queue for MVP
-	return wanOverhead + procTime
-}
-
-func (e *Engine) estimateProcTime(pod *corev1.Pod) float64 {
-	// Your Section 5.2 formula
-	class := pod.Annotations["slo.hybrid.io/class"]
-	cpuRequest := float64(getCPURequest(pod)) // millicores
-
-	switch class {
-	case "latency":
-		return 0.5*cpuRequest + 20
-	case "throughput":
-		return 1.0*cpuRequest + 50
-	case "batch":
-		return 2.0*cpuRequest + 100
-	default:
-		return 50.0 // default
+	return ETAEstimate{
+		Mean: queueWait + execTime + wanOverhead,
+		P95:  queueWait + execTimeP95 + wanOverhead,
 	}
 }
 
-func (e *Engine) estimateQueueWait(pod *corev1.Pod, local *telemetry.LocalState) float64 {
-	// Simplified: pendingCount × avgProcTime
-	class := pod.Annotations["slo.hybrid.io/class"]
-	if local.PendingPodsPerClass == nil {
-		return 0
+func (e *Engine) computeScore(
+	loc Location,
+	eta ETAEstimate,
+	confidence float64,
+	slo *slo.SLO,
+) float64 {
+	score := 0.0
+
+	// Locality preference
+	if loc == Edge {
+		score += 50.0
 	}
-	pendingCount := local.PendingPodsPerClass[class]
-	avgProc := e.estimateProcTime(pod)
-	return float64(pendingCount) * avgProc
+
+	// Performance: deadline margin
+	deadlineMargin := float64(slo.DeadlineMs) - eta.P95
+	score += deadlineMargin * 0.5
+
+	// Confidence bonus
+	score += confidence * 30.0
+
+	// High-priority critical workloads prefer edge
+	if slo.Priority >= 8 && loc == Edge {
+		score += 20.0
+	}
+
+	return score
 }
 
 func getCPURequest(pod *corev1.Pod) int64 {
@@ -135,11 +189,4 @@ func getCPURequest(pod *corev1.Pod) int64 {
 		return 0
 	}
 	return pod.Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
-}
-
-func getMemoryRequest(pod *corev1.Pod) int64 {
-	if len(pod.Spec.Containers) == 0 {
-		return 0
-	}
-	return pod.Spec.Containers[0].Resources.Requests.Memory().Value() / (1024 * 1024) // MiB
 }

@@ -97,10 +97,38 @@ func main() {
 	telemetryCollector := telemetry.NewCombinedCollector(localCollector, wanProbe)
 	go refreshTelemetryLoop(telemetryCollector, stopCh)
 
+	profileStore := decision.NewProfileStore()
+	if err := profileStore.LoadFromConfigMap(kubeClient); err != nil {
+		klog.Warningf("Failed to load profiles (using defaults): %v", err)
+	}
+
+	// Start profile auto-save
+	go profileStore.StartAutoSave(kubeClient, 5*time.Minute, stopCh)
+
+	// Start pod observer for feedback collection
+	podObserver := decision.NewPodObserver(kubeClient, profileStore)
+	go podObserver.Watch(stopCh)
+
+	// Create decision engine with profile store
 	decisionEngine := decision.NewEngine(decision.Config{
 		RTTThresholdMs:   rttThreshold,
 		LossThresholdPct: lossThreshold,
+		ProfileStore:     profileStore,
 	})
+
+	// Start metrics updater
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				profileStore.UpdateMetrics()
+			case <-stopCh:
+				return
+			}
+		}
+	}()
 
 	// Plain HTTP admin server (8080) for metrics and debug endpoints
 	adminMux := http.NewServeMux()
