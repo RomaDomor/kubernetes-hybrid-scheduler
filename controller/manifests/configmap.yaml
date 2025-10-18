@@ -6,4 +6,4 @@ metadata:
 data:
   rttThresholdMs: "100"
   lossThresholdPct: "2.0"
-  cloudEndpoint: "10.0.1.100"
+  cloudEndpoint: "10.20.0.3"
