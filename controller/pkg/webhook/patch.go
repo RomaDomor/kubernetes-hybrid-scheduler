@@ -86,7 +86,7 @@ func addCloudToleration(isFirst bool) map[string]interface{} {
 		"key":      "virtual-node.liqo.io/not-allowed",
 		"operator": "Equal",
 		"value":    "true",
-		"effect":   "NoSchedule",
+		"effect":   "Exists",
 	}
 
 	path := "/spec/tolerations"
