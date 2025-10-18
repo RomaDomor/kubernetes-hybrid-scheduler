@@ -2,11 +2,21 @@ name: CI/CD Smart Scheduler
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "dev/*"
+      - "feature/*"
+    paths:
+      - "controller/**"
     tags:
       - "v*"
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - "dev/*"
+      - "feature/*"
+    paths:
+      - "controller/**"
 
 env:
   IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/kubernetes-smart-scheduler
