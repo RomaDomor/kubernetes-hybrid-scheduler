@@ -3,7 +3,7 @@ kind: MutatingWebhookConfiguration
 metadata:
   name: smart-scheduler-webhook
 webhooks:
-  - name: mutate-pods.scheduling.hybrid.io
+  - name: 00-mutate-pods.scheduling.hybrid.io
     admissionReviewVersions: ["v1"]
     sideEffects: None
     failurePolicy: Ignore
