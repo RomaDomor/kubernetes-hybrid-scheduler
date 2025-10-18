@@ -77,8 +77,8 @@ func (e *Engine) Decide(
 		pending = local.PendingPodsPerClass[slo.Class]
 	}
 	klog.V(4).Infof(
-		"Decide pod=%s/%s class=%s prio=%d deadline=%d offload=%v wan={rtt=%dms loss=%.1f%%} edge={freeCPU=%dm freeMem=%dMi pending[%s]=%d}",
-		pod.Namespace, pod.Name, slo.Class, slo.Priority, slo.DeadlineMs, slo.OffloadAllowed,
+		"Decide for pod=%s class=%s prio=%d deadline=%d offload=%v wan={rtt=%dms loss=%.1f%%} edge={freeCPU=%dm freeMem=%dMi pending[%s]=%d}",
+		podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), slo.Class, slo.Priority, slo.DeadlineMs, slo.OffloadAllowed,
 		wan.RTTMs, wan.LossPct, local.FreeCPU, local.FreeMem, slo.Class, pending,
 	)
 
@@ -125,13 +125,13 @@ func (e *Engine) Decide(
 
 	// 6. Decision logic
 	if edgeFeasible && !cloudFeasible {
-		klog.Infof("Decision %s/%s: EDGE reason=edge_feasible_only eta=%.0fms wanRTT=%dms",
-			pod.Namespace, pod.Name, edgeETA.Mean, wan.RTTMs)
+		klog.Infof("Decision for %s: EDGE reason=edge_feasible_only eta=%.0fms wanRTT=%dms",
+			podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), edgeETA.Mean, wan.RTTMs)
 		return Result{Edge, "edge_feasible_only", edgeETA.Mean, wan.RTTMs}
 	}
 	if cloudFeasible && !edgeFeasible {
-		klog.Infof("Decision %s/%s: CLOUD reason=cloud_feasible_only eta=%.0fms wanRTT=%dms",
-			pod.Namespace, pod.Name, cloudETA.Mean, wan.RTTMs)
+		klog.Infof("Decision for %s: CLOUD reason=cloud_feasible_only eta=%.0fms wanRTT=%dms",
+			podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), cloudETA.Mean, wan.RTTMs)
 		return Result{Cloud, "cloud_feasible_only", cloudETA.Mean, wan.RTTMs}
 	}
 
@@ -141,24 +141,24 @@ func (e *Engine) Decide(
 		klog.V(5).Infof("Scores edge=%.1f cloud=%.1f (conf edge=%.2f cloud=%.2f)", edgeScore, cloudScore, edgeConf, cloudConf)
 
 		if edgeScore >= cloudScore {
-			klog.Infof("Decision %s/%s: EDGE reason=edge_preferred eta=%.0fms wanRTT=%dms",
-				pod.Namespace, pod.Name, edgeETA.Mean, wan.RTTMs)
+			klog.Infof("Decision for %s: EDGE reason=edge_preferred eta=%.0fms wanRTT=%dms",
+				podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), edgeETA.Mean, wan.RTTMs)
 			return Result{Edge, "edge_preferred", edgeETA.Mean, wan.RTTMs}
 		}
-		klog.Infof("Decision %s/%s: CLOUD reason=cloud_faster eta=%.0fms wanRTT=%dms",
-			pod.Namespace, pod.Name, cloudETA.Mean, wan.RTTMs)
+		klog.Infof("Decision for %s: CLOUD reason=cloud_faster eta=%.0fms wanRTT=%dms",
+			podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), cloudETA.Mean, wan.RTTMs)
 		return Result{Cloud, "cloud_faster", cloudETA.Mean, wan.RTTMs}
 	}
 
 	// 7. Neither feasible
 	if slo.Priority >= 7 && cloudETA.Mean < edgeETA.Mean {
-		klog.Infof("Decision %s/%s: CLOUD reason=best_effort_cloud eta=%.0fms wanRTT=%dms",
-			pod.Namespace, pod.Name, cloudETA.Mean, wan.RTTMs)
+		klog.Infof("Decision for %s: CLOUD reason=best_effort_cloud eta=%.0fms wanRTT=%dms",
+			podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), cloudETA.Mean, wan.RTTMs)
 		return Result{Cloud, "best_effort_cloud", cloudETA.Mean, wan.RTTMs}
 	}
 
-	klog.Infof("Decision %s/%s: EDGE reason=best_effort_edge eta=%.0fms wanRTT=%dms",
-		pod.Namespace, pod.Name, edgeETA.Mean, wan.RTTMs)
+	klog.Infof("Decision for %s: EDGE reason=best_effort_edge eta=%.0fms wanRTT=%dms",
+		podID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), edgeETA.Mean, wan.RTTMs)
 	return Result{Edge, "best_effort_edge", edgeETA.Mean, wan.RTTMs}
 }
 
@@ -238,4 +238,27 @@ func fmtProfile(p *ProfileStats) string {
 	}
 	return fmt.Sprintf("count=%d conf=%.2f mean=%.0fms p95=%.0fms slo=%.0f%% qwait=%.0fms",
 		p.Count, p.ConfidenceScore, p.MeanDurationMs, p.P95DurationMs, p.SLOComplianceRate*100, p.MeanQueueWaitMs)
+}
+
+func podID(ns string, name string, genName string, uid string) string {
+	// Prefer name if present
+	if name != "" {
+		if ns == "" {
+			ns = "default"
+		}
+		return ns + "/" + name
+	}
+	// Fall back to generateName + UID tail for uniqueness
+	// Example: offload/build-job-xxxxx (uid: abcde)
+	shortUID := uid
+	if len(shortUID) > 8 {
+		shortUID = shortUID[:8]
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	if genName == "" {
+		genName = "<no-generateName>"
+	}
+	return fmt.Sprintf("%s/%s* (uid=%s)", ns, genName, shortUID)
 }
