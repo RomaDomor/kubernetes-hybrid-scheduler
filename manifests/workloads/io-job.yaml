@@ -6,11 +6,15 @@ metadata:
     app: io-job
   annotations:
     slo.hybrid.io/class: "batch"
-    slo.deadline.ms: "180000"
-    slo.hybrid.io/max-offload-penalty.ms: "1200"
+    slo.hybrid.io/deadlineMs: "180000"
+    # slo.hybrid.io/max-offload-penalty.ms: "1200"
 spec:
   backoffLimit: 0
   template:
+    metadata:
+      labels:
+        app: io-job
+        scheduling.hybrid.io/managed: "true"
     spec:
       restartPolicy: Never
       containers:
@@ -18,10 +22,10 @@ spec:
           image: curlimages/curl:8.10.1
           env:
             - name: BYTES_MB
-              value: "100"          # fallback size if downloads fail
+              value: "100"
             - name: WR_COPIES
-              value: "3"            # number of disk write copies
-            - name: URLS            # candidate WAN URLs (space-separated)
+              value: "3"
+            - name: URLS
               value: "https://speed.hetzner.de/100MB.bin https://proof.ovh.net/files/100Mb.dat"
             - name: RETRIES_PER_URL
               value: "5"
@@ -60,7 +64,6 @@ spec:
               echo "Checksum:"
               sha256sum /work/blob.bin || true
 
-              # Disk writes with direct I/O to stress filesystem and storage
               i=1
               while [ $i -le ${WR_COPIES:-3} ]; do
                 echo "Writing copy $i with oflag=direct..."
@@ -68,7 +71,7 @@ spec:
                 i=$((i+1))
               done
 
-              echo "Reading back copies (page cache + IO path)..."
+              echo "Reading back copies..."
               cat /work/copy_*.bin >/dev/null 2>&1 || true
 
               echo "IO job done."

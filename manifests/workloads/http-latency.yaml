@@ -6,8 +6,8 @@ metadata:
     app: http-latency
   annotations:
     slo.hybrid.io/class: "latency"
-    slo.hybrid.io/latency.ms: "100"  # Up from 80
-    slo.hybrid.io/max-offload-penalty.ms: "25"
+    slo.hybrid.io/latencyTargetMs: "100"
+    # slo.hybrid.io/max-offload-penalty.ms: "25"
 spec:
   replicas: 1
   selector:
@@ -17,6 +17,7 @@ spec:
     metadata:
       labels:
         app: http-latency
+        scheduling.hybrid.io/managed: "true"
     spec:
       containers:
         - name: nginx
@@ -25,7 +26,7 @@ spec:
             - containerPort: 80
           env:
             - name: CPU_SPIN_ITERS
-              value: "50000"          # tune compute in Lua loop
+              value: "50000"
           volumeMounts:
             - name: nginx-conf
               mountPath: /usr/local/openresty/nginx/conf/nginx.conf

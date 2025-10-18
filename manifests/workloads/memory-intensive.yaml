@@ -2,16 +2,19 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: memory-intensive
-  labels: { app: memory-intensive }
+  labels:
+    app: memory-intensive
   annotations:
     slo.hybrid.io/class: "batch"
-    slo.deadline.ms: "100000"
-    slo.hybrid.io/max-offload-penalty.ms: "800"
+    slo.hybrid.io/deadlineMs: "100000"
+    # slo.hybrid.io/max-offload-penalty.ms: "800"
 spec:
   backoffLimit: 0
   template:
     metadata:
-      labels: { app: memory-intensive }
+      labels:
+        app: memory-intensive
+        scheduling.hybrid.io/managed: "true"
     spec:
       restartPolicy: Never
       containers:

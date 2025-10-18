@@ -2,21 +2,24 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: cpu-batch
-  labels: { app: cpu-batch }
+  labels:
+    app: cpu-batch
   annotations:
     slo.hybrid.io/class: "batch"
-    slo.deadline.ms: "100000"
-    slo.hybrid.io/max-offload-penalty.ms: "500"
+    slo.hybrid.io/deadlineMs: "100000"
+    # slo.hybrid.io/max-offload-penalty.ms: "500"
 spec:
   backoffLimit: 0
   template:
     metadata:
-      labels: { app: cpu-batch }
+      labels:
+        app: cpu-batch
+        scheduling.hybrid.io/managed: "true"
     spec:
       restartPolicy: Never
       containers:
         - name: worker
-          image: wdhif/stress-ng:latest  # pin a specific tag for reproducibility
+          image: wdhif/stress-ng:latest
           env:
             - name: CPU_WKRS
               value: "2"
@@ -24,7 +27,6 @@ spec:
               value: "95"
             - name: CPU_SEC
               value: "90"
-          # The image entrypoint is `stress-ng`, so we only pass args:
           args:
             - --cpu
             - "$(CPU_WKRS)"

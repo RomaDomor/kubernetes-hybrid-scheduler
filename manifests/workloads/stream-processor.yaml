@@ -6,8 +6,8 @@ metadata:
     app: stream-processor
   annotations:
     slo.hybrid.io/class: "latency"
-    slo.hybrid.io/latency.ms: "50"
-    slo.hybrid.io/max-offload-penalty.ms: "15"
+    slo.hybrid.io/latencyTargetMs: "50"
+    # slo.hybrid.io/max-offload-penalty.ms: "15"
 spec:
   replicas: 1
   selector:
@@ -17,6 +17,7 @@ spec:
     metadata:
       labels:
         app: stream-processor
+        scheduling.hybrid.io/managed: "true"
     spec:
       containers:
         - name: processor
@@ -115,14 +116,14 @@ metadata:
     app: stream-data-generator
   annotations:
     slo.hybrid.io/class: "latency"
-    slo.hybrid.io/latency.ms: "100"
-    slo.hybrid.io/max-offload-penalty.ms: "25"
+    slo.hybrid.io/latencyTargetMs: "100"
 spec:
   backoffLimit: 0
   template:
     metadata:
       labels:
         app: stream-data-generator
+        scheduling.hybrid.io/managed: "true"
     spec:
       restartPolicy: Never
       containers:

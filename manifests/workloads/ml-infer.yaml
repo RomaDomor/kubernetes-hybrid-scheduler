@@ -6,25 +6,29 @@ metadata:
     app: ml-infer
   annotations:
     slo.hybrid.io/class: "ml"
-    slo.hybrid.io/latency.ms: "250"
-    slo.deadline.ms: "30000"
-    slo.hybrid.io/max-offload-penalty.ms: "60"
+    slo.hybrid.io/latencyTargetMs: "250"
+    slo.hybrid.io/deadlineMs: "30000"
+    # slo.hybrid.io/max-offload-penalty.ms: "60"
 spec:
   backoffLimit: 0
   template:
+    metadata:
+      labels:
+        scheduling.hybrid.io/managed: "true"
+        app: ml-infer
     spec:
       restartPolicy: Never
       containers:
         - name: infer
           image: python:3.11-slim
           env:
-            - name: MAT          # matrix size
+            - name: MAT
               value: "600"
-            - name: REPS         # number of inferences
+            - name: REPS
               value: "8"
-            - name: MODEL_MB     # simulate model load size
+            - name: MODEL_MB
               value: "200"
-            - name: THREADS      # control BLAS threads if present
+            - name: THREADS
               value: "1"
           command:
             - bash
@@ -32,7 +36,6 @@ spec:
             - |
               set -euo pipefail
               pip install --no-cache-dir numpy
-              # Simulate model load I/O and residency
               head -c $((MODEL_MB*1024*1024)) </dev/urandom >/tmp/model.bin
               python - <<'PY'
               import os, time, numpy as np, mmap
@@ -40,10 +43,8 @@ spec:
               THREADS=os.getenv("THREADS","1")
               os.environ["OPENBLAS_NUM_THREADS"]=THREADS
               os.environ["OMP_NUM_THREADS"]=THREADS
-              # mmap the "model"
               with open("/tmp/model.bin","rb") as f:
                   mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-                  # touch some bytes to simulate parse
                   _ = sum(mm[:1024])
               t0=time.time()
               for i in range(REPS):
