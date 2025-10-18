@@ -7,7 +7,6 @@ metadata:
   annotations:
     slo.hybrid.io/class: "batch"
     slo.hybrid.io/deadlineMs: "150000"
-    # slo.hybrid.io/max-offload-penalty.ms: "800"
 spec:
   backoffLimit: 0
   parallelism: 2
@@ -16,6 +15,9 @@ spec:
       labels:
         scheduling.hybrid.io/managed: "true"
         app: build-job
+      annotations:
+        slo.hybrid.io/class: "batch"
+        slo.hybrid.io/deadlineMs: "150000"
     spec:
       restartPolicy: Never
       containers:

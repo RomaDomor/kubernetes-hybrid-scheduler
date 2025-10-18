@@ -7,7 +7,6 @@ metadata:
   annotations:
     slo.hybrid.io/class: "latency"
     slo.hybrid.io/latencyTargetMs: "100"
-    # slo.hybrid.io/max-offload-penalty.ms: "25"
 spec:
   replicas: 1
   selector:
@@ -18,6 +17,9 @@ spec:
       labels:
         app: http-latency
         scheduling.hybrid.io/managed: "true"
+      annotations:
+        slo.hybrid.io/class: "latency"
+        slo.hybrid.io/latencyTargetMs: "100"
     spec:
       containers:
         - name: nginx
@@ -49,29 +51,6 @@ spec:
         - name: nginx-conf
           configMap:
             name: http-latency-nginx
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: http-latency-nginx
-data:
-  nginx.conf: |
-    worker_processes  1;
-    events { worker_connections  1024; }
-    http {
-      lua_shared_dict metrics 10m;
-      server {
-        listen 80;
-        location = /ping { return 200 "ok"; }
-        location / {
-          content_by_lua_block {
-            local iters = tonumber(os.getenv("CPU_SPIN_ITERS") or "50000")
-            for i=1,iters do local x = math.sin(i) end
-            ngx.say("ok")
-          }
-        }
-      }
-    }
 ---
 apiVersion: v1
 kind: Service

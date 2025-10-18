@@ -7,7 +7,6 @@ metadata:
   annotations:
     slo.hybrid.io/class: "batch"
     slo.hybrid.io/deadlineMs: "180000"
-    # slo.hybrid.io/max-offload-penalty.ms: "1200"
 spec:
   backoffLimit: 0
   template:
@@ -15,6 +14,9 @@ spec:
       labels:
         app: io-job
         scheduling.hybrid.io/managed: "true"
+      annotations:
+        slo.hybrid.io/class: "batch"
+        slo.hybrid.io/deadlineMs: "180000"
     spec:
       restartPolicy: Never
       containers:
@@ -56,7 +58,7 @@ spec:
                 [ -n "$ok" ] && break
               done
 
-              if [ -z "$ok" ]; then
+              if [ -z "$ok" ], then
                 echo "All downloads failed - generating ${BYTES_MB:-100}MB locally"
                 dd if=/dev/urandom of=/work/blob.bin bs=1M count=${BYTES_MB:-100} status=none
               fi

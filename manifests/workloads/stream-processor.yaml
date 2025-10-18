@@ -7,7 +7,6 @@ metadata:
   annotations:
     slo.hybrid.io/class: "latency"
     slo.hybrid.io/latencyTargetMs: "50"
-    # slo.hybrid.io/max-offload-penalty.ms: "15"
 spec:
   replicas: 1
   selector:
@@ -18,6 +17,9 @@ spec:
       labels:
         app: stream-processor
         scheduling.hybrid.io/managed: "true"
+      annotations:
+        slo.hybrid.io/class: "latency"
+        slo.hybrid.io/latencyTargetMs: "50"
     spec:
       containers:
         - name: processor
@@ -37,7 +39,7 @@ spec:
               app = Flask(__name__)
               data_window = deque(maxlen=1000)
               lock = threading.Lock()
-              def sf(v): 
+              def sf(v):
                   try:
                       f = float(v)
                       return 0.0 if (math.isnan(f) or math.isinf(f)) else f
@@ -123,7 +125,10 @@ spec:
     metadata:
       labels:
         app: stream-data-generator
-        scheduling.hybrid.io/managed: "true"
+#        scheduling.hybrid.io/managed: "true"
+#      annotations:
+#        slo.hybrid.io/class: "latency"
+#        slo.hybrid.io/latencyTargetMs: "100"
     spec:
       restartPolicy: Never
       containers:
@@ -175,7 +180,7 @@ spec:
                       else: err+=1
                   except requests.exceptions.Timeout: err+=1
                   except Exception: err+=1
-                  sl=period-(time.time()-t0); 
+                  sl=period-(time.time()-t0);
                   if sl>0: time.sleep(sl)
               print("=== STREAM RESULTS ===")
               print("Total successful:",total)

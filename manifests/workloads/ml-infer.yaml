@@ -8,7 +8,6 @@ metadata:
     slo.hybrid.io/class: "ml"
     slo.hybrid.io/latencyTargetMs: "250"
     slo.hybrid.io/deadlineMs: "30000"
-    # slo.hybrid.io/max-offload-penalty.ms: "60"
 spec:
   backoffLimit: 0
   template:
@@ -16,6 +15,10 @@ spec:
       labels:
         scheduling.hybrid.io/managed: "true"
         app: ml-infer
+      annotations:
+        slo.hybrid.io/class: "ml"
+        slo.hybrid.io/latencyTargetMs: "250"
+        slo.hybrid.io/deadlineMs: "30000"
     spec:
       restartPolicy: Never
       containers:
