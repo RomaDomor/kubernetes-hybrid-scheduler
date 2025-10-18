@@ -100,7 +100,7 @@ jobs:
             EXTRA_TAGS="nightly"
           else
             VERSION="dev-${safe_branch}-${short_sha}"
-            EXTRA_TAGS=""
+            EXTRA_TAGS="dev-${safe_branch}"
           fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -125,13 +125,25 @@ jobs:
         id: tags
         shell: bash
         run: |
+          # Base tag from version
           TAGS="${{ env.IMAGE_REPO }}:${{ steps.ver.outputs.version }}"
+
+          # Add any extra tags space/comma/line separated in steps.ver.outputs.extra_tags
+          # e.g., EXTRA_TAGS="latest nightly canary"
           if [[ -n "${{ steps.ver.outputs.extra_tags }}" ]]; then
-            TAGS+=$'\n'${{ env.IMAGE_REPO }}:latest
+            # Normalize to newlines, then iterate
+            extras="$(echo "${{ steps.ver.outputs.extra_tags }}" | tr ', ' '\n\n')"
+            while IFS= read -r tag; do
+              [[ -z "$tag" ]] && continue
+              TAGS+=$'\n'${{ env.IMAGE_REPO }}:"$tag"
+            done <<< "$extras"
           fi
-          echo "list<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$TAGS" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "list<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
