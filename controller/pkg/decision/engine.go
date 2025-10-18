@@ -1,6 +1,7 @@
 package decision
 
 import (
+	"fmt"
 	"math/rand"
 
 	corev1 "k8s.io/api/core/v1"
@@ -58,75 +59,88 @@ func (e *Engine) Decide(
 	local *telemetry.LocalState,
 	wan *telemetry.WANState,
 ) Result {
+	// Inputs summary
+	klog.V(4).Infof("Decide pod=%s/%s class=%s prio=%d deadline=%d offload=%v wan={rtt=%dms loss=%.1f%%} edge={freeCPU=%dm freeMem=%dMi pending[%s]=%d}",
+		pod.Namespace, pod.Name, slo.Class, slo.Priority, slo.DeadlineMs, slo.OffloadAllowed,
+		wan.RTTMs, wan.LossPct, local.FreeCPU, local.FreeMem, slo.Class, local.PendingPodsPerClass[slo.Class])
+
 	// 1. Hard safety constraints
 	if !slo.OffloadAllowed {
+		klog.V(4).Info("Offload disabled by SLO")
 		return Result{Edge, "offload_disabled", 0, wan.RTTMs}
 	}
-
 	if wan.RTTMs > 300 || wan.LossPct > 10 {
+		klog.V(4).Info("WAN deemed unusable by thresholds (rtt>300ms or loss>10%)")
 		return Result{Edge, "wan_unusable", 0, wan.RTTMs}
 	}
 
-	// 2. Get historical profiles for both locations
+	// 2. Profiles
 	edgeKey := GetProfileKey(pod, Edge)
 	cloudKey := GetProfileKey(pod, Cloud)
-
 	edgeProfile := e.profileStore.GetOrDefault(edgeKey)
 	cloudProfile := e.profileStore.GetOrDefault(cloudKey)
 
-	// 3. Predict ETA for each location
+	klog.V(4).Infof("Profiles edge[%s]: %s | cloud[%s]: %s",
+		edgeKey.String(), fmtProfile(edgeProfile), cloudKey.String(), fmtProfile(cloudProfile))
+
+	// 3. ETA
 	edgeETA := e.predictETA(pod, Edge, edgeProfile, local, wan)
 	cloudETA := e.predictETA(pod, Cloud, cloudProfile, local, wan)
+	klog.V(4).Infof("ETA edge=%s cloud=%s", fmtETA(edgeETA), fmtETA(cloudETA))
 
-	// 4. Confidence-aware exploration
+	// 4. Exploration
 	edgeConf := edgeProfile.ConfidenceScore
 	cloudConf := cloudProfile.ConfidenceScore
-
 	explorationBonus := 0.0
 	if edgeConf < 0.5 || cloudConf < 0.5 {
 		if rand.Float64() < 0.2 { // 20% exploration
 			explorationBonus = 50.0
+			klog.V(5).Infof("Exploration bonus applied: +%.0fms to cloud P95 feasibility", explorationBonus)
 		}
 	}
 
-	// 5. Feasibility check
-	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs) &&
-		local.FreeCPU >= getCPURequest(pod)
-
+	// 5. Feasibility
+	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs) && local.FreeCPU >= getCPURequest(pod)
 	cloudFeasible := (cloudETA.P95 + explorationBonus) <= float64(slo.DeadlineMs)
+	klog.V(5).Infof("Feasibility edge=%v cloud=%v (deadline=%dms, reqCPU=%dm, freeCPU=%dm)",
+		edgeFeasible, cloudFeasible, slo.DeadlineMs, getCPURequest(pod), local.FreeCPU)
 
 	// 6. Decision logic
 	if edgeFeasible && !cloudFeasible {
-		return Result{
-			Location:       Edge,
-			Reason:         "edge_feasible_only",
-			PredictedETAMs: edgeETA.Mean,
-		}
+		klog.Infof("Decision %s/%s: EDGE reason=edge_feasible_only eta=%.0fms wanRTT=%dms",
+			pod.Namespace, pod.Name, edgeETA.Mean, wan.RTTMs)
+		return Result{Edge, "edge_feasible_only", edgeETA.Mean, wan.RTTMs}
 	}
-
 	if cloudFeasible && !edgeFeasible {
-		return Result{
-			Location:       Cloud,
-			Reason:         "cloud_feasible_only",
-			PredictedETAMs: cloudETA.Mean,
-		}
+		klog.Infof("Decision %s/%s: CLOUD reason=cloud_feasible_only eta=%.0fms wanRTT=%dms",
+			pod.Namespace, pod.Name, cloudETA.Mean, wan.RTTMs)
+		return Result{Cloud, "cloud_feasible_only", cloudETA.Mean, wan.RTTMs}
 	}
 
 	if edgeFeasible && cloudFeasible {
-		// Both feasible: score-based selection
 		edgeScore := e.computeScore(Edge, edgeETA, edgeConf, slo)
 		cloudScore := e.computeScore(Cloud, cloudETA, cloudConf, slo)
+		klog.V(5).Infof("Scores edge=%.1f cloud=%.1f (conf edge=%.2f cloud=%.2f)", edgeScore, cloudScore, edgeConf, cloudConf)
 
 		if edgeScore >= cloudScore {
+			klog.Infof("Decision %s/%s: EDGE reason=edge_preferred eta=%.0fms wanRTT=%dms",
+				pod.Namespace, pod.Name, edgeETA.Mean, wan.RTTMs)
 			return Result{Edge, "edge_preferred", edgeETA.Mean, wan.RTTMs}
 		}
+		klog.Infof("Decision %s/%s: CLOUD reason=cloud_faster eta=%.0fms wanRTT=%dms",
+			pod.Namespace, pod.Name, cloudETA.Mean, wan.RTTMs)
 		return Result{Cloud, "cloud_faster", cloudETA.Mean, wan.RTTMs}
 	}
 
-	// 7. Neither feasible: best-effort with priority tie-break
+	// 7. Neither feasible
 	if slo.Priority >= 7 && cloudETA.Mean < edgeETA.Mean {
+		klog.Infof("Decision %s/%s: CLOUD reason=best_effort_cloud eta=%.0fms wanRTT=%dms",
+			pod.Namespace, pod.Name, cloudETA.Mean, wan.RTTMs)
 		return Result{Cloud, "best_effort_cloud", cloudETA.Mean, wan.RTTMs}
 	}
+
+	klog.Infof("Decision %s/%s: EDGE reason=best_effort_edge eta=%.0fms wanRTT=%dms",
+		pod.Namespace, pod.Name, edgeETA.Mean, wan.RTTMs)
 	return Result{Edge, "best_effort_edge", edgeETA.Mean, wan.RTTMs}
 }
 
@@ -194,4 +208,16 @@ func getCPURequest(pod *corev1.Pod) int64 {
 		return 0
 	}
 	return pod.Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+}
+
+func fmtETA(e ETAEstimate) string {
+	return fmt.Sprintf("mean=%.0fms p95=%.0fms", e.Mean, e.P95)
+}
+
+func fmtProfile(p *ProfileStats) string {
+	if p == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("count=%d conf=%.2f mean=%.0fms p95=%.0fms slo=%.0f%% qwait=%.0fms",
+		p.Count, p.ConfidenceScore, p.MeanDurationMs, p.P95DurationMs, p.SLOComplianceRate*100, p.MeanQueueWaitMs)
 }

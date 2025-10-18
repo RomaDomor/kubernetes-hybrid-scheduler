@@ -101,8 +101,8 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	queueWait, _ := parseFloat64(pod.Annotations["scheduling.hybrid.io/queueWaitMs"])
 	startTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/actualStartMs"])
 	if err != nil {
-		klog.V(4).Infof("Pod %s/%s missing start time annotation",
-			pod.Namespace, pod.Name)
+		klog.V(4).Infof("Pod %s/%s missing start time annotation: %s",
+			pod.Namespace, pod.Name, err)
 		return
 	}
 
