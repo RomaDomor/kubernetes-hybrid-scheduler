@@ -16,7 +16,7 @@ spec:
       serviceAccountName: smart-scheduler-controller
       containers:
         - name: controller
-          image: romadomor/smart-scheduler:v0.3
+          image: romadomor/smart-scheduler:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8443
