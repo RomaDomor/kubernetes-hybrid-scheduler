@@ -53,7 +53,7 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 
 			// Record start time when pod transitions to Running
 			if pod.Status.Phase == corev1.PodRunning &&
-				pod.Annotations["scheduling.hybrid.io/actualStartMs"] == "" {
+				pod.Annotations["scheduling.hybrid.io/actualStart"] == "" {
 				o.recordStart(pod)
 			}
 
@@ -75,6 +75,7 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 
 func (o *PodObserver) recordStart(pod *corev1.Pod) {
 	startTime := time.Now()
+
 	decisionTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/timestamp"])
 	if err != nil {
 		klog.V(4).Infof("Failed to parse decision timestamp for %s/%s: %v",
@@ -84,11 +85,9 @@ func (o *PodObserver) recordStart(pod *corev1.Pod) {
 
 	queueWait := startTime.Sub(decisionTime).Milliseconds()
 
-	// Update annotations
-	o.annotate(pod, "scheduling.hybrid.io/actualStartMs",
-		fmt.Sprintf("%d", startTime.UnixMilli()))
-	o.annotate(pod, "scheduling.hybrid.io/queueWaitMs",
-		fmt.Sprintf("%d", queueWait))
+	// Update annotations (RFC3339 for timestamps, ms for durations)
+	o.annotate(pod, "scheduling.hybrid.io/actualStart", startTime.Format(time.RFC3339))
+	o.annotate(pod, "scheduling.hybrid.io/queueWaitMs", fmt.Sprintf("%d", queueWait))
 
 	klog.V(4).Infof("Pod %s/%s started after %dms queue wait",
 		pod.Namespace, pod.Name, queueWait)
@@ -99,7 +98,7 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	decision := Location(pod.Annotations["scheduling.hybrid.io/decision"])
 	predictedETA, _ := parseFloat64(pod.Annotations["scheduling.hybrid.io/predictedETAMs"])
 	queueWait, _ := parseFloat64(pod.Annotations["scheduling.hybrid.io/queueWaitMs"])
-	startTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/actualStartMs"])
+	startTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/actualStart"])
 	if err != nil {
 		klog.V(4).Infof("Pod %s/%s missing start time annotation: %s",
 			pod.Namespace, pod.Name, err)
