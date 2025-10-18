@@ -1,6 +1,9 @@
-IMAGE ?= romadomor/smart-scheduler:v0.2
+IMAGE_REPO ?= romadomor/smart-scheduler
+VERSION ?= v0.3
+IMAGE := $(IMAGE_REPO):$(VERSION)
+
 PLATFORM ?= linux/amd64
-LATEST_IMAGE := $(firstword $(subst :, ,$(IMAGE))):latest
+LATEST_IMAGE := $(IMAGE_REPO):latest
 
 .PHONY: buildx-setup
 buildx-setup:
