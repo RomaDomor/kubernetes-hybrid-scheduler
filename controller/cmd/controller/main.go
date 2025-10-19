@@ -83,6 +83,11 @@ func main() {
 	podInformer := informerFactory.Core().V1().Pods()
 	nodeInformer := informerFactory.Core().V1().Nodes()
 
+	// Initialize telemetry collectors
+	localCollector := telemetry.NewLocalCollector(kubeClient, metricsClient, podInformer, nodeInformer)
+	wanProbe := telemetry.NewWANProbe(cloudEndpoint, 60*time.Second)
+	telemetryCollector := telemetry.NewCombinedCollector(localCollector, wanProbe)
+
 	klog.Info("Starting informers...")
 	informerFactory.Start(stopCh)
 
@@ -94,11 +99,6 @@ func main() {
 		klog.Fatal("Failed to sync informer caches")
 	}
 	klog.Info("Informer caches synced successfully")
-
-	// Initialize telemetry collectors
-	localCollector := telemetry.NewLocalCollector(kubeClient, metricsClient, podInformer, nodeInformer)
-	wanProbe := telemetry.NewWANProbe(cloudEndpoint, 60*time.Second)
-	telemetryCollector := telemetry.NewCombinedCollector(localCollector, wanProbe)
 
 	// Background telemetry refresh loop
 	go refreshTelemetryLoop(telemetryCollector, stopCh)
