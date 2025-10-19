@@ -167,7 +167,7 @@ def analyze_profile(edge_run: Path, cloud_run: Path) -> Dict[str, Any]:
                 "edge_pass": e.get("pass"),
                 "cloud_pass": c.get("pass"),
             })
-        if kind == "Job" and cls in ("batch", "ml"):
+        if kind == "Job" and cls == "batch":
             edge_ms = safe_float(e.get("measured_ms"))
             cloud_ms = safe_float(c.get("measured_ms"))
             result["batch"].append({

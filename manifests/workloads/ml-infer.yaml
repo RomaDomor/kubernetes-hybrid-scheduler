@@ -5,7 +5,7 @@ metadata:
   labels:
     app: ml-infer
   annotations:
-    slo.hybrid.io/class: "ml"
+    slo.hybrid.io/class: "batch"
     slo.hybrid.io/latencyTargetMs: "250"
     slo.hybrid.io/deadlineMs: "30000"
 spec:
@@ -16,7 +16,7 @@ spec:
         scheduling.hybrid.io/managed: "true"
         app: ml-infer
       annotations:
-        slo.hybrid.io/class: "ml"
+        slo.hybrid.io/class: "batch"
         slo.hybrid.io/latencyTargetMs: "250"
         slo.hybrid.io/deadlineMs: "30000"
     spec:
