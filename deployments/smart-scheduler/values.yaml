@@ -3,7 +3,6 @@ replicaCount: 1
 image:
   name: ghcr.io/romadomor/kubernetes-smart-scheduler
   pullPolicy: IfNotPresent
-  # Overrides the image tag whose default is the chart's appVersion.
   tag: "latest"
 
 # Name of the service account to use.
