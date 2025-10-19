@@ -59,7 +59,7 @@ func TestProfileKey_TieringAndClass(t *testing.T) {
 }
 
 func TestProfileStore_UpdateAndHistogram(t *testing.T) {
-	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100)
+	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
 	key := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: decision.Edge}
 
 	// Feed some durations
@@ -76,7 +76,7 @@ func TestProfileStore_UpdateAndHistogram(t *testing.T) {
 }
 
 func TestProfileStore_LRUEviction(t *testing.T) {
-	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 2)
+	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 2, decision.DefaultHistogramConfig())
 	keys := []decision.ProfileKey{
 		{Class: "latency", CPUTier: "small", Location: decision.Edge},
 		{Class: "batch", CPUTier: "small", Location: decision.Edge},
@@ -97,7 +97,7 @@ func TestProfileStore_LRUEviction(t *testing.T) {
 }
 
 func TestProfileStore_Serialization(t *testing.T) {
-	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 10)
+	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 10, decision.DefaultHistogramConfig())
 	k := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: decision.Edge}
 	ps.Update(k, decision.ProfileUpdate{ObservedDurationMs: 42, SLOMet: true})
 

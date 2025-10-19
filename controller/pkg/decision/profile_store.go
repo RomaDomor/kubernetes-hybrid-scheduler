@@ -87,23 +87,32 @@ type lruEntry struct {
 
 type ProfileStore struct {
 	profiles   map[string]*ProfileStats
-	lru        *list.List // Least recently used tracking
+	lru        *list.List
 	lruMap     map[string]*list.Element
 	mu         sync.RWMutex
 	defaults   map[string]*ProfileStats
 	maxEntries int
 	kubeClient kubernetes.Interface
+	hcfg       HistogramConfig
 }
 
-func NewProfileStore(kubeClient kubernetes.Interface, maxEntries int) *ProfileStore {
-	return &ProfileStore{
+func NewProfileStore(kubeClient kubernetes.Interface, maxEntries int, hcfg HistogramConfig) *ProfileStore {
+	ps := &ProfileStore{
 		profiles:   make(map[string]*ProfileStats),
 		lru:        list.New(),
 		lruMap:     make(map[string]*list.Element),
-		defaults:   defaultProfiles(),
+		defaults:   make(map[string]*ProfileStats),
 		maxEntries: maxEntries,
 		kubeClient: kubeClient,
+		hcfg:       hcfg,
 	}
+	// build defaults with histogram
+	for k, v := range defaultProfilesStatic() {
+		cp := *v
+		cp.DurationHistogram = ps.initHistogram()
+		ps.defaults[k] = &cp
+	}
+	return ps
 }
 
 func GetProfileKey(pod *corev1.Pod, loc Location) ProfileKey {
@@ -169,7 +178,7 @@ func (ps *ProfileStore) GetOrDefault(key ProfileKey) *ProfileStats {
 		P95DurationMs:     200,
 		ConfidenceScore:   0.0,
 		SLOComplianceRate: 0.5,
-		DurationHistogram: initHistogram(),
+		DurationHistogram: ps.initHistogram(),
 	})
 }
 
@@ -193,8 +202,7 @@ func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
 
 	keyStr := key.String()
 
-	// Ingest guard: discard or clamp extreme durations
-	const ingestCapMs = 60 * 60 * 1000.0 // 1 hour
+	ingestCapMs := ps.hcfg.IngestCapMs
 	dur := update.ObservedDurationMs
 	if dur < 0 || dur > ingestCapMs {
 		klog.V(4).Infof(
@@ -230,9 +238,8 @@ func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
 		alpha*diff*diff + (1-alpha)*profile.StdDevDurationMs*profile.StdDevDurationMs,
 	)
 
-	// Update histogram with clamped duration and compute p95
-	updateHistogram(profile.DurationHistogram, dur)
-	profile.P95DurationMs = computeP95FromHistogram(profile.DurationHistogram)
+	ps.updateHistogram(profile.DurationHistogram, dur)
+	profile.P95DurationMs = ps.computeP95FromHistogram(profile.DurationHistogram)
 
 	profile.MeanQueueWaitMs = alpha*update.QueueWaitMs + (1-alpha)*profile.MeanQueueWaitMs
 
@@ -288,13 +295,29 @@ func (ps *ProfileStore) getOrDefaultLocked(key ProfileKey) *ProfileStats {
 		StdDevDurationMs:  50,
 		ConfidenceScore:   0.0,
 		SLOComplianceRate: 0.5,
-		DurationHistogram: initHistogram(),
+		DurationHistogram: ps.initHistogram(),
 	}
 }
 
 // Histogram helpers
-func initHistogram() []HistogramBucket {
-	bounds := []float64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, math.Inf(1)}
+func (ps *ProfileStore) initHistogram() []HistogramBucket {
+	var bounds []float64
+	switch ps.hcfg.Mode {
+	case BoundsExplicit:
+		bounds = append([]float64(nil), ps.hcfg.Explicit...)
+	case BoundsLog:
+		bounds = make([]float64, 0, ps.hcfg.LogCount)
+		v := ps.hcfg.LogStartMs
+		for i := 0; i < ps.hcfg.LogCount; i++ {
+			bounds = append(bounds, v)
+			v *= ps.hcfg.LogFactor
+		}
+	default:
+		bounds = append([]float64(nil), DefaultHistogramConfig().Explicit...)
+	}
+	if ps.hcfg.IncludeInf {
+		bounds = append(bounds, math.Inf(1))
+	}
 	buckets := make([]HistogramBucket, len(bounds))
 	now := time.Now()
 	for i, bound := range bounds {
@@ -307,12 +330,12 @@ func initHistogram() []HistogramBucket {
 	return buckets
 }
 
-func updateHistogram(buckets []HistogramBucket, value float64) {
+func (ps *ProfileStore) updateHistogram(buckets []HistogramBucket, value float64) {
 	now := time.Now()
 
 	// Decay every hour (half-life)
 	for i := range buckets {
-		if now.Sub(buckets[i].LastDecay) > time.Hour {
+		if now.Sub(buckets[i].LastDecay) > ps.hcfg.DecayInterval {
 			buckets[i].Count = buckets[i].Count / 2
 			buckets[i].LastDecay = now
 		}
@@ -325,9 +348,11 @@ func updateHistogram(buckets []HistogramBucket, value float64) {
 			return
 		}
 	}
+
+	buckets[len(buckets)-1].Count++
 }
 
-func computeP95FromHistogram(buckets []HistogramBucket) float64 {
+func (ps *ProfileStore) computeP95FromHistogram(buckets []HistogramBucket) float64 {
 	total := 0
 	for _, b := range buckets {
 		total += b.Count
@@ -337,22 +362,35 @@ func computeP95FromHistogram(buckets []HistogramBucket) float64 {
 	}
 
 	// Require minimum sample size for trustworthy p95
-	const minSampleCount = 10
-	const capMs = 60000.0
-	const lowSampleFallback = 300.0
+	minSampleCount := ps.hcfg.MinSampleCount
+	capMs := ps.lastFiniteUpperBound(buckets)
+	const lowSampleFloor = 50.0
 
 	if total < minSampleCount {
 		// Try to use max observed bucket with data
 		for i := len(buckets) - 1; i >= 0; i-- {
 			if buckets[i].Count > 0 {
 				ub := buckets[i].UpperBound()
-				if math.IsInf(ub, +1) && i > 0 {
-					ub = buckets[i-1].UpperBound() * 1.5 // Reasonable extrapolation
+				var prev float64
+				if i > 0 {
+					prev = buckets[i-1].UpperBound()
 				}
-				return math.Min(ub, lowSampleFallback)
+				if math.IsInf(ub, +1) {
+					if i > 0 {
+						ub = math.Min(buckets[i-1].UpperBound()*1.5, capMs)
+					} else {
+						ub = lowSampleFloor
+					}
+				}
+				// choose midpoint to avoid biasing to ub for sparse data
+				if i > 0 {
+					return math.Max(lowSampleFloor, (prev+ub)/2)
+				}
+				return math.Max(lowSampleFloor, ub)
 			}
 		}
-		return lowSampleFallback
+
+		return lowSampleFloor
 	}
 
 	target := int(math.Ceil(0.95 * float64(total)))
@@ -393,6 +431,10 @@ func computeP95FromHistogram(buckets []HistogramBucket) float64 {
 			if p > capMs {
 				p = capMs
 			}
+			if p > ub {
+				p = ub
+			}
+
 			// Ensure non-decreasing vs previous bound
 			if p < prev {
 				p = prev
@@ -401,16 +443,16 @@ func computeP95FromHistogram(buckets []HistogramBucket) float64 {
 		}
 	}
 
-	// Fallback: return penultimate bucket's upper bound
-	// (avoid returning +Inf)
-	if len(buckets) >= 2 {
-		last := buckets[len(buckets)-2].UpperBound()
-		if last > capMs {
-			return capMs
+	return ps.lastFiniteUpperBound(buckets)
+}
+func (ps *ProfileStore) lastFiniteUpperBound(buckets []HistogramBucket) float64 {
+	for i := len(buckets) - 1; i >= 0; i-- {
+		ub := buckets[i].UpperBound()
+		if !math.IsInf(ub, +1) {
+			return ub
 		}
-		return last
 	}
-	return capMs
+	return ps.hcfg.IngestCapMs
 }
 
 // CRD-based persistence (clean: no custom JSON, uses sentinel fields)
@@ -560,7 +602,7 @@ func (ps *ProfileStore) ExportAllProfiles() map[string]*ProfileStats {
 	return export
 }
 
-func defaultProfiles() map[string]*ProfileStats {
+func defaultProfilesStatic() map[string]*ProfileStats {
 	profiles := make(map[string]*ProfileStats)
 
 	classes := []string{"latency", "throughput", "batch", "interactive", "streaming"}
@@ -599,7 +641,7 @@ func defaultProfiles() map[string]*ProfileStats {
 				SLOComplianceRate: 0.5,
 				ConfidenceScore:   0.0,
 				LastUpdated:       time.Now(),
-				DurationHistogram: initHistogram(),
+				// histogram will be assigned in NewProfileStore
 			}
 		}
 	}

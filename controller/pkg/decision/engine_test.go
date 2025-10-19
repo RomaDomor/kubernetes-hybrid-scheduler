@@ -27,7 +27,7 @@ func sloMust(class string, deadline int, offload bool, prio int) *slo.SLO {
 }
 
 func newEngine() *decision.Engine {
-	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100)
+	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
 	cfg := decision.EngineConfig{
 		RTTThresholdMs:   100,
 		LossThresholdPct: 2,

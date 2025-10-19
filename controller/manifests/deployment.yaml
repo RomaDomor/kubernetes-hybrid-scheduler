@@ -93,6 +93,52 @@ spec:
                 configMapKeyRef:
                   name: scheduler-config
                   key: edgeHeadroomOverridePct
+            # Histogram config
+            - name: HIST_BOUNDS_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: histBoundsMode
+            - name: HIST_BOUNDS
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: histBounds
+            - name: HIST_LOG_START_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: histLogStartMs
+            - name: HIST_LOG_FACTOR
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: histLogFactor
+            - name: HIST_LOG_COUNT
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: histLogCount
+            - name: HIST_INCLUDE_INF
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: histIncludeInf
+            - name: INGEST_CAP_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: ingestCapMs
+            - name: MIN_SAMPLE_COUNT
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: minSampleCount
+            - name: DECAY_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: decayInterval
           resources:
             requests:
               cpu: 100m

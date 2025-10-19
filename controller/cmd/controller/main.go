@@ -1,3 +1,4 @@
+// cmd/controller/main.go
 package main
 
 import (
@@ -32,6 +33,12 @@ var (
 	kubeconfig    string
 	cloudEndpoint string
 	config        decision.EngineConfig
+	hcfg          decision.HistogramConfig
+
+	// Helper for histogram bounds mode
+	histBoundsModeStr string
+	histBoundsCSV     string
+	decayIntervalStr  string
 )
 
 func main() {
@@ -43,7 +50,7 @@ func main() {
 		getEnvOrDefault("CLOUD_ENDPOINT", "10.0.1.100"),
 		"Cloud endpoint IP for WAN probe")
 
-	// Configurable thresholds
+	// Engine config
 	flag.IntVar(&config.RTTThresholdMs, "rtt-threshold",
 		getEnvInt("RTT_THRESHOLD", 100), "WAN RTT threshold (ms)")
 	flag.Float64Var(&config.LossThresholdPct, "loss-threshold",
@@ -67,7 +74,64 @@ func main() {
 	flag.Float64Var(&config.EdgeHeadroomOverridePct, "edge-headroom-override-pct",
 		getEnvFloat("EDGE_HEADROOM_OVERRIDE_PCT", 0.1), "Edge headroom override % (0-1)")
 
+	// Histogram config - parse directly into hcfg
+	flag.StringVar(&histBoundsModeStr, "hist-bounds-mode",
+		getEnvOrDefault("HIST_BOUNDS_MODE", "explicit"),
+		"Histogram bounds mode: explicit|log")
+	flag.StringVar(&histBoundsCSV, "hist-bounds",
+		getEnvOrDefault("HIST_BOUNDS", ""),
+		"Comma-separated histogram bounds in ms (for explicit mode)")
+	flag.Float64Var(&hcfg.LogStartMs, "hist-log-start-ms",
+		getEnvFloat("HIST_LOG_START_MS", 50),
+		"Log mode: starting bound (ms)")
+	flag.Float64Var(&hcfg.LogFactor, "hist-log-factor",
+		getEnvFloat("HIST_LOG_FACTOR", 2.0),
+		"Log mode: factor per step")
+	flag.IntVar(&hcfg.LogCount, "hist-log-count",
+		getEnvInt("HIST_LOG_COUNT", 20),
+		"Log mode: number of bounds")
+	flag.BoolVar(&hcfg.IncludeInf, "hist-include-inf",
+		getEnvOrDefault("HIST_INCLUDE_INF", "1") != "0",
+		"Append +Inf bucket")
+	flag.Float64Var(&hcfg.IngestCapMs, "ingest-cap-ms",
+		getEnvFloat("INGEST_CAP_MS", 30*60*1000),
+		"Ingest cap in ms")
+	flag.IntVar(&hcfg.MinSampleCount, "min-sample-count",
+		getEnvInt("MIN_SAMPLE_COUNT", 10),
+		"Minimum samples for reliable p95")
+	flag.StringVar(&decayIntervalStr, "decay-interval",
+		getEnvOrDefault("DECAY_INTERVAL", "1h"),
+		"Histogram decay interval (e.g., 30m, 1h)")
+
 	flag.Parse()
+
+	// Post-parse processing for histogram config
+	switch histBoundsModeStr {
+	case "explicit":
+		hcfg.Mode = decision.BoundsExplicit
+	case "log":
+		hcfg.Mode = decision.BoundsLog
+	default:
+		klog.Warningf("Unknown hist-bounds-mode %q, defaulting to explicit", histBoundsModeStr)
+		hcfg.Mode = decision.BoundsExplicit
+	}
+
+	if histBoundsCSV != "" {
+		hcfg.Explicit = decision.ParseFloatSliceCSV(histBoundsCSV)
+		klog.Infof("Using explicit histogram bounds: %v", hcfg.Explicit)
+	} else {
+		hcfg.Explicit = decision.DefaultHistogramConfig().Explicit
+	}
+
+	if iv, err := time.ParseDuration(decayIntervalStr); err == nil {
+		hcfg.DecayInterval = iv
+	} else {
+		klog.Warningf("Invalid decay-interval %q, using default 1h", decayIntervalStr)
+		hcfg.DecayInterval = time.Hour
+	}
+
+	klog.Infof("Histogram config: mode=%s includeInf=%v ingestCap=%.0fms minSamples=%d decay=%s",
+		hcfg.Mode, hcfg.IncludeInf, hcfg.IngestCapMs, hcfg.MinSampleCount, hcfg.DecayInterval)
 
 	stopCh := signals.SetupSignalHandler()
 
@@ -109,8 +173,8 @@ func main() {
 	// Background telemetry refresh loop
 	go refreshTelemetryLoop(telemetryCollector, stopCh)
 
-	// Initialize profile store with CRD backend
-	profileStore := decision.NewProfileStore(kubeClient, config.MaxProfileCount)
+	// Initialize profile store with histogram config
+	profileStore := decision.NewProfileStore(kubeClient, config.MaxProfileCount, hcfg)
 	if err := profileStore.LoadFromCRD(dynClient); err != nil {
 		klog.Warningf("Failed to load profiles from CRD (using defaults): %v", err)
 	}
