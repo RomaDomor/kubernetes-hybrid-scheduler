@@ -27,15 +27,18 @@ type Result struct {
 }
 
 type EngineConfig struct {
-	RTTThresholdMs   int
-	LossThresholdPct float64
-	RTTUnusableMs    int
-	LossUnusablePct  float64
-	LocalityBonus    float64
-	ConfidenceWeight float64
-	ExplorationRate  float64
-	MaxProfileCount  int
-	ProfileStore     *ProfileStore
+	RTTThresholdMs          int
+	LossThresholdPct        float64
+	RTTUnusableMs           int
+	LossUnusablePct         float64
+	LocalityBonus           float64
+	ConfidenceWeight        float64
+	ExplorationRate         float64
+	MaxProfileCount         int
+	CloudMarginOverridePct  float64 // % of deadline where cloud is preferred if safer
+	WanStaleConfFactor      float64 // confidence multiplier when WAN is stale
+	EdgeHeadroomOverridePct float64 // % buffer needed on BestNode to allow scheduling
+	ProfileStore            *ProfileStore
 }
 
 type Engine struct {
@@ -121,13 +124,16 @@ func (e *Engine) Decide(
 
 	// Check telemetry staleness and adjust confidence
 	confidenceAdjustment := 1.0
+	cloudConfAdjustment := 1.0
 	if wan.IsStale {
-		klog.V(4).Info("WAN telemetry is stale, reducing confidence")
-		confidenceAdjustment = 0.5 // Reduce confidence in cloud predictions
+		klog.V(4).Infof("WAN telemetry is stale, reducing confidence by %.1f%%",
+			(1-e.config.WanStaleConfFactor)*100)
+		cloudConfAdjustment *= e.config.WanStaleConfFactor
 	}
 	if local.IsStale {
 		klog.V(4).Info("Local telemetry is stale, reducing confidence")
 		confidenceAdjustment *= 0.7
+		//cloudConfAdjustment *= 0.7
 	}
 
 	// 2. Get profiles
@@ -146,7 +152,7 @@ func (e *Engine) Decide(
 
 	// 4. Exploration with configurable rate
 	edgeConf := edgeProfile.ConfidenceScore * confidenceAdjustment
-	cloudConf := cloudProfile.ConfidenceScore * confidenceAdjustment
+	cloudConf := cloudProfile.ConfidenceScore * cloudConfAdjustment
 	explorationBonus := 0.0
 
 	if edgeConf < 0.5 || cloudConf < 0.5 {
@@ -195,6 +201,32 @@ func (e *Engine) Decide(
 	}
 
 	if edgeFeasible && cloudFeasible {
+		// Margin override: if cloud's deadline margin is significantly better than edge's,
+		// prefer cloud despite locality bonus
+		deadline := float64(slo.DeadlineMs)
+		edgeMargin := deadline - edgeETA.P95
+		cloudMargin := deadline - cloudETA.P95
+		marginDiff := cloudMargin - edgeMargin
+		marginThreshold := deadline * e.config.CloudMarginOverridePct
+
+		if marginDiff >= marginThreshold {
+			result := Result{Cloud, "cloud_margin_override", cloudETA.Mean, wan.RTTMs}
+			klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms (margin: cloud=%.0f > edge=%.0f by %.0f)",
+				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
+				result.Reason, result.PredictedETAMs, cloudMargin, edgeMargin, marginDiff)
+			recordDecision(result, slo.Class)
+			return result
+		}
+
+		// Sanity check: if BestEdgeNode has insufficient headroom, prefer cloud
+		if !e.canNodeFitWithHeadroom(local.BestEdgeNode, reqCPU, reqMem) {
+			result := Result{Cloud, "edge_low_headroom", cloudETA.Mean, wan.RTTMs}
+			klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms (edge node insufficient headroom)",
+				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
+			recordDecision(result, slo.Class)
+			return result
+		}
+
 		edgeScore := e.computeScore(Edge, edgeETA, edgeConf, slo)
 		cloudScore := e.computeScore(Cloud, cloudETA, cloudConf, slo)
 		klog.V(5).Infof("Scores edge=%.1f cloud=%.1f", edgeScore, cloudScore)
@@ -240,11 +272,13 @@ func (e *Engine) predictETA(
 	execTime := profile.MeanDurationMs
 	execTimeP95 := profile.P95DurationMs
 
-	queueWait := 0.0
+	queueWaitMean := 0.0
+	queueWaitP95 := 0.0
 	if loc == Edge {
 		class := pod.Annotations["slo.hybrid.io/class"]
 		pendingCount := local.PendingPodsPerClass[class]
-		queueWait = float64(pendingCount) * profile.MeanDurationMs
+		queueWaitMean = float64(pendingCount) * profile.MeanDurationMs
+		queueWaitP95 = float64(pendingCount) * profile.P95DurationMs
 	}
 
 	wanOverhead := 0.0
@@ -253,8 +287,8 @@ func (e *Engine) predictETA(
 	}
 
 	return ETAEstimate{
-		Mean: queueWait + execTime + wanOverhead,
-		P95:  queueWait + execTimeP95 + wanOverhead,
+		Mean: queueWaitMean + execTime + wanOverhead,
+		P95:  queueWaitP95 + execTimeP95 + wanOverhead,
 	}
 }
 
@@ -296,6 +330,23 @@ func getMemRequestMi(pod *corev1.Pod) int64 {
 		total += c.Resources.Requests.Memory().Value() / (1024 * 1024)
 	}
 	return total
+}
+
+func (e *Engine) canNodeFitWithHeadroom(node telemetry.BestNode, reqCPU, reqMem int64) bool {
+	if node.Name == "" {
+		return false
+	}
+
+	headroomMultiplier := 1.0 + e.config.EdgeHeadroomOverridePct
+	requiredCPU := int64(float64(reqCPU) * headroomMultiplier)
+	requiredMem := int64(float64(reqMem) * headroomMultiplier)
+
+	fits := node.FreeCPU >= requiredCPU && node.FreeMem >= requiredMem
+	if !fits {
+		klog.V(5).Infof("Node %s headroom check failed: have CPU=%d (need %d), mem=%d (need %d)",
+			node.Name, node.FreeCPU, requiredCPU, node.FreeMem, requiredMem)
+	}
+	return fits
 }
 
 func fmtETA(e ETAEstimate) string {

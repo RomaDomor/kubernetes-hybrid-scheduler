@@ -33,10 +33,14 @@ spec:
             - --loss-threshold=2.0
             - --rtt-unusable=300
             - --loss-unusable=10.0
-            - --locality-bonus=50.0
+            - --locality-bonus=25.0
             - --confidence-weight=30.0
             - --exploration-rate=0.2
             - --max-profiles=100
+            - --cloud-margin-override-pct=0.15
+            - --wan-stale-conf-factor=0.8
+            - --edge-headroom-override-pct=0.1
+            - --locality-bonus-factor=0.5
           livenessProbe:
             httpGet:
               path: /healthz
@@ -75,6 +79,21 @@ spec:
                 configMapKeyRef:
                   name: scheduler-config
                   key: lossThresholdPct
+            - name: CLOUD_MARGIN_OVERRIDE_PCT
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: cloudMarginOverridePct
+            - name: WAN_STALE_CONF_FACTOR
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: wanStaleConfFactor
+            - name: EDGE_HEADROOM_OVERRIDE_PCT
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: edgeHeadroomOverridePct
           resources:
             requests:
               cpu: 100m

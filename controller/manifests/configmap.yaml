@@ -7,3 +7,7 @@ data:
   rttThresholdMs: "100"
   lossThresholdPct: "2.0"
   cloudEndpoint: "10.20.0.3"
+  localityBonus: "25"
+  cloudMarginOverridePct: "0.15"
+  wanStaleConfFactor: "0.8"
+  edgeHeadroomOverridePct: "0.1"

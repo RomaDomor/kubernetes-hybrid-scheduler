@@ -333,16 +333,26 @@ func computeP95FromHistogram(buckets []HistogramBucket) float64 {
 		total += b.Count
 	}
 	if total == 0 {
-		return 200 // Default
+		return 150 // Default
 	}
 
 	// Require minimum sample size for trustworthy p95
-	const minSampleCount = 20
-	const capMs = 900000.0 // 15 minutes cap
+	const minSampleCount = 10
+	const capMs = 60000.0
+	const lowSampleFallback = 300.0
 
 	if total < minSampleCount {
-		// Fall back to conservative approximation
-		return capMs / 2
+		// Try to use max observed bucket with data
+		for i := len(buckets) - 1; i >= 0; i-- {
+			if buckets[i].Count > 0 {
+				ub := buckets[i].UpperBound()
+				if math.IsInf(ub, +1) && i > 0 {
+					ub = buckets[i-1].UpperBound() * 1.5 // Reasonable extrapolation
+				}
+				return math.Min(ub, lowSampleFallback)
+			}
+		}
+		return lowSampleFallback
 	}
 
 	target := int(math.Ceil(0.95 * float64(total)))

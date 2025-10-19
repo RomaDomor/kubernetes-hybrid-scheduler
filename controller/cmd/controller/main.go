@@ -60,6 +60,12 @@ func main() {
 		getEnvFloat("EXPLORATION_RATE", 0.2), "Exploration probability (0-1)")
 	flag.IntVar(&config.MaxProfileCount, "max-profiles",
 		getEnvInt("MAX_PROFILES", 100), "Maximum profile entries (LRU)")
+	flag.Float64Var(&config.CloudMarginOverridePct, "cloud-margin-override-pct",
+		getEnvFloat("CLOUD_MARGIN_OVERRIDE_PCT", 0.15), "Cloud deadline margin override % (0-1)")
+	flag.Float64Var(&config.WanStaleConfFactor, "wan-stale-conf-factor",
+		getEnvFloat("WAN_STALE_CONF_FACTOR", 0.8), "WAN stale confidence factor (0-1)")
+	flag.Float64Var(&config.EdgeHeadroomOverridePct, "edge-headroom-override-pct",
+		getEnvFloat("EDGE_HEADROOM_OVERRIDE_PCT", 0.1), "Edge headroom override % (0-1)")
 
 	flag.Parse()
 
