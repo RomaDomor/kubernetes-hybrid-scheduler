@@ -336,11 +336,41 @@ func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	for keyStr, profile := range ps.profiles {
-		res := dynClient.Resource(workloadProfileGVR).Namespace("kube-system")
-		// Get current resource version
-		existing, _ := res.Get(ctx, keyStr, metav1.GetOptions{})
+	res := dynClient.Resource(workloadProfileGVR).Namespace("kube-system")
+	saved := 0
 
+	for keyStr, profile := range ps.profiles {
+		// Try to get existing object
+		existing, err := res.Get(ctx, keyStr, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// Create new object
+				obj := &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "scheduling.hybrid.io/v1alpha1",
+						"kind":       "WorkloadProfile",
+						"metadata": map[string]interface{}{
+							"name":      keyStr,
+							"namespace": "kube-system",
+						},
+						"spec": map[string]interface{}{
+							"profile": profileToMap(profile),
+						},
+					},
+				}
+				if _, err := res.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
+					klog.V(4).Infof("Create WorkloadProfile %s failed: %v", keyStr, err)
+					continue
+				}
+				saved++
+				continue
+			}
+			// Other get error
+			klog.V(4).Infof("Get WorkloadProfile %s failed: %v", keyStr, err)
+			continue
+		}
+
+		// Update existing
 		obj := &unstructured.Unstructured{
 			Object: map[string]interface{}{
 				"apiVersion": "scheduling.hybrid.io/v1alpha1",
@@ -348,7 +378,7 @@ func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
 				"metadata": map[string]interface{}{
 					"name":            keyStr,
 					"namespace":       "kube-system",
-					"resourceVersion": existing.GetResourceVersion(), // ADD THIS
+					"resourceVersion": existing.GetResourceVersion(),
 				},
 				"spec": map[string]interface{}{
 					"profile": profileToMap(profile),
@@ -356,16 +386,18 @@ func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
 			},
 		}
 
-		// This will now fail if resource version changed (conflict)
 		if _, err := res.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
 			if errors.IsConflict(err) {
-				klog.V(4).Infof("Profile %s conflict, will retry next cycle", keyStr)
+				klog.V(4).Infof("Update conflict for %s, will retry next cycle", keyStr)
 				continue
 			}
+			klog.V(4).Infof("Update WorkloadProfile %s failed: %v", keyStr, err)
+			continue
 		}
+		saved++
 	}
 
-	klog.V(3).Infof("Saved %d profiles to CRDs", len(ps.profiles))
+	klog.V(3).Infof("Saved %d profiles to CRDs", saved)
 	return nil
 }
 
