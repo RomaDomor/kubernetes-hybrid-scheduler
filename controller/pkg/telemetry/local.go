@@ -100,8 +100,20 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 			}
 		}
 
-		// Subtract requests from pods that are Pending or Running-but-not-ready
-		// on edge nodes, regardless of managed label (anticipate imminent usage)
+		// Determine if this pod should be counted against edge capacity
+		// Case A: already bound to an edge node
+		boundToEdge := isEdgeNode(pod.Spec.NodeName, edgeNodes)
+
+		// Case B: unbound but explicitly targets edge via selector/affinity
+		unboundEdgeIntended := (pod.Spec.NodeName == "") && wantsEdge(pod)
+
+		// Optional (uncomment to be more conservative):
+		// Treat managed pods without explicit selector as edge-intended before binding
+		// if pod.Spec.NodeName == "" && pod.Labels["scheduling.hybrid.io/managed"] == "true" {
+		// 	unboundEdgeIntended = true
+		// }
+
+		// Decide if we consume this pod's requests (Pending or Running-but-not-ready)
 		consume := false
 		// If pod is not Running, consume
 		if pod.Status.Phase != corev1.PodRunning {
@@ -121,17 +133,22 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 			}
 		}
 
-		if consume {
-			// If pod is already bound to an edge node, or not bound yet (NodeName empty), we consider it against edge queue
-			_, ok := edgeNodes[pod.Spec.NodeName]
-			if pod.Spec.NodeName == "" || (pod.Spec.NodeName != "" && ok) {
-				// sum requests of all containers (still cheap)
-				for _, c := range pod.Spec.Containers {
-					req := c.Resources.Requests
-					pendingCPU += req.Cpu().MilliValue()
-					pendingMem += req.Memory().Value() / (1024 * 1024)
-				}
+		// Only subtract if it impacts edge capacity
+		if consume && (boundToEdge || unboundEdgeIntended) {
+			// sum requests of all containers
+			var podCPU, podMemMi int64
+			for _, c := range pod.Spec.Containers {
+				req := c.Resources.Requests
+				podCPU += req.Cpu().MilliValue()
+				podMemMi += req.Memory().Value() / (1024 * 1024)
 			}
+			// Add small pessimism for unbound edge-intended pods (+10%)
+			if unboundEdgeIntended {
+				podCPU = podCPU + (podCPU / 10)
+				podMemMi = podMemMi + (podMemMi / 10)
+			}
+			pendingCPU += podCPU
+			pendingMem += podMemMi
 		}
 	}
 
@@ -162,6 +179,46 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	return state, nil
 }
 
+// Helpers to determine edge targeting
+func isEdgeNode(nodeName string, edgeNodes map[string]struct{}) bool {
+	if nodeName == "" {
+		return false
+	}
+	_, ok := edgeNodes[nodeName]
+	return ok
+}
+
+func wantsEdge(pod *corev1.Pod) bool {
+	// nodeSelector
+	if pod.Spec.NodeSelector != nil {
+		if v, ok := pod.Spec.NodeSelector["node.role/edge"]; ok && v == "true" {
+			return true
+		}
+	}
+	// nodeAffinity (requiredDuringSchedulingIgnoredDuringExecution)
+	if pod.Spec.Affinity != nil && pod.Spec.Affinity.NodeAffinity != nil {
+		req := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		if req != nil {
+			for _, term := range req.NodeSelectorTerms {
+				for _, expr := range term.MatchExpressions {
+					if expr.Key == "node.role/edge" {
+						switch expr.Operator {
+						case corev1.NodeSelectorOpIn:
+							for _, v := range expr.Values {
+								if v == "true" {
+									return true
+								}
+							}
+						case corev1.NodeSelectorOpExists:
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
+}
 func (l *LocalCollector) GetCachedLocalState() *LocalState {
 	l.cacheMu.RLock()
 	defer l.cacheMu.RUnlock()
