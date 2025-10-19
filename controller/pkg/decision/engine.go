@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/slo"
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 )
@@ -275,7 +276,7 @@ func (e *Engine) predictETA(
 	queueWaitMean := 0.0
 	queueWaitP95 := 0.0
 	if loc == Edge {
-		class := pod.Annotations["slo.hybrid.io/class"]
+		class := pod.Annotations[constants.AnnotationSLOClass]
 		pendingCount := local.PendingPodsPerClass[class]
 		queueWaitMean = float64(pendingCount) * profile.MeanDurationMs
 		queueWaitP95 = float64(pendingCount) * profile.P95DurationMs

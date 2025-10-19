@@ -5,9 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"kubernetes-hybrid-scheduler/controller/pkg/util"
 	"net/http"
-	"os"
-	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -47,60 +46,60 @@ func main() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig")
 	flag.StringVar(&masterURL, "master", "", "Kubernetes API server URL")
 	flag.StringVar(&cloudEndpoint, "cloud-endpoint",
-		getEnvOrDefault("CLOUD_ENDPOINT", "10.0.1.100"),
+		util.GetEnvOrDefault("CLOUD_ENDPOINT", "10.0.1.100"),
 		"Cloud endpoint IP for WAN probe")
 
 	// Engine config
 	flag.IntVar(&config.RTTThresholdMs, "rtt-threshold",
-		getEnvInt("RTT_THRESHOLD", 100), "WAN RTT threshold (ms)")
+		util.GetEnvInt("RTT_THRESHOLD", 100), "WAN RTT threshold (ms)")
 	flag.Float64Var(&config.LossThresholdPct, "loss-threshold",
-		getEnvFloat("LOSS_THRESHOLD", 2.0), "WAN packet loss threshold (%)")
+		util.GetEnvFloat("LOSS_THRESHOLD", 2.0), "WAN packet loss threshold (%)")
 	flag.IntVar(&config.RTTUnusableMs, "rtt-unusable",
-		getEnvInt("RTT_UNUSABLE", 300), "WAN RTT unusable threshold (ms)")
+		util.GetEnvInt("RTT_UNUSABLE", 300), "WAN RTT unusable threshold (ms)")
 	flag.Float64Var(&config.LossUnusablePct, "loss-unusable",
-		getEnvFloat("LOSS_UNUSABLE", 10.0), "WAN loss unusable threshold (%)")
+		util.GetEnvFloat("LOSS_UNUSABLE", 10.0), "WAN loss unusable threshold (%)")
 	flag.Float64Var(&config.LocalityBonus, "locality-bonus",
-		getEnvFloat("LOCALITY_BONUS", 50.0), "Edge locality score bonus")
+		util.GetEnvFloat("LOCALITY_BONUS", 50.0), "Edge locality score bonus")
 	flag.Float64Var(&config.ConfidenceWeight, "confidence-weight",
-		getEnvFloat("CONFIDENCE_WEIGHT", 30.0), "Confidence score weight")
+		util.GetEnvFloat("CONFIDENCE_WEIGHT", 30.0), "Confidence score weight")
 	flag.Float64Var(&config.ExplorationRate, "exploration-rate",
-		getEnvFloat("EXPLORATION_RATE", 0.2), "Exploration probability (0-1)")
+		util.GetEnvFloat("EXPLORATION_RATE", 0.2), "Exploration probability (0-1)")
 	flag.IntVar(&config.MaxProfileCount, "max-profiles",
-		getEnvInt("MAX_PROFILES", 100), "Maximum profile entries (LRU)")
+		util.GetEnvInt("MAX_PROFILES", 100), "Maximum profile entries (LRU)")
 	flag.Float64Var(&config.CloudMarginOverridePct, "cloud-margin-override-pct",
-		getEnvFloat("CLOUD_MARGIN_OVERRIDE_PCT", 0.15), "Cloud deadline margin override % (0-1)")
+		util.GetEnvFloat("CLOUD_MARGIN_OVERRIDE_PCT", 0.15), "Cloud deadline margin override % (0-1)")
 	flag.Float64Var(&config.WanStaleConfFactor, "wan-stale-conf-factor",
-		getEnvFloat("WAN_STALE_CONF_FACTOR", 0.8), "WAN stale confidence factor (0-1)")
+		util.GetEnvFloat("WAN_STALE_CONF_FACTOR", 0.8), "WAN stale confidence factor (0-1)")
 	flag.Float64Var(&config.EdgeHeadroomOverridePct, "edge-headroom-override-pct",
-		getEnvFloat("EDGE_HEADROOM_OVERRIDE_PCT", 0.1), "Edge headroom override % (0-1)")
+		util.GetEnvFloat("EDGE_HEADROOM_OVERRIDE_PCT", 0.1), "Edge headroom override % (0-1)")
 
 	// Histogram config - parse directly into hcfg
 	flag.StringVar(&histBoundsModeStr, "hist-bounds-mode",
-		getEnvOrDefault("HIST_BOUNDS_MODE", "explicit"),
+		util.GetEnvOrDefault("HIST_BOUNDS_MODE", "explicit"),
 		"Histogram bounds mode: explicit|log")
 	flag.StringVar(&histBoundsCSV, "hist-bounds",
-		getEnvOrDefault("HIST_BOUNDS", ""),
+		util.GetEnvOrDefault("HIST_BOUNDS", ""),
 		"Comma-separated histogram bounds in ms (for explicit mode)")
 	flag.Float64Var(&hcfg.LogStartMs, "hist-log-start-ms",
-		getEnvFloat("HIST_LOG_START_MS", 50),
+		util.GetEnvFloat("HIST_LOG_START_MS", 50),
 		"Log mode: starting bound (ms)")
 	flag.Float64Var(&hcfg.LogFactor, "hist-log-factor",
-		getEnvFloat("HIST_LOG_FACTOR", 2.0),
+		util.GetEnvFloat("HIST_LOG_FACTOR", 2.0),
 		"Log mode: factor per step")
 	flag.IntVar(&hcfg.LogCount, "hist-log-count",
-		getEnvInt("HIST_LOG_COUNT", 20),
+		util.GetEnvInt("HIST_LOG_COUNT", 20),
 		"Log mode: number of bounds")
 	flag.BoolVar(&hcfg.IncludeInf, "hist-include-inf",
-		getEnvOrDefault("HIST_INCLUDE_INF", "1") != "0",
+		util.GetEnvOrDefault("HIST_INCLUDE_INF", "1") != "0",
 		"Append +Inf bucket")
 	flag.Float64Var(&hcfg.IngestCapMs, "ingest-cap-ms",
-		getEnvFloat("INGEST_CAP_MS", 30*60*1000),
+		util.GetEnvFloat("INGEST_CAP_MS", 30*60*1000),
 		"Ingest cap in ms")
 	flag.IntVar(&hcfg.MinSampleCount, "min-sample-count",
-		getEnvInt("MIN_SAMPLE_COUNT", 10),
+		util.GetEnvInt("MIN_SAMPLE_COUNT", 10),
 		"Minimum samples for reliable p95")
 	flag.StringVar(&decayIntervalStr, "decay-interval",
-		getEnvOrDefault("DECAY_INTERVAL", "1h"),
+		util.GetEnvOrDefault("DECAY_INTERVAL", "1h"),
 		"Histogram decay interval (e.g., 30m, 1h)")
 
 	flag.Parse()
@@ -357,29 +356,4 @@ func debugProfilesHandler(ps *decision.ProfileStore) http.HandlerFunc {
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(profiles)
 	}
-}
-
-func getEnvOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func getEnvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if i, err := strconv.Atoi(v); err == nil {
-			return i
-		}
-	}
-	return def
-}
-
-func getEnvFloat(key string, def float64) float64 {
-	if v := os.Getenv(key); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
-		}
-	}
-	return def
 }

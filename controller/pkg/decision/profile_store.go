@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"fmt"
+	constants2 "kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"math"
 	"sync"
 	"time"
@@ -125,7 +126,7 @@ func GetProfileKey(pod *corev1.Pod, loc Location) ProfileKey {
 		tier = "large"
 	}
 
-	class := pod.Annotations["slo.hybrid.io/class"]
+	class := pod.Annotations[constants2.AnnotationSLOClass]
 	if class == "" {
 		class = "batch"
 	}
@@ -142,20 +143,13 @@ func GetProfileKey(pod *corev1.Pod, loc Location) ProfileKey {
 
 // Whitelist of allowed classes
 func normalizeClass(class string) string {
-	validClasses := map[string]bool{
-		"latency":     true,
-		"throughput":  true,
-		"batch":       true,
-		"interactive": true,
-		"streaming":   true,
-	}
-
-	if validClasses[class] {
+	if constants2.ValidSLOClasses[class] {
 		return class
 	}
 
-	klog.V(4).Infof("Unknown class '%s', defaulting to 'batch'", class)
-	return "batch"
+	klog.V(4).Infof("Unknown class '%s', defaulting to '%s'", class, constants2.DefaultSLOClass)
+	// Use centralized constant for default
+	return constants2.DefaultSLOClass
 }
 
 func (ps *ProfileStore) GetOrDefault(key ProfileKey) *ProfileStats {
@@ -605,7 +599,10 @@ func (ps *ProfileStore) ExportAllProfiles() map[string]*ProfileStats {
 func defaultProfilesStatic() map[string]*ProfileStats {
 	profiles := make(map[string]*ProfileStats)
 
-	classes := []string{"latency", "throughput", "batch", "interactive", "streaming"}
+	classes := make([]string, 0, len(constants2.ValidSLOClasses))
+	for class := range constants2.ValidSLOClasses {
+		classes = append(classes, class)
+	}
 	tiers := []string{"small", "medium", "large"}
 	estimates := map[string]struct{ mean, p95 float64 }{
 		"latency-small":      {50, 80},

@@ -27,19 +27,6 @@ spec:
               protocol: TCP
           command:
             - /smart-scheduler
-          args:
-            - --v=4
-            - --rtt-threshold=100
-            - --loss-threshold=2.0
-            - --rtt-unusable=300
-            - --loss-unusable=10.0
-            - --locality-bonus=25.0
-            - --confidence-weight=30.0
-            - --exploration-rate=0.2
-            - --max-profiles=100
-            - --cloud-margin-override-pct=0.15
-            - --wan-stale-conf-factor=0.8
-            - --edge-headroom-override-pct=0.1
           livenessProbe:
             httpGet:
               path: /healthz

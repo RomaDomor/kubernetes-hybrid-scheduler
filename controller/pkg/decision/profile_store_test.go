@@ -1,6 +1,7 @@
 package decision_test
 
 import (
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"testing"
 
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
@@ -19,7 +20,7 @@ func testPod(cpuMillis, memMi int64, class string) *corev1.Pod {
 			Name:      "p",
 			UID:       uuid.NewUUID(),
 			Annotations: map[string]string{
-				"slo.hybrid.io/class": class,
+				constants.AnnotationSLOClass: class,
 			},
 		},
 		Spec: corev1.PodSpec{

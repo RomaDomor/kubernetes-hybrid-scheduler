@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -16,6 +15,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
+	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
 
 type PodObserver struct {
@@ -43,15 +45,15 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			pod := newObj.(*corev1.Pod)
 
-			if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
+			if pod.Labels[constants.LabelManaged] != "true" {
 				return
 			}
-			if pod.Annotations["scheduling.hybrid.io/decision"] == "" {
+			if pod.Annotations[constants.AnnotationDecision] == "" {
 				return
 			}
 
 			if pod.Status.Phase == corev1.PodRunning &&
-				pod.Annotations["scheduling.hybrid.io/actualStart"] == "" {
+				pod.Annotations[constants.AnnotationActualStart] == "" {
 				o.recordStart(pod)
 			}
 
@@ -73,7 +75,7 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 func (o *PodObserver) recordStart(pod *corev1.Pod) {
 	startTime := time.Now()
 
-	decisionTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/timestamp"])
+	decisionTime, err := parseTime(pod.Annotations[constants.AnnotationTimestamp])
 	if err != nil {
 		klog.V(4).Infof("Failed to parse decision timestamp for %s: %v",
 			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
@@ -82,18 +84,19 @@ func (o *PodObserver) recordStart(pod *corev1.Pod) {
 
 	queueWait := startTime.Sub(decisionTime).Milliseconds()
 
-	o.annotate(pod, "scheduling.hybrid.io/actualStart", startTime.Format(time.RFC3339))
-	o.annotate(pod, "scheduling.hybrid.io/queueWaitMs", fmt.Sprintf("%d", queueWait))
+	// Use constants
+	o.annotate(pod, constants.AnnotationActualStart, startTime.Format(time.RFC3339))
+	o.annotate(pod, constants.AnnotationQueueWait, fmt.Sprintf("%d", queueWait))
 
 	klog.V(4).Infof("Pod %s started after %dms queue wait",
 		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), queueWait)
 }
 
 func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
-	decision := Location(pod.Annotations["scheduling.hybrid.io/decision"])
-	predictedETA, _ := parseFloat64(pod.Annotations["scheduling.hybrid.io/predictedETAMs"])
-	queueWait, _ := parseFloat64(pod.Annotations["scheduling.hybrid.io/queueWaitMs"])
-	startTime, err := parseTime(pod.Annotations["scheduling.hybrid.io/actualStart"])
+	decision := Location(pod.Annotations[constants.AnnotationDecision])
+	predictedETA, _ := parseFloat64(pod.Annotations[constants.AnnotationPredictedETA])
+	queueWait, _ := parseFloat64(pod.Annotations[constants.AnnotationQueueWait])
+	startTime, err := parseTime(pod.Annotations[constants.AnnotationActualStart])
 	if err != nil {
 		klog.V(4).Infof("Pod %s missing start time annotation: %s",
 			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
@@ -108,7 +111,7 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	}
 	actualDuration := endTime.Sub(startTime).Milliseconds()
 
-	deadlineMs, _ := parseFloat64(pod.Annotations["slo.hybrid.io/deadlineMs"])
+	deadlineMs, _ := parseFloat64(pod.Annotations[constants.AnnotationSLODeadline])
 	totalTime := float64(queueWait) + float64(actualDuration)
 	sloMet := true
 	if deadlineMs != 0 {
@@ -143,7 +146,7 @@ func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
 	}
 	ops = append(ops, map[string]interface{}{
 		"op":    "add",
-		"path":  "/metadata/annotations/" + escapeJSONPointer(key),
+		"path":  "/metadata/annotations/" + util.EscapeJSONPointer(key),
 		"value": value,
 	})
 	patchBytes, _ := json.Marshal(ops)
@@ -181,10 +184,4 @@ func parseFloat64(s string) (float64, error) {
 		return 0, fmt.Errorf("empty float string")
 	}
 	return strconv.ParseFloat(s, 64)
-}
-
-func escapeJSONPointer(s string) string {
-	s = strings.ReplaceAll(s, "~", "~0")
-	s = strings.ReplaceAll(s, "/", "~1")
-	return s
 }

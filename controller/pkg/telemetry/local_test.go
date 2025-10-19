@@ -1,6 +1,7 @@
 package telemetry_test
 
 import (
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestWantsEdge_NodeSelector(t *testing.T) {
 			Name:      "test-pod",
 			Namespace: "default",
 			Labels: map[string]string{
-				"scheduling.hybrid.io/managed": "true",
+				constants.LabelManaged: "true",
 			},
 		},
 		Spec: corev1.PodSpec{

@@ -6,6 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/slo"
 )
 
@@ -13,8 +14,8 @@ func TestParseSLO_Success_MinimalWithDeadline(t *testing.T) {
 	p := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
-				"slo.hybrid.io/deadlineMs": "2000",
-				"slo.hybrid.io/class":      "latency",
+				constants.AnnotationSLODeadline: "2000",
+				constants.AnnotationSLOClass:    "latency",
 			},
 		},
 	}
@@ -34,8 +35,8 @@ func TestParseSLO_UsesLatencyTargetAsDeadline(t *testing.T) {
 	p := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
-				"slo.hybrid.io/latencyTargetMs": "1500",
-				"slo.hybrid.io/class":           "throughput",
+				constants.AnnotationSLOLatencyTarget: "1500",
+				constants.AnnotationSLOClass:         "throughput",
 			},
 		},
 	}
@@ -62,39 +63,39 @@ func TestParseSLO_ValidationErrors(t *testing.T) {
 		{
 			name: "missing class",
 			ann: map[string]string{
-				"slo.hybrid.io/deadlineMs": "100",
+				constants.AnnotationSLODeadline: "100",
 			},
 			wantErr: "class",
 		},
 		{
 			name: "invalid class",
 			ann: map[string]string{
-				"slo.hybrid.io/deadlineMs": "100",
-				"slo.hybrid.io/class":      "weird",
+				constants.AnnotationSLODeadline: "100",
+				constants.AnnotationSLOClass:    "weird",
 			},
 			wantErr: "invalid class",
 		},
 		{
 			name: "deadline out of range",
 			ann: map[string]string{
-				"slo.hybrid.io/deadlineMs": "0",
-				"slo.hybrid.io/class":      "batch",
+				constants.AnnotationSLODeadline: "0",
+				constants.AnnotationSLOClass:    "batch",
 			},
 			wantErr: "out of range",
 		},
 		{
 			name: "priority out of range",
 			ann: map[string]string{
-				"slo.hybrid.io/deadlineMs": "100",
-				"slo.hybrid.io/class":      "batch",
-				"slo.hybrid.io/priority":   "11",
+				constants.AnnotationSLODeadline: "100",
+				constants.AnnotationSLOClass:    "batch",
+				constants.AnnotationSLOPriority: "11",
 			},
 			wantErr: "priority out of range",
 		},
 		{
 			name: "need at least one time metric",
 			ann: map[string]string{
-				"slo.hybrid.io/class": "latency",
+				constants.AnnotationSLOClass: "latency",
 			},
 			wantErr: "at least one of deadlineMs or latencyTargetMs",
 		},

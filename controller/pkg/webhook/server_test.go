@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -46,10 +47,10 @@ func TestWebhook_ManagedPodPatched(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 			Name:      "p1",
-			Labels:    map[string]string{"scheduling.hybrid.io/managed": "true"},
+			Labels:    map[string]string{constants.LabelManaged: "true"},
 			Annotations: map[string]string{
-				"slo.hybrid.io/deadlineMs": "1000",
-				"slo.hybrid.io/class":      "latency",
+				constants.AnnotationSLODeadline: "1000",
+				constants.AnnotationSLOClass:    "latency",
 			},
 		},
 	}

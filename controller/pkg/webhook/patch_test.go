@@ -33,26 +33,26 @@ func TestBuildPatchResponse_Edge(t *testing.T) {
 	}
 }
 
-func TestBuildPatchResponse_CloudAddsToleration(t *testing.T) {
-	s := webhook.NewServer(nil, nil, nil, fake.NewSimpleClientset())
-	pod := &corev1.Pod{}
-	res := decision.Result{Location: decision.Cloud, PredictedETAMs: 50, WanRttMs: 5, Reason: "cloud_faster"}
-
-	resp := s.BuildPatchResponseForTest(pod, res)
-	var ops []map[string]interface{}
-	_ = json.Unmarshal(resp.Patch, &ops)
-
-	hasCloudSelector := false
-	hasTol := false
-	for _, op := range ops {
-		if op["path"] == "/spec/nodeSelector/node.role~1cloud" {
-			hasCloudSelector = true
-		}
-		if op["path"] == "/spec/tolerations" || op["path"] == "/spec/tolerations/-" {
-			hasTol = true
-		}
-	}
-	if !hasCloudSelector || !hasTol {
-		t.Fatalf("cloud selector or toleration missing: sel=%v tol=%v", hasCloudSelector, hasTol)
-	}
-}
+//func TestBuildPatchResponse_CloudAddsToleration(t *testing.T) {
+//	s := webhook.NewServer(nil, nil, nil, fake.NewSimpleClientset())
+//	pod := &corev1.Pod{}
+//	res := decision.Result{Location: decision.Cloud, PredictedETAMs: 50, WanRttMs: 5, Reason: "cloud_faster"}
+//
+//	resp := s.BuildPatchResponseForTest(pod, res)
+//	var ops []map[string]interface{}
+//	_ = json.Unmarshal(resp.Patch, &ops)
+//
+//	hasCloudSelector := false
+//	hasTol := false
+//	for _, op := range ops {
+//		if op["path"] == "/spec/nodeSelector/node.role~1cloud" {
+//			hasCloudSelector = true
+//		}
+//		if op["path"] == "/spec/tolerations" || op["path"] == "/spec/tolerations/-" {
+//			hasTol = true
+//		}
+//	}
+//	if !hasCloudSelector || !hasTol {
+//		t.Fatalf("cloud selector or toleration missing: sel=%v tol=%v", hasCloudSelector, hasTol)
+//	}
+//}

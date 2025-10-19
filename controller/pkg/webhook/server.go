@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"net/http"
 	"time"
 
@@ -95,7 +96,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
+	if pod.Labels[constants.LabelManaged] != "true" {
 		klog.V(4).Infof("Pod %s/%s not managed, skipping",
 			pod.Namespace, pod.Name)
 		writeResponse(w, review, allow())
@@ -103,7 +104,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if pod.Annotations != nil &&
-		pod.Annotations["scheduling.hybrid.io/decision"] != "" {
+		pod.Annotations[constants.AnnotationDecision] != "" {
 		klog.V(4).Infof("Pod %s/%s already decided, skipping",
 			pod.Namespace, pod.Name)
 		writeResponse(w, review, allow())

@@ -18,6 +18,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 )
 
 var (
@@ -68,9 +70,9 @@ func NewLocalCollector(
 		},
 		"edgeManaged": func(obj interface{}) ([]string, error) {
 			pod := obj.(*corev1.Pod)
-			if pod.Labels["scheduling.hybrid.io/managed"] == "true" &&
-				(pod.Spec.NodeSelector["node.role/edge"] == "true" || wantsEdge(pod)) {
-				return []string{"true"}, nil
+			if pod.Labels[constants.LabelManaged] == constants.LabelValueTrue &&
+				(pod.Spec.NodeSelector[constants.NodeRoleLabelEdge] == constants.LabelValueTrue || wantsEdge(pod)) {
+				return []string{constants.LabelValueTrue}, nil
 			}
 			return []string{}, nil
 		},
@@ -91,8 +93,7 @@ func NewLocalCollector(
 }
 
 func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error) {
-	// Nodes with node.role/edge=true
-	edgeSelector := labels.SelectorFromSet(labels.Set{"node.role/edge": "true"})
+	edgeSelector := labels.SelectorFromSet(labels.Set{constants.NodeRoleLabelEdge: constants.LabelValueTrue})
 	nodes, err := l.nodeLister.List(edgeSelector)
 	if err != nil {
 		return l.cache, err
@@ -118,7 +119,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		totalAllocMemMi += n.Status.Allocatable.Memory().Value() / (1024 * 1024)
 	}
 
-	edgeManagedObjs, err := l.podIndexer.ByIndex("edgeManaged", "true")
+	edgeManagedObjs, err := l.podIndexer.ByIndex("edgeManaged", constants.LabelValueTrue)
 	if err != nil {
 		klog.V(4).Infof("Index lookup failed, falling back to full list: %v", err)
 		edgeManagedObjs = []interface{}{} // Fallback to empty
@@ -228,7 +229,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	var totalUsedCPU, totalUsedMemMi int64
 	if l.metricsClient != nil {
 		if nmList, err := l.metricsClient.MetricsV1beta1().NodeMetricses().
-			List(ctx, metav1.ListOptions{LabelSelector: "node.role/edge=true"}); err == nil {
+			List(ctx, metav1.ListOptions{LabelSelector: constants.NodeRoleLabelEdge + "=" + constants.LabelValueTrue}); err == nil {
 			for _, nm := range nmList.Items {
 				if _, ok := edgeNodes[nm.Name]; ok {
 					totalUsedCPU += nm.Usage.Cpu().MilliValue()
@@ -247,9 +248,9 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 
 	for _, p := range pods {
 		// For managed per-class count (your queue model)
-		if p.Labels["scheduling.hybrid.io/managed"] == "true" &&
+		if p.Labels[constants.LabelManaged] == constants.LabelValueTrue &&
 			p.Status.Phase == corev1.PodPending && p.Spec.NodeName == "" {
-			if class := p.Annotations["slo.hybrid.io/class"]; class != "" {
+			if class := p.Annotations[constants.AnnotationSLOClass]; class != "" {
 				pendingPerClass[class]++
 			}
 		}
@@ -362,7 +363,7 @@ func getEnvInt(key string, def int) int {
 // nodeSelector node.role/edge=true or required nodeAffinity.
 func wantsEdge(pod *corev1.Pod) bool {
 	if pod.Spec.NodeSelector != nil {
-		if v, ok := pod.Spec.NodeSelector["node.role/edge"]; ok && v == "true" {
+		if v, ok := pod.Spec.NodeSelector[constants.NodeRoleLabelEdge]; ok && v == constants.LabelValueTrue {
 			return true
 		}
 	}
@@ -371,13 +372,13 @@ func wantsEdge(pod *corev1.Pod) bool {
 		if req != nil {
 			for _, term := range req.NodeSelectorTerms {
 				for _, expr := range term.MatchExpressions {
-					if expr.Key != "node.role/edge" {
+					if expr.Key != constants.NodeRoleLabelEdge {
 						continue
 					}
 					switch expr.Operator {
 					case corev1.NodeSelectorOpIn:
 						for _, v := range expr.Values {
-							if v == "true" {
+							if v == constants.LabelValueTrue {
 								return true
 							}
 						}

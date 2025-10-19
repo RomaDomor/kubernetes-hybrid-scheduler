@@ -5,6 +5,8 @@ import (
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 )
 
 type SLO struct {
@@ -26,7 +28,7 @@ func ParseSLO(pod *corev1.Pod) (*SLO, error) {
 		OffloadAllowed: true,
 	}
 
-	if v, ok := annotations["slo.hybrid.io/deadlineMs"]; ok {
+	if v, ok := annotations[constants.AnnotationSLODeadline]; ok {
 		val, err := strconv.Atoi(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid deadlineMs: %v", err)
@@ -37,7 +39,7 @@ func ParseSLO(pod *corev1.Pod) (*SLO, error) {
 		slo.DeadlineMs = val
 	}
 
-	if v, ok := annotations["slo.hybrid.io/latencyTargetMs"]; ok {
+	if v, ok := annotations[constants.AnnotationSLOLatencyTarget]; ok {
 		val, err := strconv.Atoi(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid latencyTargetMs: %v", err)
@@ -56,24 +58,17 @@ func ParseSLO(pod *corev1.Pod) (*SLO, error) {
 		slo.DeadlineMs = slo.LatencyTargetMs
 	}
 
-	slo.Class = annotations["slo.hybrid.io/class"]
+	slo.Class = annotations[constants.AnnotationSLOClass]
 	if slo.Class == "" {
-		return nil, fmt.Errorf("slo.hybrid.io/class annotation required")
+		return nil, fmt.Errorf("annotation %s required", constants.AnnotationSLOClass)
 	}
 
 	// Validate class (whitelist)
-	validClasses := map[string]bool{
-		"latency":     true,
-		"throughput":  true,
-		"batch":       true,
-		"interactive": true,
-		"streaming":   true,
-	}
-	if !validClasses[slo.Class] {
+	if !constants.ValidSLOClasses[slo.Class] {
 		return nil, fmt.Errorf("invalid class '%s', must be one of: latency, throughput, batch, interactive, streaming", slo.Class)
 	}
 
-	if v, ok := annotations["slo.hybrid.io/priority"]; ok {
+	if v, ok := annotations[constants.AnnotationSLOPriority]; ok {
 		val, err := strconv.Atoi(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid priority: %v", err)
@@ -84,7 +79,7 @@ func ParseSLO(pod *corev1.Pod) (*SLO, error) {
 		slo.Priority = val
 	}
 
-	if v, ok := annotations["slo.hybrid.io/offloadAllowed"]; ok {
+	if v, ok := annotations[constants.AnnotationSLOOffloadAllowed]; ok {
 		slo.OffloadAllowed = v != "false"
 	}
 
