@@ -85,7 +85,7 @@ func main() {
 
 	// Initialize telemetry collectors
 	localCollector := telemetry.NewLocalCollector(kubeClient, metricsClient, podInformer, nodeInformer)
-	wanProbe := telemetry.NewWANProbe(cloudEndpoint, 60*time.Second)
+	wanProbe := telemetry.NewWANProbe(cloudEndpoint, 15*time.Second)
 	telemetryCollector := telemetry.NewCombinedCollector(localCollector, wanProbe)
 
 	klog.Info("Starting informers...")

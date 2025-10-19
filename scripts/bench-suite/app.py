@@ -1222,6 +1222,7 @@ def wan_apply_and_record(results_dir: Path, router: str, profile: str) -> dict:
         (results_dir / "router_qdisc.txt").write_text(qdisc)
     except Exception as e:
         (results_dir / "router_error.txt").write_text(str(e))
+    time.sleep(10)
     return meta
 
 
