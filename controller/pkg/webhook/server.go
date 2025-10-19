@@ -126,6 +126,11 @@ func (s *Server) processScheduling(
 		return allow()
 	}
 
+	// Try a quick refresh (non-blocking if it fails)
+	ctx2, cancel2 := context.WithTimeout(ctx, 300*time.Millisecond)
+	_, _ = s.tel.GetLocalState(ctx2)
+	cancel2()
+
 	local := s.tel.GetCachedLocalState()
 	wan := s.tel.GetCachedWANState()
 

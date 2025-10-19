@@ -327,7 +327,7 @@ func (l *LocalCollector) GetCachedLocalState() *LocalState {
 	}
 
 	staleDuration := time.Since(l.cache.Timestamp)
-	isStale := staleDuration > 60*time.Second
+	isStale := staleDuration > 20*time.Second
 
 	state := *l.cache // Copy
 	state.IsStale = isStale
