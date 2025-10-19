@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/util"
 	"net/http"
 	"time"
 
@@ -16,9 +14,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/slo"
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
+	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
 
 type decider interface {
@@ -52,7 +52,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Rate limiting
-	if !s.limiter.Allow() {
+	if s.limiter != nil && !s.limiter.Allow() {
 		klog.Warning("Admission rate limit exceeded")
 		admissionRateLimited.Inc()
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
@@ -120,6 +120,11 @@ func (s *Server) processScheduling(
 	ctx context.Context,
 	pod *corev1.Pod,
 ) *admissionv1.AdmissionResponse {
+	if s.tel == nil {
+		klog.Error("telemetry collector is nil; allowing request without mutation")
+		return allow()
+	}
+
 	// Parse SLO
 	sloData, err := slo.ParseSLO(pod)
 	if err != nil {
@@ -139,6 +144,16 @@ func (s *Server) processScheduling(
 
 	local := s.tel.GetCachedLocalState()
 	wan := s.tel.GetCachedWANState()
+
+	if local == nil {
+		local = &telemetry.LocalState{
+			PendingPodsPerClass: map[string]int{},
+			IsStale:             true,
+		}
+	}
+	if wan == nil {
+		wan = &telemetry.WANState{RTTMs: 999, IsStale: true}
+	}
 
 	// Decide
 	result := s.dec.Decide(pod, sloData, local, wan)
@@ -165,6 +180,29 @@ func (s *Server) processScheduling(
 	}, metav1.CreateOptions{})
 	if err != nil {
 		klog.Warningf("%s: Failed to create event", util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
+	if s.kubeClient != nil {
+		_, err = s.kubeClient.CoreV1().Events(pod.Namespace).Create(ctx, &corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("%s.%x", pod.Name, time.Now().UnixNano()),
+				Namespace: pod.Namespace,
+			},
+			InvolvedObject: corev1.ObjectReference{
+				Kind:      "Pod",
+				Namespace: pod.Namespace,
+				Name:      pod.Name,
+				UID:       pod.UID,
+			},
+			Reason: "SchedulingDecision",
+			Message: fmt.Sprintf("Scheduled to %s: %s (ETA: %.0fms, WAN RTT: %dms)",
+				result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs),
+			Type:           corev1.EventTypeNormal,
+			FirstTimestamp: metav1.NewTime(time.Now()),
+			LastTimestamp:  metav1.NewTime(time.Now()),
+			Count:          1,
+		}, metav1.CreateOptions{})
+		if err != nil {
+			klog.Warningf("Failed to create event for pod %s", pod.Name)
+		}
 	}
 
 	klog.Infof("%s: Decision: %s (reason=%s, predicted_eta=%.0fms, wan_rtt=%dms)",
@@ -179,7 +217,9 @@ func writeResponse(
 	in admissionv1.AdmissionReview,
 	resp *admissionv1.AdmissionResponse,
 ) {
-	resp.UID = in.Request.UID
+	if in.Request != nil {
+		resp.UID = in.Request.UID
+	}
 	out := admissionv1.AdmissionReview{
 		TypeMeta: in.TypeMeta,
 		Response: resp,

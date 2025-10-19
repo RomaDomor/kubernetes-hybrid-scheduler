@@ -11,6 +11,7 @@ type Collector interface {
 	GetCachedLocalState() *LocalState
 	GetCachedWANState() *WANState
 	UpdateMetrics()
+	GetQueueStats() *QueueStatsCollector
 
 	LockForDecision()
 	UnlockForDecision()
@@ -43,10 +44,11 @@ type WANState struct {
 type CombinedCollector struct {
 	local *LocalCollector
 	wan   *WANProbe
+	queue *QueueStatsCollector
 }
 
-func NewCombinedCollector(local *LocalCollector, wan *WANProbe) *CombinedCollector {
-	return &CombinedCollector{local: local, wan: wan}
+func NewCombinedCollector(local *LocalCollector, wan *WANProbe, queue *QueueStatsCollector) *CombinedCollector {
+	return &CombinedCollector{local: local, wan: wan, queue: queue}
 }
 
 // Local state
@@ -71,6 +73,12 @@ func (c *CombinedCollector) GetCachedWANState() *WANState {
 func (c *CombinedCollector) UpdateMetrics() {
 	c.local.UpdateMetrics()
 	c.wan.UpdateMetrics()
+	c.queue.UpdateMetrics()
+}
+
+// Queue
+func (c *CombinedCollector) GetQueueStats() *QueueStatsCollector {
+	return c.queue
 }
 
 // Mutex

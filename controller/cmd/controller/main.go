@@ -152,10 +152,16 @@ func main() {
 	podInformer := informerFactory.Core().V1().Pods()
 	nodeInformer := informerFactory.Core().V1().Nodes()
 
+	// Initialize queue statistics collector (5min window, min 5 samples)
+	queueStats := telemetry.NewQueueStatsCollector(5*time.Minute, 5)
+
 	// Initialize telemetry collectors
 	localCollector := telemetry.NewLocalCollector(kubeClient, metricsClient, podInformer, nodeInformer)
+	if localCollector == nil {
+		klog.Fatalf("Failed to initialize local telemetry collector")
+	}
 	wanProbe := telemetry.NewWANProbe(cloudEndpoint, 15*time.Second)
-	telemetryCollector := telemetry.NewCombinedCollector(localCollector, wanProbe)
+	telemetryCollector := telemetry.NewCombinedCollector(localCollector, wanProbe, queueStats)
 
 	klog.Info("Starting informers...")
 	informerFactory.Start(stopCh)
@@ -179,7 +185,7 @@ func main() {
 	}
 
 	// PodObserver runs as separate goroutine with its own rate limiting
-	podObserver := decision.NewPodObserver(kubeClient, profileStore, podInformer)
+	podObserver := decision.NewPodObserver(kubeClient, profileStore, podInformer, queueStats)
 	go podObserver.Watch(stopCh)
 
 	// Auto-save profiles periodically
@@ -202,6 +208,7 @@ func main() {
 
 	// Create decision engine
 	config.ProfileStore = profileStore
+	config.QueueStats = queueStats
 	decisionEngine := decision.NewEngine(config)
 
 	// Plain HTTP admin server for metrics and health

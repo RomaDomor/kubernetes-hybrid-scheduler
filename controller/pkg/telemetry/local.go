@@ -98,7 +98,17 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	edgeSelector := labels.SelectorFromSet(labels.Set{constants.NodeRoleLabelEdge: constants.LabelValueTrue})
 	nodes, err := l.nodeLister.List(edgeSelector)
 	if err != nil {
-		return l.cache, err
+		if l.cache != nil {
+			return l.cache, err
+		}
+
+		st := &LocalState{
+			FreeCPU:             0,
+			FreeMem:             0,
+			PendingPodsPerClass: make(map[string]int),
+			IsStale:             true,
+		}
+		return st, err
 	}
 	if len(nodes) == 0 {
 		// No edge nodes: return a pessimistic snapshot

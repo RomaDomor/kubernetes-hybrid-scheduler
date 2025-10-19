@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
+	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
@@ -24,17 +25,20 @@ type PodObserver struct {
 	kubeClient  kubernetes.Interface
 	store       *ProfileStore
 	podInformer cache.SharedIndexInformer
+	queueStats  *telemetry.QueueStatsCollector
 }
 
 func NewPodObserver(
 	kubeClient kubernetes.Interface,
 	profileStore *ProfileStore,
 	podInf coreinformers.PodInformer,
+	queueStats *telemetry.QueueStatsCollector,
 ) *PodObserver {
 	return &PodObserver{
 		kubeClient:  kubeClient,
 		store:       profileStore,
 		podInformer: podInf.Informer(),
+		queueStats:  queueStats,
 	}
 }
 
@@ -42,25 +46,15 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 	klog.Info("PodObserver starting")
 
 	_, err := o.podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			pod := obj.(*corev1.Pod)
+			o.handlePodAdd(pod)
+		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
+			oldPod := oldObj.(*corev1.Pod)
 			pod := newObj.(*corev1.Pod)
+			o.handlePodUpdate(oldPod, pod)
 
-			if pod.Labels[constants.LabelManaged] != "true" {
-				return
-			}
-			if pod.Annotations[constants.AnnotationDecision] == "" {
-				return
-			}
-
-			if pod.Status.Phase == corev1.PodRunning &&
-				pod.Annotations[constants.AnnotationActualStart] == "" {
-				o.recordStart(pod)
-			}
-
-			if pod.Status.Phase == corev1.PodSucceeded ||
-				pod.Status.Phase == corev1.PodFailed {
-				o.recordCompletion(pod)
-			}
 		},
 	})
 	if err != nil {
@@ -70,6 +64,56 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 
 	klog.Info("PodObserver handlers registered")
 	<-stopCh
+}
+
+func (o *PodObserver) handlePodAdd(pod *corev1.Pod) {
+	if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
+		return
+	}
+
+			if pod.Labels[constants.LabelManaged] != "true" {
+				return
+			}
+			if pod.Annotations[constants.AnnotationDecision] == "" {
+				return
+			}
+	// Record arrival for new managed pods that are Pending
+	if pod.Status.Phase == corev1.PodPending {
+		if class := pod.Annotations["slo.hybrid.io/class"]; class != "" && o.queueStats != nil {
+			o.queueStats.RecordArrival(class)
+		}
+	}
+}
+
+func (o *PodObserver) handlePodUpdate(oldPod, pod *corev1.Pod) {
+	if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
+		return
+	}
+
+	// Record arrival when pod transitions to Pending
+	if oldPod.Status.Phase != corev1.PodPending && pod.Status.Phase == corev1.PodPending {
+		if class := pod.Annotations["slo.hybrid.io/class"]; class != "" && o.queueStats != nil {
+			o.queueStats.RecordArrival(class)
+		}
+	}
+
+	if pod.Annotations["scheduling.hybrid.io/decision"] == "" {
+		return
+	}
+
+			if pod.Status.Phase == corev1.PodRunning &&
+				pod.Annotations[constants.AnnotationActualStart] == "" {
+				o.recordStart(pod)
+			}
+	if pod.Status.Phase == corev1.PodRunning &&
+		pod.Annotations["scheduling.hybrid.io/actualStart"] == "" {
+		o.recordStart(pod)
+	}
+
+	if pod.Status.Phase == corev1.PodSucceeded ||
+		pod.Status.Phase == corev1.PodFailed {
+		o.recordCompletion(pod)
+	}
 }
 
 func (o *PodObserver) recordStart(pod *corev1.Pod) {
@@ -123,6 +167,11 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 		QueueWaitMs:        float64(queueWait),
 		SLOMet:             sloMet,
 	})
+
+	// Record completion for queue statistics
+	if class := pod.Annotations["slo.hybrid.io/class"]; class != "" && o.queueStats != nil {
+		o.queueStats.RecordCompletion(class)
+	}
 
 	predErr := math.Abs(float64(actualDuration) - predictedETA)
 	recordPredictionError(key, predErr)

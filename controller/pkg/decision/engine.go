@@ -34,6 +34,7 @@ type EngineConfig struct {
 	WanStaleConfFactor      float64 // confidence multiplier when WAN is stale
 	EdgeHeadroomOverridePct float64 // % buffer needed on BestNode to allow scheduling
 	ProfileStore            *ProfileStore
+	QueueStats              *telemetry.QueueStatsCollector
 }
 
 type Engine struct {
@@ -256,8 +257,14 @@ func (e *Engine) predictETA(
 	if loc == constants.Edge {
 		class := pod.Annotations[constants.AnnotationSLOClass]
 		pendingCount := local.PendingPodsPerClass[class]
-		queueWaitMean = float64(pendingCount) * profile.MeanDurationMs
-		queueWaitP95 = float64(pendingCount) * profile.P95DurationMs
+
+		// Use M/G/1 queue estimation
+		queueWaitMean = EstimateQueueWait(class, profile, pendingCount, e.config.QueueStats)
+		// For P95 estimate, use same queue wait (conservative)
+		queueWaitP95 = queueWaitMean
+
+		klog.V(5).Infof("Queue wait estimate for class %s: %.1fms (pending=%d)",
+			class, queueWaitMean, pendingCount)
 	}
 
 	wanOverhead := 0.0

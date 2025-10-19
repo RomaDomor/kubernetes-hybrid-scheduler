@@ -80,6 +80,16 @@ spec:
                 configMapKeyRef:
                   name: scheduler-config
                   key: edgeHeadroomOverridePct
+            - name: QUEUE_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: queueModel
+            - name: MG1_BLEND_ALPHA
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: mg1BlendAlpha
             # Histogram config
             - name: HIST_BOUNDS_MODE
               valueFrom:
