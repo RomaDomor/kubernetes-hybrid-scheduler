@@ -264,8 +264,7 @@ func (ps *ProfileStore) getOrDefaultLocked(key ProfileKey) *ProfileStats {
 
 // Histogram helpers
 func initHistogram() []HistogramBucket {
-	// Buckets: 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, +Inf
-	bounds := []float64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, math.Inf(1)}
+	bounds := []float64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 1e12}
 	buckets := make([]HistogramBucket, len(bounds))
 	for i, bound := range bounds {
 		buckets[i] = HistogramBucket{UpperBound: bound, Count: 0}
