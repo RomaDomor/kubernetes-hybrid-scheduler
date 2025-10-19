@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
@@ -21,18 +20,23 @@ import (
 )
 
 type Server struct {
-	dec           *decision.Engine
-	tel           telemetry.Collector
-	limiter       *rate.Limiter
-	kubeClient    kubernetes.Interface
-	eventRecorder record.EventRecorder
+	dec        *decision.Engine
+	tel        telemetry.Collector
+	limiter    *rate.Limiter
+	kubeClient kubernetes.Interface
 }
 
-func NewServer(dec *decision.Engine, tel telemetry.Collector, limiter *rate.Limiter) *Server {
+func NewServer(
+	dec *decision.Engine,
+	tel telemetry.Collector,
+	limiter *rate.Limiter,
+	kubeClient kubernetes.Interface,
+) *Server {
 	return &Server{
-		dec:     dec,
-		tel:     tel,
-		limiter: limiter,
+		dec:        dec,
+		tel:        tel,
+		limiter:    limiter,
+		kubeClient: kubeClient,
 	}
 }
 

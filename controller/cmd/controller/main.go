@@ -163,7 +163,7 @@ func main() {
 	limiter := rate.NewLimiter(rate.Limit(100), 200) // 100 req/s, burst 200
 
 	// TLS webhook server
-	wh := webhook.NewServer(decisionEngine, telemetryCollector, limiter)
+	wh := webhook.NewServer(decisionEngine, telemetryCollector, limiter, kubeClient)
 	webhookMux := http.NewServeMux()
 	webhookMux.Handle("/mutate", wh)
 
