@@ -159,8 +159,10 @@ func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
 		if err == nil {
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
-		klog.V(5).Infof("Retrying pod annotation patch: %v", err)
+		if i < 2 { // Don't sleep on last attempt
+			time.Sleep(100 * time.Millisecond)
+			klog.V(5).Infof("Retrying pod annotation patch (attempt %d/3): %v", i+1, err)
+		}
 	}
 
 	klog.V(4).Infof("Failed to patch pod %s after retries",

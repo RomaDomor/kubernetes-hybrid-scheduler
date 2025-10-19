@@ -3,7 +3,6 @@ package decision
 import (
 	"container/list"
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -50,9 +50,27 @@ type ProfileStats struct {
 }
 
 type HistogramBucket struct {
-	UpperBound float64   `json:"upper_bound"`
-	Count      int       `json:"count"`
-	LastDecay  time.Time `json:"last_decay"`
+	UpperBoundValue float64   `json:"upper_bound_value"`
+	UpperBoundStr   string    `json:"upper_bound_str"`
+	Count           int       `json:"count"`
+	LastDecay       time.Time `json:"last_decay"`
+}
+
+func (hb *HistogramBucket) UpperBound() float64 {
+	if hb.UpperBoundStr == "Inf" {
+		return math.Inf(1)
+	}
+	return hb.UpperBoundValue
+}
+
+func (hb *HistogramBucket) SetUpperBound(val float64) {
+	if math.IsInf(val, +1) {
+		hb.UpperBoundStr = "Inf"
+		hb.UpperBoundValue = 0
+	} else {
+		hb.UpperBoundStr = ""
+		hb.UpperBoundValue = val
+	}
 }
 
 type ProfileUpdate struct {
@@ -174,10 +192,21 @@ func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
 	defer ps.mu.Unlock()
 
 	keyStr := key.String()
+
+	// Ingest guard: discard or clamp extreme durations
+	const ingestCapMs = 60 * 60 * 1000.0 // 1 hour
+	dur := update.ObservedDurationMs
+	if dur < 0 || dur > ingestCapMs {
+		klog.V(4).Infof(
+			"Discarding outlier duration %.0fms for %s (capped at %.0fms)",
+			dur, keyStr, ingestCapMs,
+		)
+		dur = ingestCapMs
+	}
+
 	profile, exists := ps.profiles[keyStr]
 
 	if !exists {
-		// Check capacity before adding
 		if len(ps.profiles) >= ps.maxEntries {
 			ps.evictLRU()
 		}
@@ -186,7 +215,6 @@ func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
 		ps.profiles[keyStr] = profile
 		ps.lruMap[keyStr] = ps.lru.PushFront(&lruEntry{key: keyStr, stats: profile})
 	} else {
-		// Move to front of LRU
 		if elem, ok := ps.lruMap[keyStr]; ok {
 			ps.lru.MoveToFront(elem)
 		}
@@ -195,15 +223,15 @@ func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
 	alpha := 0.2
 
 	oldMean := profile.MeanDurationMs
-	profile.MeanDurationMs = alpha*update.ObservedDurationMs + (1-alpha)*oldMean
+	profile.MeanDurationMs = alpha*dur + (1-alpha)*oldMean
 
-	diff := update.ObservedDurationMs - profile.MeanDurationMs
+	diff := dur - profile.MeanDurationMs
 	profile.StdDevDurationMs = math.Sqrt(
 		alpha*diff*diff + (1-alpha)*profile.StdDevDurationMs*profile.StdDevDurationMs,
 	)
 
-	// Update histogram and compute true P95
-	updateHistogram(profile.DurationHistogram, update.ObservedDurationMs)
+	// Update histogram with clamped duration and compute p95
+	updateHistogram(profile.DurationHistogram, dur)
 	profile.P95DurationMs = computeP95FromHistogram(profile.DurationHistogram)
 
 	profile.MeanQueueWaitMs = alpha*update.QueueWaitMs + (1-alpha)*profile.MeanQueueWaitMs
@@ -218,10 +246,12 @@ func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
 	profile.ConfidenceScore = math.Min(1.0, float64(profile.Count)/20.0)
 	profile.LastUpdated = time.Now()
 
-	klog.V(4).Infof("Profile updated: %s count=%d conf=%.2f mean=%.1fms p95=%.1fms slo=%.2f%%",
+	klog.V(4).Infof(
+		"Profile updated: %s count=%d conf=%.2f mean=%.1fms p95=%.1fms slo=%.2f%%",
 		keyStr, profile.Count, profile.ConfidenceScore,
 		profile.MeanDurationMs, profile.P95DurationMs,
-		profile.SLOComplianceRate*100)
+		profile.SLOComplianceRate*100,
+	)
 }
 
 // LRU eviction
@@ -264,10 +294,15 @@ func (ps *ProfileStore) getOrDefaultLocked(key ProfileKey) *ProfileStats {
 
 // Histogram helpers
 func initHistogram() []HistogramBucket {
-	bounds := []float64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 1e12}
+	bounds := []float64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, math.Inf(1)}
 	buckets := make([]HistogramBucket, len(bounds))
+	now := time.Now()
 	for i, bound := range bounds {
-		buckets[i] = HistogramBucket{UpperBound: bound, Count: 0}
+		buckets[i] = HistogramBucket{
+			Count:     0,
+			LastDecay: now,
+		}
+		buckets[i].SetUpperBound(bound)
 	}
 	return buckets
 }
@@ -281,8 +316,11 @@ func updateHistogram(buckets []HistogramBucket, value float64) {
 			buckets[i].Count = buckets[i].Count / 2
 			buckets[i].LastDecay = now
 		}
+	}
 
-		if value <= buckets[i].UpperBound {
+	// Use UpperBound() helper to handle Inf properly
+	for i := range buckets {
+		if value <= buckets[i].UpperBound() {
 			buckets[i].Count++
 			return
 		}
@@ -290,44 +328,82 @@ func updateHistogram(buckets []HistogramBucket, value float64) {
 }
 
 func computeP95FromHistogram(buckets []HistogramBucket) float64 {
-	totalCount := 0
+	total := 0
 	for _, b := range buckets {
-		totalCount += b.Count
+		total += b.Count
 	}
-
-	if totalCount == 0 {
+	if total == 0 {
 		return 200 // Default
 	}
 
-	p95Count := int(float64(totalCount) * 0.95)
-	cumulative := 0
+	// Require minimum sample size for trustworthy p95
+	const minSampleCount = 20
+	const capMs = 900000.0 // 15 minutes cap
+
+	if total < minSampleCount {
+		// Fall back to conservative approximation
+		return capMs / 2
+	}
+
+	target := int(math.Ceil(0.95 * float64(total)))
+	cum := 0
 
 	for i, b := range buckets {
-		cumulative += b.Count
-		if cumulative >= p95Count {
-			if i == 0 {
-				return b.UpperBound
-			}
-			// Linear interpolation within bucket
-			prevBound := 0.0
+		cum += b.Count
+		if cum >= target {
+			// Determine bounds for interpolation
+			var prev float64
 			if i > 0 {
-				prevBound = buckets[i-1].UpperBound
+				prev = buckets[i-1].UpperBound()
+			} else {
+				prev = 0
 			}
-			ratio := float64(p95Count-(cumulative-b.Count)) / float64(b.Count)
-			return prevBound + ratio*(b.UpperBound-prevBound)
+
+			ub := buckets[i].UpperBound()
+
+			// If ub is +Inf, use a capped synthetic upper bound
+			if math.IsInf(ub, +1) {
+				if prev <= 0 {
+					return capMs
+				}
+				// Use min(prev * 2, capMs) as synthetic upper bound
+				ub = math.Min(prev*2, capMs)
+			}
+
+			// Avoid division by zero
+			if b.Count == 0 {
+				return math.Min(ub, capMs)
+			}
+
+			// Linear interpolation within bucket
+			ratio := float64(target-(cum-b.Count)) / float64(b.Count)
+			p := prev + ratio*(ub-prev)
+
+			// Clamp to cap
+			if p > capMs {
+				p = capMs
+			}
+			// Ensure non-decreasing vs previous bound
+			if p < prev {
+				p = prev
+			}
+			return p
 		}
 	}
 
-	return buckets[len(buckets)-2].UpperBound // Use second-to-last bucket (before +Inf)
+	// Fallback: return penultimate bucket's upper bound
+	// (avoid returning +Inf)
+	if len(buckets) >= 2 {
+		last := buckets[len(buckets)-2].UpperBound()
+		if last > capMs {
+			return capMs
+		}
+		return last
+	}
+	return capMs
 }
 
-// CRD-based persistence
-func (ps *ProfileStore) SaveToConfigMap(_ kubernetes.Interface) error {
-	// Deprecated: Use SaveToCRD instead
-	klog.Warning("SaveToConfigMap is deprecated, use SaveToCRD")
-	return fmt.Errorf("SaveToConfigMap is deprecated")
-}
-
+// CRD-based persistence (clean: no custom JSON, uses sentinel fields)
 func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
@@ -339,7 +415,13 @@ func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
 	saved := 0
 
 	for keyStr, profile := range ps.profiles {
-		// Try to get existing object
+		// Convert to unstructured map directly
+		profileMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(profile)
+		if err != nil {
+			klog.V(4).Infof("Convert ProfileStats to map for %s failed: %v", keyStr, err)
+			continue
+		}
+
 		existing, err := res.Get(ctx, keyStr, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
@@ -353,7 +435,7 @@ func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
 							"namespace": "kube-system",
 						},
 						"spec": map[string]interface{}{
-							"profile": profileToMap(profile),
+							"profile": profileMap,
 						},
 					},
 				}
@@ -380,7 +462,7 @@ func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
 					"resourceVersion": existing.GetResourceVersion(),
 				},
 				"spec": map[string]interface{}{
-					"profile": profileToMap(profile),
+					"profile": profileMap,
 				},
 			},
 		}
@@ -398,12 +480,6 @@ func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
 
 	klog.V(3).Infof("Saved %d profiles to CRDs", saved)
 	return nil
-}
-
-func (ps *ProfileStore) LoadFromConfigMap(_ kubernetes.Interface) error {
-	// Deprecated
-	klog.Warning("LoadFromConfigMap is deprecated, use LoadFromCRD")
-	return fmt.Errorf("LoadFromConfigMap is deprecated")
 }
 
 func (ps *ProfileStore) LoadFromCRD(dynClient dynamic.Interface) error {
@@ -426,7 +502,12 @@ func (ps *ProfileStore) LoadFromCRD(dynClient dynamic.Interface) error {
 			continue
 		}
 
-		profile := mapToProfile(specMap)
+		profile := &ProfileStats{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(specMap, profile); err != nil {
+			klog.V(4).Infof("Convert specMap to ProfileStats for %s failed: %v", keyStr, err)
+			continue
+		}
+
 		ps.profiles[keyStr] = profile
 		ps.lruMap[keyStr] = ps.lru.PushFront(&lruEntry{key: keyStr, stats: profile})
 	}
@@ -467,27 +548,6 @@ func (ps *ProfileStore) ExportAllProfiles() map[string]*ProfileStats {
 		export[k] = deepCopyProfile(v)
 	}
 	return export
-}
-
-func profileToMap(p *ProfileStats) map[string]interface{} {
-	data, err := json.Marshal(p)
-	if err != nil {
-		klog.Errorf("Failed to marshal profile: %v", err)
-		return map[string]interface{}{}
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(data, &m); err != nil {
-		klog.Errorf("Failed to unmarshal profile: %v", err)
-		return map[string]interface{}{}
-	}
-	return m
-}
-
-func mapToProfile(m map[string]interface{}) *ProfileStats {
-	data, _ := json.Marshal(m)
-	var p ProfileStats
-	_ = json.Unmarshal(data, &p)
-	return &p
 }
 
 func defaultProfiles() map[string]*ProfileStats {
