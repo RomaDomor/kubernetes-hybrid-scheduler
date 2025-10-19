@@ -29,20 +29,36 @@ This chart includes a self-contained mechanism for generating the necessary TLS 
 
 ## Installing the Chart
 
-1.  **Clone the repository** to get access to the chart source.
+### Option 1: Install from Helm Repository (Recommended)
+
+This is the recommended method for most users. It allows you to easily install and manage the chart and its versions.
+
+1.  **Add the Smart Scheduler Helm repository:**
 
     ```sh
-    git clone <your-repo-url>
-    cd <your-repo-directory>
+    helm repo add smart-scheduler https://romadomor.github.io/kubernetes-hybrid-scheduler/
+    helm repo update
     ```
 
-2.  **Install the chart** into your desired namespace. It is recommended to install it in `kube-system` where other cluster components reside.
+2.  **Install the chart:**
+
+    Install the chart into your desired namespace (we recommend `kube-system`).
 
     ```sh
     # The CRD is installed automatically from the crds/ directory
-    helm install smart-scheduler ./smart-scheduler \
+    helm install smart-scheduler smart-scheduler/smart-scheduler \
       --namespace kube-system \
       --create-namespace
+    ```
+
+    You can search for available versions to install:
+    ```sh
+    helm search repo smart-scheduler
+    ```
+
+    And install a specific version using the `--version` flag:
+    ```sh
+    helm install smart-scheduler smart-scheduler/smart-scheduler --version 0.1.0
     ```
 
 ### Installing with Custom Configuration
@@ -65,10 +81,16 @@ resources:
     memory: 1Gi
 ```
 
-Then, install the chart using the `-f` flag:
+Then, install the chart using the `-f` flag with your preferred installation method:
 
 ```sh
-helm install smart-scheduler ./smart-scheduler \
+# From Helm repository
+helm install smart-scheduler smart-scheduler/smart-scheduler \
+  -f my-values.yaml \
+  --namespace kube-system
+
+# Or from a local path
+helm install smart-scheduler ./deployments/smart-scheduler \
   -f my-values.yaml \
   --namespace kube-system
 ```
