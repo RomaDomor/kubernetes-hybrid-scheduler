@@ -166,6 +166,11 @@ func (e *Engine) Decide(
 		nodeOK = local.BestEdgeNode.FreeCPU >= reqCPU && local.BestEdgeNode.FreeMem >= reqMem
 	}
 
+	if local.FreeCPU < reqCPU || local.FreeMem < reqMem {
+		klog.V(4).Info("Cluster-wide free below request; treating edge as capacity-constrained")
+		nodeOK = false
+	}
+
 	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs) && nodeOK
 	cloudFeasible := (cloudETA.P95 + explorationBonus) <= float64(slo.DeadlineMs)
 
