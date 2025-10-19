@@ -130,3 +130,8 @@ func escapeJSONPointer(s string) string {
 	s = strings.ReplaceAll(s, "/", "~1")
 	return s
 }
+
+// Test Helpers
+func (s *Server) BuildPatchResponseForTest(pod *corev1.Pod, res decision.Result) *admissionv1.AdmissionResponse {
+	return s.buildPatchResponse(pod, res)
+}

@@ -392,3 +392,19 @@ func wantsEdge(pod *corev1.Pod) bool {
 	}
 	return false
 }
+
+// Test helpers
+type LocalCollectorForTest struct {
+	Cache *LocalState
+}
+
+func (l *LocalCollectorForTest) GetCachedLocalState() *LocalState {
+	if l.Cache == nil {
+		return &LocalState{PendingPodsPerClass: map[string]int{}, IsStale: true}
+	}
+	staleDuration := time.Since(l.Cache.Timestamp)
+	state := *l.Cache
+	state.IsStale = staleDuration > 60*time.Second
+	state.StaleDuration = staleDuration
+	return &state
+}

@@ -19,15 +19,18 @@ import (
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 )
 
+type decider interface {
+	Decide(pod *corev1.Pod, slo *slo.SLO, local *telemetry.LocalState, wan *telemetry.WANState) decision.Result
+}
 type Server struct {
-	dec        *decision.Engine
+	dec        decider
 	tel        telemetry.Collector
 	limiter    *rate.Limiter
 	kubeClient kubernetes.Interface
 }
 
 func NewServer(
-	dec *decision.Engine,
+	dec decider,
 	tel telemetry.Collector,
 	limiter *rate.Limiter,
 	kubeClient kubernetes.Interface,
