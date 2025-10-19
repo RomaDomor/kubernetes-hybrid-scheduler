@@ -1,0 +1,67 @@
+# smart-scheduler/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "smart-scheduler.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "smart-scheduler.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "smart-scheduler.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "smart-scheduler.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.name }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.targetPorts.https }}
+              name: webhook
+              protocol: TCP
+            - containerPort: {{ .Values.service.targetPorts.metrics }}
+              name: metrics
+              protocol: TCP
+          command:
+            - /smart-scheduler
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+              scheme: HTTP
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+              scheme: HTTP
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+          env:
+{{- range $key, $val := .Values.config }}
+            - name: {{ $key | upper | replace "." "_" }}
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "smart-scheduler.fullname" $ }}-config
+                  key: {{ $key }}
+{{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: certs
+          secret:
+            secretName: {{ .Values.webhookSecretName }}

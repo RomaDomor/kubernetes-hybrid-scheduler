@@ -1,0 +1,53 @@
+name: Release and Publish Helm Chart
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Install yq
+        run: |
+          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+          sudo chmod +x /usr/bin/yq
+
+      - name: Update Chart Version from Git Tag
+        run: |
+          # GITHUB_REF_NAME is the tag that triggered the workflow (e.g., v1.2.3)
+          # Use `sed` to strip the leading 'v'
+          VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+          
+          echo "Git Tag: ${{ github.ref_name }}"
+          echo "Extracted Version: $VERSION"
+          
+          # The path to your chart file
+          CHART_FILE="./deployments/smart-scheduler/Chart.yaml"
+          
+          # Use yq to update both version and appVersion
+          yq e -i ".version = \"$VERSION\"" "$CHART_FILE"
+          yq e -i ".appVersion = \"$VERSION\"" "$CHART_FILE"
+          
+          echo "--- Updated Chart.yaml ---"
+          cat "$CHART_FILE"
+          echo "------------------------"
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Run Helm Chart Releaser
+        uses: helm/chart-releaser-action@v1.5.0
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          CR_CHART_PATH: "./deployments/smart-scheduler"

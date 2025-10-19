@@ -1,0 +1,73 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-cert-generator
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # This is a Helm hook that runs before install and upgrade
+    "helm.sh/hook": pre-install,pre-upgrade
+    # This policy cleans up the old job before a new one is created
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    spec:
+      serviceAccountName: {{ .Release.Name }}-cert-generator
+      containers:
+        - name: cert-generator
+          image: "{{ .Values.certGenerator.image.name }}:{{ .Values.certGenerator.image.tag }}"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              
+              # --- Configuration ---
+              NAMESPACE={{ .Release.Namespace }}
+              SERVICE_NAME=smart-scheduler-webhook
+              SECRET_NAME={{ .Values.webhookSecretName }}
+              WEBHOOK_NAME=smart-scheduler-webhook
+              
+              # --- Main Logic ---
+              WORKDIR=$(mktemp -d)
+              cd "$WORKDIR"
+              
+              echo "[INFO] Generating self-signed CA in $WORKDIR"
+              openssl genrsa -out ca.key 2048
+              openssl req -x509 -new -nodes -key ca.key -subj "/CN=${SERVICE_NAME}.${NAMESPACE}.svc-ca" -days 3650 -out ca.crt
+              
+              echo "[INFO] Generating server certificate"
+              cat >server.conf <<EOF
+              [req]
+              req_extensions = v3_req
+              distinguished_name = req_distinguished_name
+              [req_distinguished_name]
+              [v3_req]
+              keyUsage = digitalSignature, keyEncipherment
+              extendedKeyUsage = serverAuth
+              subjectAltName = @alt_names
+              [alt_names]
+              DNS.1 = ${SERVICE_NAME}
+              DNS.2 = ${SERVICE_NAME}.${NAMESPACE}
+              DNS.3 = ${SERVICE_NAME}.${NAMESPACE}.svc
+              EOF
+              openssl genrsa -out server.key 2048
+              openssl req -new -key server.key -subj "/CN=${SERVICE_NAME}.${NAMESPACE}.svc" -out server.csr -config server.conf
+              openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 365 -extensions v3_req -extfile server.conf
+              
+              echo "[INFO] Creating/Updating Secret ${SECRET_NAME} in ${NAMESPACE}"
+              # Delete secret first to ensure we don't have stale certs
+              kubectl delete secret ${SECRET_NAME} -n ${NAMESPACE} --ignore-not-found
+              kubectl create secret tls ${SECRET_NAME} \
+                --cert=server.crt \
+                --key=server.key \
+                -n ${NAMESPACE}
+              
+              CA_BUNDLE=$(base64 -w0 < ca.crt)
+              echo "[INFO] Patching MutatingWebhookConfiguration ${WEBHOOK_NAME} with CA bundle"
+              kubectl patch mutatingwebhookconfiguration ${WEBHOOK_NAME} \
+                --type='json' \
+                -p='[{"op": "replace", "path": "/webhooks/0/clientConfig/caBundle", "value":"'"${CA_BUNDLE}"'"}]'
+              
+              echo "[INFO] Certificate generation and webhook patching complete."
+
+      restartPolicy: OnFailure
+  backoffLimit: 3

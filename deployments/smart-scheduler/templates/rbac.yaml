@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "smart-scheduler.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "smart-scheduler.fullname" . }}
+  labels:
+    {{- include "smart-scheduler.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "get", "list"]
+  - apiGroups: ["scheduling.hybrid.io"]
+    resources: ["workloadprofiles"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "smart-scheduler.fullname" . }}
+  labels:
+    {{- include "smart-scheduler.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "smart-scheduler.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}

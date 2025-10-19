@@ -1,0 +1,83 @@
+replicaCount: 1
+
+image:
+  name: ghcr.io/romadomor/kubernetes-smart-scheduler
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart's appVersion.
+  tag: "latest"
+
+# Name of the service account to use.
+# If not set, a name is generated using the fullname template
+serviceAccountName: smart-scheduler-controller
+
+# -- Webhook service configuration
+service:
+  type: ClusterIP
+  ports:
+    https: 443
+    metrics: 8080
+  targetPorts:
+    https: 8443
+    metrics: 8080
+
+# -- Resource requests and limits for the controller pod.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -- Liveness and readiness probe settings
+probes:
+  liveness:
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 6
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 6
+
+# -- Name of the secret containing the webhook's TLS certificates.
+# -- This secret can be created by cert-manager or a Helm hook Job.
+webhookSecretName: smart-scheduler-certs
+
+# -- Configuration data for the smart-scheduler ConfigMap.
+# -- These values will populate the environment variables of the controller.
+config:
+  # -- WAN RTT threshold in milliseconds
+  rttThresholdMs: "100"
+  # -- WAN packet loss threshold in percent
+  lossThresholdPct: "2.0"
+  # -- Cloud endpoint for WAN probe
+  cloudEndpoint: "10.20.0.3"
+  # -- Edge locality score bonus
+  localityBonus: "25"
+  # -- Cloud deadline margin override percentage
+  cloudMarginOverridePct: "0.15"
+  # -- WAN stale confidence factor
+  wanStaleConfFactor: "0.8"
+  # -- Edge headroom override percentage
+  edgeHeadroomOverridePct: "0.1"
+
+  # -- Histogram configuration
+  histBoundsMode: "explicit"
+  histBounds: "50,100,200,500,1000,2000,5000,10000,20000,30000,60000,120000,180000,300000,450000,600000,900000,1200000,1500000,1800000"
+  histLogStartMs: "50"
+  histLogFactor: "2.0"
+  histLogCount: "20"
+  histIncludeInf: "1"
+  ingestCapMs: "1800000"
+  minSampleCount: "10"
+  decayInterval: "1h"
+
+# -- Configuration for the certificate generation job
+certGenerator:
+  # -- Image to use for generating certificates
+  image:
+    name: bitnami/kubectl
+    tag: latest

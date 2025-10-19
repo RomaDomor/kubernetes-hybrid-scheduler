@@ -1,0 +1,10 @@
+# smart-scheduler/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "smart-scheduler.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "smart-scheduler.labels" . | nindent 4 }}
+data:
+{{- toYaml .Values.config | nindent 2 }}
