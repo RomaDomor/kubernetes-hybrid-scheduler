@@ -40,7 +40,6 @@ spec:
             - --cloud-margin-override-pct=0.15
             - --wan-stale-conf-factor=0.8
             - --edge-headroom-override-pct=0.1
-            - --locality-bonus-factor=0.5
           livenessProbe:
             httpGet:
               path: /healthz
