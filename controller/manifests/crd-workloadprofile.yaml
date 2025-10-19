@@ -45,6 +45,9 @@ spec:
                             type: number
                           count:
                             type: integer
+                          last_decay:
+                            type: string
+                            format: date-time
   scope: Namespaced
   names:
     plural: workloadprofiles
