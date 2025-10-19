@@ -1222,7 +1222,6 @@ def wan_apply_and_record(results_dir: Path, router: str, profile: str) -> dict:
         (results_dir / "router_qdisc.txt").write_text(qdisc)
     except Exception as e:
         (results_dir / "router_error.txt").write_text(str(e))
-    time.sleep(10)
     return meta
 
 
@@ -1421,6 +1420,7 @@ def main():
     # Deploy local load generator BEFORE other workloads
     if args.local_load_profile != "none":
         deploy_local_load(apps_v1, ns_local, args.local_load_profile)
+        time.sleep(10)
 
     # Optionally apply WAN profile on router BEFORE deployments
     if args.wan_router and args.wan_profile and args.wan_profile != "none":
@@ -1436,6 +1436,7 @@ def main():
         (results_dir / "run_meta.json").write_text(
             json.dumps(run_meta, indent=2)
         )
+        time.sleep(10)
     else:
         log("WAN profile: none (skipping router configuration).")
 
