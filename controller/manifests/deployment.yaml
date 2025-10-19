@@ -16,7 +16,7 @@ spec:
       serviceAccountName: smart-scheduler-controller
       containers:
         - name: controller
-          image: ghcr.io/romadomor/kubernetes-smart-scheduler:latest
+          image: ghcr.io/romadomor/kubernetes-smart-scheduler:nightly
           imagePullPolicy: Always
           ports:
             - containerPort: 8443
