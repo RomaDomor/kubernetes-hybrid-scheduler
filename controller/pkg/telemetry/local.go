@@ -189,29 +189,30 @@ func isEdgeNode(nodeName string, edgeNodes map[string]struct{}) bool {
 }
 
 func wantsEdge(pod *corev1.Pod) bool {
-	// nodeSelector
 	if pod.Spec.NodeSelector != nil {
 		if v, ok := pod.Spec.NodeSelector["node.role/edge"]; ok && v == "true" {
 			return true
 		}
 	}
-	// nodeAffinity (requiredDuringSchedulingIgnoredDuringExecution)
 	if pod.Spec.Affinity != nil && pod.Spec.Affinity.NodeAffinity != nil {
 		req := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
 		if req != nil {
 			for _, term := range req.NodeSelectorTerms {
 				for _, expr := range term.MatchExpressions {
-					if expr.Key == "node.role/edge" {
-						switch expr.Operator {
-						case corev1.NodeSelectorOpIn:
-							for _, v := range expr.Values {
-								if v == "true" {
-									return true
-								}
+					if expr.Key != "node.role/edge" {
+						continue
+					}
+					switch expr.Operator {
+					case corev1.NodeSelectorOpIn:
+						for _, v := range expr.Values {
+							if v == "true" {
+								return true
 							}
-						case corev1.NodeSelectorOpExists:
-							return true
 						}
+					case corev1.NodeSelectorOpExists:
+						return true
+					default:
+						// ignore NotIn, DoesNotExist, Gt, Lt here
 					}
 				}
 			}
@@ -219,6 +220,7 @@ func wantsEdge(pod *corev1.Pod) bool {
 	}
 	return false
 }
+
 func (l *LocalCollector) GetCachedLocalState() *LocalState {
 	l.cacheMu.RLock()
 	defer l.cacheMu.RUnlock()
