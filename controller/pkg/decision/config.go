@@ -1,4 +1,3 @@
-// pkg/decision/config.go
 package decision
 
 import (
@@ -51,7 +50,6 @@ func ParseFloatSliceCSV(s string) []float64 {
 	return out
 }
 
-// Defaults aligned to your current code
 func DefaultHistogramConfig() HistogramConfig {
 	return HistogramConfig{
 		Mode:           BoundsExplicit,
