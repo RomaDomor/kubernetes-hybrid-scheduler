@@ -17,6 +17,12 @@ type LocalState struct {
 	FreeMem             int64          // MiB
 	PendingPodsPerClass map[string]int // class -> count
 	Timestamp           time.Time
+	BestEdgeNode        BestNode
+}
+type BestNode struct {
+	Name    string
+	FreeCPU int64 // mCPU
+	FreeMem int64 // MiB
 }
 
 type WANState struct {

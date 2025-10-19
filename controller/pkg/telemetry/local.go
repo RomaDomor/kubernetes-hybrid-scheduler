@@ -18,15 +18,16 @@ import (
 )
 
 var (
-	headroomCPUm  = int64(getEnvInt("HEADROOM_CPU_M", 200))  // 200m default
-	headroomMemMi = int64(getEnvInt("HEADROOM_MEM_MI", 256)) // 256Mi default
+	headroomCPUm     = int64(getEnvInt("HEADROOM_CPU_M", 200))  // 200m
+	headroomMemMi    = int64(getEnvInt("HEADROOM_MEM_MI", 256)) // 256Mi
+	pessimismPctEdge = int64(getEnvInt("EDGE_PENDING_PESSIMISM_PCT", 10))
 )
 
 type LocalCollector struct {
 	kubeClient    kubernetes.Interface
 	metricsClient metricsv.Interface
 	cache         *LocalState
-	cacheMu       sync.RWMutex // ADD THIS
+	cacheMu       sync.RWMutex
 	podLister     corelisters.PodLister
 	nodeLister    corelisters.NodeLister
 }
@@ -47,147 +48,220 @@ func NewLocalCollector(
 }
 
 func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error) {
-	// Get node metrics
-	nodeMetrics, err := l.metricsClient.MetricsV1beta1().NodeMetricses().List(ctx, metav1.ListOptions{
-		LabelSelector: "node.role/edge=true",
-	})
-	if err != nil {
-		klog.Warningf("Failed to fetch node metrics: %v", err)
-		return l.cache, err
-	}
-
-	// Use node lister cache for allocatable
+	// Nodes with node.role/edge=true
 	edgeSelector := labels.SelectorFromSet(labels.Set{"node.role/edge": "true"})
 	nodes, err := l.nodeLister.List(edgeSelector)
 	if err != nil {
 		return l.cache, err
 	}
-
-	// Build a quick lookup for edge nodes
-	edgeNodes := make(map[string]struct{}, len(nodes))
-	var totalAllocatableCPU, totalAllocatableMem int64
-	for _, node := range nodes {
-		edgeNodes[node.Name] = struct{}{}
-		totalAllocatableCPU += node.Status.Allocatable.Cpu().MilliValue()
-		totalAllocatableMem += node.Status.Allocatable.Memory().Value() / (1024 * 1024)
-	}
-
-	// Sum used only for edge nodes
-	var totalUsedCPU, totalUsedMem int64
-	for _, nm := range nodeMetrics.Items {
-		if _, ok := edgeNodes[nm.Name]; !ok {
-			continue
+	if len(nodes) == 0 {
+		// No edge nodes: return a pessimistic snapshot
+		st := &LocalState{
+			FreeCPU:             0,
+			FreeMem:             0,
+			PendingPodsPerClass: make(map[string]int),
+			Timestamp:           time.Now(),
+			BestEdgeNode:        BestNode{},
 		}
-		totalUsedCPU += nm.Usage.Cpu().MilliValue()
-		totalUsedMem += nm.Usage.Memory().Value() / (1024 * 1024)
+		l.setCache(st)
+		return st, nil
 	}
 
-	// Count pending managed pods by class (for scheduling model) and
-	// include all pending/not-ready pods (managed and non-managed) in capacity pressure
-	var pendingCPU, pendingMem int64
+	edgeNodes := make(map[string]*corev1.Node, len(nodes))
+	var totalAllocCPU, totalAllocMemMi int64
+	for _, n := range nodes {
+		edgeNodes[n.Name] = n
+		totalAllocCPU += n.Status.Allocatable.Cpu().MilliValue()
+		totalAllocMemMi += n.Status.Allocatable.Memory().Value() / (1024 * 1024)
+	}
+
+	// List all pods once
 	pods, err := l.podLister.List(labels.Everything())
 	if err != nil {
 		return l.cache, err
 	}
 
-	pendingPerClass := make(map[string]int)
-	for _, pod := range pods {
-		// managed class counts (for your Edge queue model)
-		if pod.Labels["scheduling.hybrid.io/managed"] == "true" {
-			class := pod.Annotations["slo.hybrid.io/class"]
-			if pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" {
+	// Index pods by node and precompute per-pod requests
+	podsByNode := make(map[string][]*corev1.Pod, len(edgeNodes))
+	type podReq struct{ cpuM, memMi int64 }
+	podReqCache := make(map[*corev1.Pod]podReq, len(pods))
+
+	for i := range pods {
+		p := pods[i]
+		// Skip completed pods entirely
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		// Precompute aggregate requests
+		var cpuM, memMi int64
+		for _, c := range p.Spec.Containers {
+			req := c.Resources.Requests
+			cpuM += req.Cpu().MilliValue()
+			memMi += req.Memory().Value() / (1024 * 1024)
+		}
+		podReqCache[p] = podReq{cpuM: cpuM, memMi: memMi}
+
+		// Index only edge-resident pods by node
+		if _, isEdge := edgeNodes[p.Spec.NodeName]; isEdge {
+			podsByNode[p.Spec.NodeName] = append(podsByNode[p.Spec.NodeName], p)
+		}
+	}
+
+	// Compute best edge node free (per-node requests-based accounting)
+	var bestName string
+	var bestFreeCPU, bestFreeMemMi int64
+
+	for nodeName, nodeObj := range edgeNodes {
+		allocCPU := nodeObj.Status.Allocatable.Cpu().MilliValue()
+		allocMemMi := nodeObj.Status.Allocatable.Memory().Value() / (1024 * 1024)
+
+		var resCPU, resMemMi int64
+		for _, p := range podsByNode[nodeName] {
+			pr := podReqCache[p]
+			resCPU += pr.cpuM
+			resMemMi += pr.memMi
+		}
+
+		freeCPU := allocCPU - resCPU
+		freeMemMi := allocMemMi - resMemMi
+
+		if freeCPU > headroomCPUm {
+			freeCPU -= headroomCPUm
+		} else {
+			freeCPU = 0
+		}
+		if freeMemMi > headroomMemMi {
+			freeMemMi -= headroomMemMi
+		} else {
+			freeMemMi = 0
+		}
+
+		// Track the most-free node by CPU (primary), mem as tie-breaker
+		if freeCPU > bestFreeCPU || (freeCPU == bestFreeCPU && freeMemMi > bestFreeMemMi) {
+			bestFreeCPU = freeCPU
+			bestFreeMemMi = freeMemMi
+			bestName = nodeName
+		}
+	}
+
+	// Global used from metrics-server
+	// If metrics-server call fails, we still return the best-node snapshot and pending-derived pressure.
+	var totalUsedCPU, totalUsedMemMi int64
+	if l.metricsClient != nil {
+		if nmList, err := l.metricsClient.MetricsV1beta1().NodeMetricses().
+			List(ctx, metav1.ListOptions{LabelSelector: "node.role/edge=true"}); err == nil {
+			for _, nm := range nmList.Items {
+				if _, ok := edgeNodes[nm.Name]; ok {
+					totalUsedCPU += nm.Usage.Cpu().MilliValue()
+					totalUsedMemMi += nm.Usage.Memory().Value() / (1024 * 1024)
+				}
+			}
+		} else {
+			// Do not fail the snapshot on metrics errors
+			klog.V(4).Infof("Node metrics fetch failed: %v (using previous global free)", err)
+		}
+	}
+
+	// Pending pressure and managed per-class counts
+	var pendingCPU, pendingMemMi int64
+	pendingPerClass := make(map[string]int, 8)
+
+	for i := range pods {
+		p := pods[i]
+		// Skip completed pods (already filtered), and skip not edge-intended if unbound
+		// For managed per-class count (your queue model)
+		if p.Labels["scheduling.hybrid.io/managed"] == "true" &&
+			p.Status.Phase == corev1.PodPending && p.Spec.NodeName == "" {
+			if class := p.Annotations["slo.hybrid.io/class"]; class != "" {
 				pendingPerClass[class]++
 			}
 		}
 
-		// Determine if this pod should be counted against edge capacity
-		// Case A: already bound to an edge node
-		boundToEdge := isEdgeNode(pod.Spec.NodeName, edgeNodes)
+		// Determine if this pod impacts edge capacity as "pending pressure"
+		boundToEdge := p.Spec.NodeName != "" && edgeNodes[p.Spec.NodeName] != nil
+		unboundEdgeIntended := p.Spec.NodeName == "" && wantsEdge(p)
 
-		// Case B: unbound but explicitly targets edge via selector/affinity
-		unboundEdgeIntended := (pod.Spec.NodeName == "") && wantsEdge(pod)
+		if !(boundToEdge || unboundEdgeIntended) {
+			continue
+		}
 
-		// Optional (uncomment to be more conservative):
-		// Treat managed pods without explicit selector as edge-intended before binding
-		// if pod.Spec.NodeName == "" && pod.Labels["scheduling.hybrid.io/managed"] == "true" {
-		// 	unboundEdgeIntended = true
-		// }
-
-		// Decide if we consume this pod's requests (Pending or Running-but-not-ready)
-		consume := false
-		// If pod is not Running, consume
-		if pod.Status.Phase != corev1.PodRunning {
-			consume = true
-		} else {
-			// optionally, if Running but containers not ready, still consume
-			// This is optional:
+		consume := p.Status.Phase != corev1.PodRunning
+		if !consume {
+			// Running: consume if any container not ready
 			allReady := true
-			for _, cs := range pod.Status.ContainerStatuses {
+			for _, cs := range p.Status.ContainerStatuses {
 				if !cs.Ready {
 					allReady = false
 					break
 				}
 			}
-			if !allReady {
-				consume = true
-			}
+			consume = !allReady
+		}
+		if !consume {
+			continue
 		}
 
-		// Only subtract if it impacts edge capacity
-		if consume && (boundToEdge || unboundEdgeIntended) {
-			// sum requests of all containers
-			var podCPU, podMemMi int64
-			for _, c := range pod.Spec.Containers {
-				req := c.Resources.Requests
-				podCPU += req.Cpu().MilliValue()
-				podMemMi += req.Memory().Value() / (1024 * 1024)
-			}
-			// Add small pessimism for unbound edge-intended pods (+10%)
-			if unboundEdgeIntended {
-				podCPU = podCPU + (podCPU / 10)
-				podMemMi = podMemMi + (podMemMi / 10)
-			}
-			pendingCPU += podCPU
-			pendingMem += podMemMi
+		pr := podReqCache[p]
+		cpuM := pr.cpuM
+		memMi := pr.memMi
+		if unboundEdgeIntended && pessimismPctEdge > 0 {
+			// add small pessimism for unbound edge-intended pods
+			cpuM += (cpuM * pessimismPctEdge) / 100
+			memMi += (memMi * pessimismPctEdge) / 100
 		}
+		pendingCPU += cpuM
+		pendingMemMi += memMi
 	}
 
-	freeCPU := (totalAllocatableCPU - totalUsedCPU) - pendingCPU
-	freeMem := (totalAllocatableMem - totalUsedMem) - pendingMem
+	// Global free with headroom (keep for telemetry summary)
+	freeCPU := (totalAllocCPU - totalUsedCPU) - pendingCPU
+	freeMemMi := (totalAllocMemMi - totalUsedMemMi) - pendingMemMi
 	if freeCPU > headroomCPUm {
 		freeCPU -= headroomCPUm
 	} else {
 		freeCPU = 0
 	}
-	if freeMem > headroomMemMi {
-		freeMem -= headroomMemMi
+	if freeMemMi > headroomMemMi {
+		freeMemMi -= headroomMemMi
 	} else {
-		freeMem = 0
+		freeMemMi = 0
 	}
 
-	state := &LocalState{
+	st := &LocalState{
 		FreeCPU:             freeCPU,
-		FreeMem:             freeMem,
+		FreeMem:             freeMemMi,
 		PendingPodsPerClass: pendingPerClass,
 		Timestamp:           time.Now(),
+		BestEdgeNode:        BestNode{Name: bestName, FreeCPU: bestFreeCPU, FreeMem: bestFreeMemMi},
 	}
 
+	l.setCache(st)
+	return st, nil
+}
+
+func (l *LocalCollector) GetCachedLocalState() *LocalState {
+	l.cacheMu.RLock()
+	defer l.cacheMu.RUnlock()
+	return l.cache
+}
+
+func (l *LocalCollector) setCache(state *LocalState) {
 	l.cacheMu.Lock()
 	l.cache = state
 	l.cacheMu.Unlock()
-
-	return state, nil
 }
 
-// Helpers to determine edge targeting
-func isEdgeNode(nodeName string, edgeNodes map[string]struct{}) bool {
-	if nodeName == "" {
-		return false
+func getEnvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
 	}
-	_, ok := edgeNodes[nodeName]
-	return ok
+	return def
 }
 
+// wantsEdge returns true if the pod explicitly targets edge via
+// nodeSelector node.role/edge=true or required nodeAffinity.
 func wantsEdge(pod *corev1.Pod) bool {
 	if pod.Spec.NodeSelector != nil {
 		if v, ok := pod.Spec.NodeSelector["node.role/edge"]; ok && v == "true" {
@@ -219,19 +293,4 @@ func wantsEdge(pod *corev1.Pod) bool {
 		}
 	}
 	return false
-}
-
-func (l *LocalCollector) GetCachedLocalState() *LocalState {
-	l.cacheMu.RLock()
-	defer l.cacheMu.RUnlock()
-	return l.cache
-}
-
-func getEnvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if i, err := strconv.Atoi(v); err == nil {
-			return i
-		}
-	}
-	return def
 }

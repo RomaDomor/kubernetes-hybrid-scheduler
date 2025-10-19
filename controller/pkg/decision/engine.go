@@ -118,7 +118,10 @@ func (e *Engine) Decide(
 	}
 
 	// 5. Feasibility
-	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs) && local.FreeCPU >= getCPURequest(pod)
+	reqCPU := getCPURequest(pod)
+	reqMem := getMemRequestMi(pod)
+	nodeOK := local.BestEdgeNode.FreeCPU >= reqCPU && local.BestEdgeNode.FreeMem >= reqMem
+	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs) && nodeOK
 	cloudFeasible := (cloudETA.P95 + explorationBonus) <= float64(slo.DeadlineMs)
 	klog.V(5).Infof("Feasibility edge=%v cloud=%v (deadline=%dms, reqCPU=%dm, freeCPU=%dm)",
 		edgeFeasible, cloudFeasible, slo.DeadlineMs, getCPURequest(pod), local.FreeCPU)
@@ -265,4 +268,12 @@ func PodID(ns string, name string, genName string, uid string) string {
 		genName = "<no-generateName>"
 	}
 	return fmt.Sprintf("%s/%s* (uid=%s)", ns, genName, shortUID)
+}
+
+func getMemRequestMi(pod *corev1.Pod) int64 {
+	var total int64
+	for _, c := range pod.Spec.Containers {
+		total += c.Resources.Requests.Memory().Value() / (1024 * 1024)
+	}
+	return total
 }
