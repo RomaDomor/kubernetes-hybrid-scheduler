@@ -2,6 +2,7 @@ package decision
 
 import (
 	"fmt"
+	"kubernetes-hybrid-scheduler/controller/pkg/util"
 	"math/rand"
 	"time"
 
@@ -64,12 +65,13 @@ func (e *Engine) Decide(
 	local *telemetry.LocalState,
 	wan *telemetry.WANState,
 ) Result {
+	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
 	if wan == nil {
-		klog.Warning("WAN state is nil, using pessimistic defaults")
+		klog.Warningf("%s: WAN state is nil, using pessimistic defaults", podID)
 		wan = &telemetry.WANState{RTTMs: 999, LossPct: 100, IsStale: true}
 	}
 	if local == nil {
-		klog.Warning("Local state is nil, using empty state")
+		klog.Warningf("%s: Local state is nil, using empty state", podID)
 		local = &telemetry.LocalState{
 			FreeCPU:             0,
 			FreeMem:             0,
@@ -80,14 +82,14 @@ func (e *Engine) Decide(
 
 	// Circuit breaker
 	if local.StaleDuration > 5*time.Minute {
-		klog.Errorf("Local telemetry stale >5min, forcing edge-only mode")
+		klog.Errorf("%s: Local telemetry stale >5min, forcing edge-only mode", podID)
 		result := Result{Edge, "telemetry_circuit_breaker", 0, wan.RTTMs}
 		recordDecision(result, slo.Class)
 		return result
 	}
 
 	if wan.StaleDuration > 10*time.Minute {
-		klog.Errorf("WAN telemetry stale >10min, disabling cloud")
+		klog.Errorf("%s: WAN telemetry stale >10min, disabling cloud", podID)
 		result := Result{Edge, "wan_circuit_breaker", 0, 999}
 		recordDecision(result, slo.Class)
 		return result
@@ -98,26 +100,31 @@ func (e *Engine) Decide(
 		decisionLatency.Observe(time.Since(start).Seconds())
 	}(time.Now())
 
+	reqCPU := getCPURequest(pod)
+	reqMem := getMemRequestMi(pod)
 	pending := local.PendingPodsPerClass[slo.Class]
+
 	klog.V(4).Infof(
-		"Decide for pod=%s class=%s prio=%d deadline=%d offload=%v wan={rtt=%dms loss=%.1f%% stale=%v} edge={freeCPU=%dm freeMem=%dMi pending[%s]=%d bestNode=%s}",
-		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
+		"%s: Deciding scheduling: req={cpu=%dm mem=%dMi} class=%s prio=%d deadline=%d offload=%v wan={rtt=%dms loss=%.1f%% stale=%v} edge={clusterFreeCPU=%dm clusterFreeMem=%dMi pending[%s]=%d bestNode=%s(freeCPU=%dm freeMem=%dMi)}",
+		podID,
+		reqCPU, reqMem,
 		slo.Class, slo.Priority, slo.DeadlineMs, slo.OffloadAllowed,
 		wan.RTTMs, wan.LossPct, wan.IsStale,
-		local.FreeCPU, local.FreeMem, slo.Class, pending, local.BestEdgeNode.Name,
+		local.FreeCPU, local.FreeMem, slo.Class, pending,
+		local.BestEdgeNode.Name, local.BestEdgeNode.FreeCPU, local.BestEdgeNode.FreeMem,
 	)
 
 	// 1. Hard safety constraints
 	if !slo.OffloadAllowed {
-		klog.V(4).Info("Offload disabled by SLO")
+		klog.V(4).Infof("%s: Offload disabled by SLO", podID)
 		result := Result{Edge, "offload_disabled", 0, wan.RTTMs}
 		recordDecision(result, slo.Class)
 		return result
 	}
 
 	if wan.RTTMs > e.config.RTTUnusableMs || wan.LossPct > e.config.LossUnusablePct {
-		klog.V(4).Infof("WAN deemed unusable (rtt=%d>%d or loss=%.1f>%.1f)",
-			wan.RTTMs, e.config.RTTUnusableMs, wan.LossPct, e.config.LossUnusablePct)
+		klog.V(4).Infof("%s: WAN deemed unusable (rtt=%d>%d or loss=%.1f>%.1f)",
+			podID, wan.RTTMs, e.config.RTTUnusableMs, wan.LossPct, e.config.LossUnusablePct)
 		result := Result{Edge, "wan_unusable", 0, wan.RTTMs}
 		recordDecision(result, slo.Class)
 		return result
@@ -127,14 +134,13 @@ func (e *Engine) Decide(
 	confidenceAdjustment := 1.0
 	cloudConfAdjustment := 1.0
 	if wan.IsStale {
-		klog.V(4).Infof("WAN telemetry is stale, reducing confidence by %.1f%%",
-			(1-e.config.WanStaleConfFactor)*100)
+		klog.V(4).Infof("%s: WAN telemetry is stale, reducing confidence by %.1f%%",
+			podID, (1-e.config.WanStaleConfFactor)*100)
 		cloudConfAdjustment *= e.config.WanStaleConfFactor
 	}
 	if local.IsStale {
-		klog.V(4).Info("Local telemetry is stale, reducing confidence")
+		klog.V(4).Infof("%s: Local telemetry is stale, reducing confidence", podID)
 		confidenceAdjustment *= 0.7
-		//cloudConfAdjustment *= 0.7
 	}
 
 	// 2. Get profiles
@@ -143,13 +149,13 @@ func (e *Engine) Decide(
 	edgeProfile := e.config.ProfileStore.GetOrDefault(edgeKey)
 	cloudProfile := e.config.ProfileStore.GetOrDefault(cloudKey)
 
-	klog.V(4).Infof("Profiles edge[%s]: %s | cloud[%s]: %s",
-		edgeKey.String(), fmtProfile(edgeProfile), cloudKey.String(), fmtProfile(cloudProfile))
+	klog.V(4).Infof("%s: Profiles edge[%s]: %s | cloud[%s]: %s",
+		podID, edgeKey.String(), fmtProfile(edgeProfile), cloudKey.String(), fmtProfile(cloudProfile))
 
 	// 3. Predict ETA
 	edgeETA := e.predictETA(pod, Edge, edgeProfile, local, wan)
 	cloudETA := e.predictETA(pod, Cloud, cloudProfile, local, wan)
-	klog.V(4).Infof("ETA edge=%s cloud=%s", fmtETA(edgeETA), fmtETA(cloudETA))
+	klog.V(4).Infof("%s: ETA edge=%s cloud=%s", podID, fmtETA(edgeETA), fmtETA(cloudETA))
 
 	// 4. Exploration with configurable rate
 	edgeConf := edgeProfile.ConfidenceScore * confidenceAdjustment
@@ -159,44 +165,36 @@ func (e *Engine) Decide(
 	if edgeConf < 0.5 || cloudConf < 0.5 {
 		if rand.Float64() < e.config.ExplorationRate {
 			explorationBonus = 50.0
-			klog.V(5).Infof("Exploration bonus applied: +%.0fms", explorationBonus)
+			klog.V(5).Infof("%s: Exploration bonus applied: +%.0fms", podID, explorationBonus)
 		}
 	}
 
 	// 5. Feasibility checks
-	reqCPU := getCPURequest(pod)
-	reqMem := getMemRequestMi(pod)
-
-	// Null-safe access to BestEdgeNode
 	nodeOK := false
 	if local.BestEdgeNode.Name != "" {
 		nodeOK = local.BestEdgeNode.FreeCPU >= reqCPU && local.BestEdgeNode.FreeMem >= reqMem
 	}
 
 	if local.FreeCPU < reqCPU || local.FreeMem < reqMem {
-		klog.V(4).Info("Cluster-wide free below request; treating edge as capacity-constrained")
+		klog.V(4).Infof("%s: Cluster-wide free below request; treating edge as capacity-constrained", podID)
 		nodeOK = false
 	}
 
 	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs) && nodeOK
 	cloudFeasible := (cloudETA.P95 + explorationBonus) <= float64(slo.DeadlineMs)
 
-	klog.V(5).Infof("Feasibility edge=%v cloud=%v (deadline=%dms, reqCPU=%dm, reqMem=%dMi)",
-		edgeFeasible, cloudFeasible, slo.DeadlineMs, reqCPU, reqMem)
+	klog.V(5).Infof("%s: Feasibility edge=%v cloud=%v (deadline=%dms, reqCPU=%dm, reqMem=%dMi)",
+		podID, edgeFeasible, cloudFeasible, slo.DeadlineMs, reqCPU, reqMem)
 
 	// 6. Decision logic
 	if edgeFeasible && !cloudFeasible {
 		result := Result{Edge, "edge_feasible_only", edgeETA.Mean, wan.RTTMs}
-		klog.Infof("Decision for %s: EDGE reason=%s eta=%.0fms",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
 		recordDecision(result, slo.Class)
 		return result
 	}
 
 	if cloudFeasible && !edgeFeasible {
 		result := Result{Cloud, "cloud_feasible_only", cloudETA.Mean, wan.RTTMs}
-		klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
 		recordDecision(result, slo.Class)
 		return result
 	}
@@ -212,9 +210,6 @@ func (e *Engine) Decide(
 
 		if marginDiff >= marginThreshold {
 			result := Result{Cloud, "cloud_margin_override", cloudETA.Mean, wan.RTTMs}
-			klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms (margin: cloud=%.0f > edge=%.0f by %.0f)",
-				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
-				result.Reason, result.PredictedETAMs, cloudMargin, edgeMargin, marginDiff)
 			recordDecision(result, slo.Class)
 			return result
 		}
@@ -222,27 +217,21 @@ func (e *Engine) Decide(
 		// Sanity check: if BestEdgeNode has insufficient headroom, prefer cloud
 		if !e.canNodeFitWithHeadroom(local.BestEdgeNode, reqCPU, reqMem) {
 			result := Result{Cloud, "edge_low_headroom", cloudETA.Mean, wan.RTTMs}
-			klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms (edge node insufficient headroom)",
-				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
 			recordDecision(result, slo.Class)
 			return result
 		}
 
 		edgeScore := e.computeScore(Edge, edgeETA, edgeConf, slo)
 		cloudScore := e.computeScore(Cloud, cloudETA, cloudConf, slo)
-		klog.V(5).Infof("Scores edge=%.1f cloud=%.1f", edgeScore, cloudScore)
+		klog.V(5).Infof("%s: Scores edge=%.1f cloud=%.1f", podID, edgeScore, cloudScore)
 
 		if edgeScore >= cloudScore {
 			result := Result{Edge, "edge_preferred", edgeETA.Mean, wan.RTTMs}
-			klog.Infof("Decision for %s: EDGE reason=%s eta=%.0fms",
-				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
 			recordDecision(result, slo.Class)
 			return result
 		}
 
 		result := Result{Cloud, "cloud_faster", cloudETA.Mean, wan.RTTMs}
-		klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
 		recordDecision(result, slo.Class)
 		return result
 	}
@@ -250,15 +239,11 @@ func (e *Engine) Decide(
 	// 7. Neither feasible - best effort
 	if slo.Priority >= 7 && cloudETA.Mean < edgeETA.Mean {
 		result := Result{Cloud, "best_effort_cloud", cloudETA.Mean, wan.RTTMs}
-		klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
 		recordDecision(result, slo.Class)
 		return result
 	}
 
 	result := Result{Edge, "best_effort_edge", edgeETA.Mean, wan.RTTMs}
-	klog.Infof("Decision for %s: EDGE reason=%s eta=%.0fms",
-		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
 	recordDecision(result, slo.Class)
 	return result
 }
@@ -360,24 +345,4 @@ func fmtProfile(p *ProfileStats) string {
 	}
 	return fmt.Sprintf("count=%d conf=%.2f mean=%.0fms p95=%.0fms slo=%.0f%%",
 		p.Count, p.ConfidenceScore, p.MeanDurationMs, p.P95DurationMs, p.SLOComplianceRate*100)
-}
-
-func PodID(ns, name, genName, uid string) string {
-	if name != "" {
-		if ns == "" {
-			ns = "default"
-		}
-		return ns + "/" + name
-	}
-	shortUID := uid
-	if len(shortUID) > 8 {
-		shortUID = shortUID[:8]
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	if genName == "" {
-		genName = "<no-generateName>"
-	}
-	return fmt.Sprintf("%s/%s* (uid=%s)", ns, genName, shortUID)
 }

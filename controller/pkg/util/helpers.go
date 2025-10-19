@@ -1,6 +1,7 @@
 package util
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -43,4 +44,25 @@ func EscapeJSONPointer(s string) string {
 	s = strings.ReplaceAll(s, "~", "~0")
 	s = strings.ReplaceAll(s, "/", "~1")
 	return s
+}
+
+// PodID creates a consistent, human-readable identifier for a pod for logging.
+func PodID(ns, name, genName, uid string) string {
+	if name != "" {
+		if ns == "" {
+			ns = "default"
+		}
+		return ns + "/" + name
+	}
+	shortUID := uid
+	if len(shortUID) > 8 {
+		shortUID = shortUID[:8]
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	if genName == "" {
+		genName = "<no-generateName>"
+	}
+	return fmt.Sprintf("%s/%s* (uid=%s)", ns, genName, shortUID)
 }

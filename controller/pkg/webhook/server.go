@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
+	"kubernetes-hybrid-scheduler/controller/pkg/util"
 	"net/http"
 	"time"
 
@@ -97,16 +98,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if pod.Labels[constants.LabelManaged] != "true" {
-		klog.V(4).Infof("Pod %s/%s not managed, skipping",
-			pod.Namespace, pod.Name)
+		klog.V(4).Infof("%s: Not managed, skipping",
+			util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 		writeResponse(w, review, allow())
 		return
 	}
 
 	if pod.Annotations != nil &&
 		pod.Annotations[constants.AnnotationDecision] != "" {
-		klog.V(4).Infof("Pod %s/%s already decided, skipping",
-			pod.Namespace, pod.Name)
+		klog.V(4).Infof("%s: Already decided, skipping",
+			util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 		writeResponse(w, review, allow())
 		return
 	}
@@ -122,8 +123,8 @@ func (s *Server) processScheduling(
 	// Parse SLO
 	sloData, err := slo.ParseSLO(pod)
 	if err != nil {
-		klog.Warningf("Invalid SLO for %s/%s: %v",
-			pod.Namespace, pod.Name, err)
+		klog.Warningf("%s: Invalid SLO: %v",
+			util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
 		return allow()
 	}
 
@@ -159,12 +160,12 @@ func (s *Server) processScheduling(
 		Count:          1,
 	}, metav1.CreateOptions{})
 	if err != nil {
-		klog.Warningf("Failed to create event for pod %s", pod.Name)
+		klog.Warningf("%s: Failed to create event", util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 	}
 
-	klog.Infof("Decision for %s: %s (reason=%s, rtt=%dms)",
-		decision.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
-		result.Location, result.Reason, wan.RTTMs)
+	klog.Infof("%s: Decision: %s (reason=%s, predicted_eta=%.0fms, wan_rtt=%dms)",
+		util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
+		result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs)
 
 	return s.buildPatchResponse(pod, result)
 }

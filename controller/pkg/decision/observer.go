@@ -73,12 +73,12 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 }
 
 func (o *PodObserver) recordStart(pod *corev1.Pod) {
+	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
 	startTime := time.Now()
 
 	decisionTime, err := parseTime(pod.Annotations[constants.AnnotationTimestamp])
 	if err != nil {
-		klog.V(4).Infof("Failed to parse decision timestamp for %s: %v",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
+		klog.V(4).Infof("%s: Failed to parse decision timestamp: %v", podID, err)
 		return
 	}
 
@@ -88,18 +88,17 @@ func (o *PodObserver) recordStart(pod *corev1.Pod) {
 	o.annotate(pod, constants.AnnotationActualStart, startTime.Format(time.RFC3339))
 	o.annotate(pod, constants.AnnotationQueueWait, fmt.Sprintf("%d", queueWait))
 
-	klog.V(4).Infof("Pod %s started after %dms queue wait",
-		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), queueWait)
+	klog.V(4).Infof("%s: Observed pod start after %dms queue wait", podID, queueWait)
 }
 
 func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
+	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
 	decision := Location(pod.Annotations[constants.AnnotationDecision])
 	predictedETA, _ := parseFloat64(pod.Annotations[constants.AnnotationPredictedETA])
 	queueWait, _ := parseFloat64(pod.Annotations[constants.AnnotationQueueWait])
 	startTime, err := parseTime(pod.Annotations[constants.AnnotationActualStart])
 	if err != nil {
-		klog.V(4).Infof("Pod %s missing start time annotation: %s",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
+		klog.V(4).Infof("%s: Missing start time annotation: %v", podID, err)
 		return
 	}
 
@@ -128,15 +127,15 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	predErr := math.Abs(float64(actualDuration) - predictedETA)
 	recordPredictionError(key, predErr)
 
-	klog.V(3).Infof("Pod %s completed: actual=%dms predicted=%.0fms slo=%v",
-		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), actualDuration, predictedETA, sloMet)
+	klog.V(3).Infof("%s: Observed pod completion: actual=%dms predicted=%.0fms slo=%v",
+		podID, actualDuration, predictedETA, sloMet)
 }
 
 func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	ops := []map[string]interface{}{}
+	var ops []map[string]interface{}
 	if pod.Annotations == nil {
 		ops = append(ops, map[string]interface{}{
 			"op":    "add",
@@ -162,14 +161,14 @@ func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
 		if err == nil {
 			return
 		}
-		if i < 2 { // Don't sleep on last attempt
+		if i < 2 {
 			time.Sleep(100 * time.Millisecond)
 			klog.V(5).Infof("Retrying pod annotation patch (attempt %d/3): %v", i+1, err)
 		}
 	}
 
-	klog.V(4).Infof("Failed to patch pod %s after retries",
-		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
+	klog.V(4).Infof("%s: Failed to patch pod after retries",
+		util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 }
 
 func parseTime(s string) (time.Time, error) {
