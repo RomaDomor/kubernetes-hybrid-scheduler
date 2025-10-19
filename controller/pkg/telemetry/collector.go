@@ -10,25 +10,31 @@ type Collector interface {
 	GetWANState(ctx context.Context) (*WANState, error)
 	GetCachedLocalState() *LocalState
 	GetCachedWANState() *WANState
+	UpdateMetrics()
 }
 
 type LocalState struct {
-	FreeCPU             int64          // millicores
-	FreeMem             int64          // MiB
-	PendingPodsPerClass map[string]int // class -> count
+	FreeCPU             int64
+	FreeMem             int64
+	PendingPodsPerClass map[string]int
 	Timestamp           time.Time
 	BestEdgeNode        BestNode
+	IsStale             bool
+	StaleDuration       time.Duration
 }
+
 type BestNode struct {
 	Name    string
-	FreeCPU int64 // mCPU
-	FreeMem int64 // MiB
+	FreeCPU int64
+	FreeMem int64
 }
 
 type WANState struct {
-	RTTMs     int
-	LossPct   float64
-	Timestamp time.Time
+	RTTMs         int
+	LossPct       float64
+	Timestamp     time.Time
+	IsStale       bool
+	StaleDuration time.Duration
 }
 
 type CombinedCollector struct {
@@ -54,4 +60,9 @@ func (c *CombinedCollector) GetCachedLocalState() *LocalState {
 
 func (c *CombinedCollector) GetCachedWANState() *WANState {
 	return c.wan.GetCachedWANState()
+}
+
+func (c *CombinedCollector) UpdateMetrics() {
+	c.local.UpdateMetrics()
+	c.wan.UpdateMetrics()
 }

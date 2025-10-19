@@ -27,6 +27,7 @@ push: buildx-setup
 .PHONY: deploy
 deploy:
 	@echo "=== Applying RBAC/Config ==="
+	kubectl apply -f manifests/crd-workloadprofile.yaml
 	kubectl apply -f manifests/rbac.yaml
 	kubectl apply -f manifests/configmap.yaml
 	kubectl apply -f manifests/service.yaml

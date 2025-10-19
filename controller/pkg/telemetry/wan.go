@@ -2,11 +2,29 @@ package telemetry
 
 import (
 	"context"
+	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/go-ping/ping"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"k8s.io/klog/v2"
+)
+
+var (
+	wanRTTGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_wan_rtt_milliseconds",
+		Help: "WAN round-trip time in milliseconds",
+	})
+	wanLossGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_wan_packet_loss_percent",
+		Help: "WAN packet loss percentage",
+	})
+	wanStaleGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_wan_stale_seconds",
+		Help: "Seconds since last successful WAN probe",
+	})
 )
 
 type WANProbe struct {
@@ -24,45 +42,47 @@ func NewWANProbe(endpoint string, ttl time.Duration) *WANProbe {
 			RTTMs:     999,
 			LossPct:   100,
 			Timestamp: time.Now(),
+			IsStale:   true,
 		},
 	}
-	// Single initial probe
+
+	// Initial probe
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = p.refreshWANState(ctx)
 	cancel()
 
-	// Background refresh
-	go p.startProbeLoop()
+	go p.startProbeLoopWithJitter()
 	return p
 }
 
-// Background loop that refreshes the WAN cache periodically
-func (w *WANProbe) startProbeLoop() {
-	// Small random initial delay helps avoid sync if multiple replicas run
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
+func (p *WANProbe) startProbeLoopWithJitter() {
+	// Initial jitter: 0-5 seconds
+	time.Sleep(time.Duration(rand.Intn(5000)) * time.Millisecond)
+
+	// 10s base interval with ±2s jitter
+	for {
+		jitter := time.Duration(rand.Intn(4000)-2000) * time.Millisecond
+		time.Sleep(10*time.Second + jitter)
+
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = w.refreshWANState(ctx)
+		_ = p.refreshWANState(ctx)
 		cancel()
 	}
 }
 
-// refreshWANState performs ICMP pings using go-ping and updates the cache
-func (w *WANProbe) refreshWANState(ctx context.Context) error {
-	pinger, err := ping.NewPinger(w.cloudEndpoint)
+func (p *WANProbe) refreshWANState(ctx context.Context) error {
+	pinger, err := ping.NewPinger(p.cloudEndpoint)
 	if err != nil {
 		klog.Warningf("NewPinger failed: %v", err)
+		p.markStale()
 		return err
 	}
-	// If running without CAP_NET_RAW, unprivileged mode uses UDP fallback on many platforms.
-	// SetPrivileged(true) if you add NET_RAW and want raw ICMP.
+
 	pinger.SetPrivileged(false)
 	pinger.Count = 3
 	pinger.Timeout = 3 * time.Second
 	pinger.Interval = 300 * time.Millisecond
 
-	// Respect context cancellation (optional)
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -74,45 +94,88 @@ func (w *WANProbe) refreshWANState(ctx context.Context) error {
 
 	if err := pinger.Run(); err != nil {
 		klog.Warningf("Ping run failed: %v", err)
+		p.markStale()
+		close(done)
 		return err
 	}
 	close(done)
 
 	stats := pinger.Statistics()
-	// Average RTT in ms; packet loss in percent
 	rtt := int(stats.AvgRtt.Milliseconds())
 	loss := float64(stats.PacketLoss)
 
-	w.cacheMu.Lock()
-	w.cache = &WANState{
-		RTTMs:     rtt,
-		LossPct:   loss,
-		Timestamp: time.Now(),
+	p.cacheMu.Lock()
+	p.cache = &WANState{
+		RTTMs:         rtt,
+		LossPct:       loss,
+		Timestamp:     time.Now(),
+		IsStale:       false,
+		StaleDuration: 0,
 	}
-	w.cacheMu.Unlock()
+	p.cacheMu.Unlock()
 
+	klog.V(5).Infof("WAN probe successful: rtt=%dms loss=%.1f%%", rtt, loss)
 	return nil
 }
 
-func (w *WANProbe) GetWANState(ctx context.Context) (*WANState, error) {
-	w.cacheMu.RLock()
-	stale := time.Since(w.cache.Timestamp) > w.cacheTTL
-	w.cacheMu.RUnlock()
+func (p *WANProbe) markStale() {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
 
-	if stale {
-		klog.Warning("WAN cache stale, using pessimistic defaults")
-		return &WANState{RTTMs: 999, LossPct: 100}, nil
+	if p.cache != nil {
+		p.cache.IsStale = true
+		p.cache.StaleDuration = time.Since(p.cache.Timestamp)
 	}
-	return w.cache, nil
 }
 
-// GetCachedWANState returns the last cached WAN state without any freshness check.
-// Used as a fallback by the controller when active collection fails.
-func (w *WANProbe) GetCachedWANState() *WANState {
-	w.cacheMu.RLock()
-	defer w.cacheMu.RUnlock()
-	if w.cache == nil {
-		return &WANState{RTTMs: 999, LossPct: 100}
+func (p *WANProbe) GetWANState(ctx context.Context) (*WANState, error) {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+
+	if p.cache == nil {
+		return &WANState{RTTMs: 999, LossPct: 100, IsStale: true}, nil
 	}
-	return w.cache
+
+	staleDuration := time.Since(p.cache.Timestamp)
+
+	state := &WANState{
+		RTTMs:         p.cache.RTTMs,
+		LossPct:       p.cache.LossPct,
+		Timestamp:     p.cache.Timestamp,
+		IsStale:       staleDuration > p.cacheTTL,
+		StaleDuration: staleDuration,
+	}
+
+	if state.IsStale {
+		klog.V(4).Infof("WAN cache stale by %v, using last known values (rtt=%dms)",
+			staleDuration, state.RTTMs)
+	}
+
+	return state, nil
+}
+
+func (p *WANProbe) GetCachedWANState() *WANState {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+
+	if p.cache == nil {
+		return &WANState{RTTMs: 999, LossPct: 100, IsStale: true}
+	}
+
+	staleDuration := time.Since(p.cache.Timestamp)
+
+	return &WANState{
+		RTTMs:         p.cache.RTTMs,
+		LossPct:       p.cache.LossPct,
+		Timestamp:     p.cache.Timestamp,
+		IsStale:       staleDuration > p.cacheTTL,
+		StaleDuration: staleDuration,
+	}
+}
+
+func (p *WANProbe) UpdateMetrics() {
+	state := p.GetCachedWANState()
+	wanRTTGauge.Set(float64(state.RTTMs))
+	wanLossGauge.Set(state.LossPct)
+	wanStaleGauge.Set(state.StaleDuration.Seconds())
 }

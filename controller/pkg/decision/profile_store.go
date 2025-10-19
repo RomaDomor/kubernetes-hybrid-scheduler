@@ -1,6 +1,7 @@
 package decision
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,64 +10,84 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 )
 
-// ProfileKey uniquely identifies a workload profile bucket
+var workloadProfileGVR = schema.GroupVersionResource{
+	Group:    "scheduling.hybrid.io",
+	Version:  "v1alpha1",
+	Resource: "workloadprofiles",
+}
+
 type ProfileKey struct {
-	Class    string   // "latency", "throughput", "batch"
-	CPUTier  string   // "small", "medium", "large"
-	Location Location // Edge or Cloud
+	Class    string
+	CPUTier  string
+	Location Location
 }
 
 func (pk ProfileKey) String() string {
 	return fmt.Sprintf("%s-%s-%s", pk.Class, pk.CPUTier, pk.Location)
 }
 
-// ProfileStats tracks statistical performance data
+// Histogram-based P95 tracking
 type ProfileStats struct {
-	// Execution time statistics
-	Count            int     `json:"count"`
-	MeanDurationMs   float64 `json:"mean_duration_ms"`
-	StdDevDurationMs float64 `json:"stddev_duration_ms"`
-	P95DurationMs    float64 `json:"p95_duration_ms"`
+	Count             int       `json:"count"`
+	MeanDurationMs    float64   `json:"mean_duration_ms"`
+	StdDevDurationMs  float64   `json:"stddev_duration_ms"`
+	P95DurationMs     float64   `json:"p95_duration_ms"`
+	MeanQueueWaitMs   float64   `json:"mean_queue_wait_ms"`
+	SLOComplianceRate float64   `json:"slo_compliance_rate"`
+	ConfidenceScore   float64   `json:"confidence_score"`
+	LastUpdated       time.Time `json:"last_updated"`
 
-	// Queue wait statistics
-	MeanQueueWaitMs float64 `json:"mean_queue_wait_ms"`
-
-	// Success metrics
-	SLOComplianceRate float64 `json:"slo_compliance_rate"`
-
-	// Confidence (0-1 based on sample size)
-	ConfidenceScore float64   `json:"confidence_score"`
-	LastUpdated     time.Time `json:"last_updated"`
+	DurationHistogram []HistogramBucket `json:"duration_histogram"`
 }
 
-// ProfileUpdate represents new observed data
+type HistogramBucket struct {
+	UpperBound float64   `json:"upper_bound"`
+	Count      int       `json:"count"`
+	LastDecay  time.Time `json:"last_decay"`
+}
+
 type ProfileUpdate struct {
 	ObservedDurationMs float64
 	QueueWaitMs        float64
 	SLOMet             bool
 }
 
-// ProfileStore manages learned workload profiles
+// LRU eviction for bounded growth
+type lruEntry struct {
+	key   string
+	stats *ProfileStats
+}
+
 type ProfileStore struct {
-	profiles map[string]*ProfileStats
-	mu       sync.RWMutex
-	defaults map[string]*ProfileStats // Cold-start defaults
+	profiles   map[string]*ProfileStats
+	lru        *list.List // Least recently used tracking
+	lruMap     map[string]*list.Element
+	mu         sync.RWMutex
+	defaults   map[string]*ProfileStats
+	maxEntries int
+	kubeClient kubernetes.Interface
 }
 
-func NewProfileStore() *ProfileStore {
-	ps := &ProfileStore{
-		profiles: make(map[string]*ProfileStats),
-		defaults: defaultProfiles(),
+func NewProfileStore(kubeClient kubernetes.Interface, maxEntries int) *ProfileStore {
+	return &ProfileStore{
+		profiles:   make(map[string]*ProfileStats),
+		lru:        list.New(),
+		lruMap:     make(map[string]*list.Element),
+		defaults:   defaultProfiles(),
+		maxEntries: maxEntries,
+		kubeClient: kubeClient,
 	}
-	return ps
 }
 
-// GetProfileKey determines the bucket for a pod
 func GetProfileKey(pod *corev1.Pod, loc Location) ProfileKey {
 	cpuMillis := getCPURequest(pod)
 
@@ -79,8 +100,11 @@ func GetProfileKey(pod *corev1.Pod, loc Location) ProfileKey {
 
 	class := pod.Annotations["slo.hybrid.io/class"]
 	if class == "" {
-		class = "batch" // Default fallback
+		class = "batch"
 	}
+
+	// Normalize class to prevent explosion
+	class = normalizeClass(class)
 
 	return ProfileKey{
 		Class:    class,
@@ -89,76 +113,109 @@ func GetProfileKey(pod *corev1.Pod, loc Location) ProfileKey {
 	}
 }
 
-// GetOrDefault retrieves profile stats or returns conservative defaults
+// Whitelist of allowed classes
+func normalizeClass(class string) string {
+	validClasses := map[string]bool{
+		"latency":     true,
+		"throughput":  true,
+		"batch":       true,
+		"interactive": true,
+		"streaming":   true,
+	}
+
+	if validClasses[class] {
+		return class
+	}
+
+	klog.V(4).Infof("Unknown class '%s', defaulting to 'batch'", class)
+	return "batch"
+}
+
 func (ps *ProfileStore) GetOrDefault(key ProfileKey) *ProfileStats {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	if profile, exists := ps.profiles[key.String()]; exists {
-		return profile
+	keyStr := key.String()
+
+	if profile, exists := ps.profiles[keyStr]; exists {
+		return deepCopyProfile(profile)
 	}
 
-	// Return default based on class and tier
 	defaultKey := fmt.Sprintf("%s-%s", key.Class, key.CPUTier)
 	if def, exists := ps.defaults[defaultKey]; exists {
-		return def
+		return deepCopyProfile(def)
 	}
 
-	// Ultimate fallback
-	return &ProfileStats{
+	return deepCopyProfile(&ProfileStats{
 		MeanDurationMs:    100,
 		P95DurationMs:     200,
 		ConfidenceScore:   0.0,
-		MeanQueueWaitMs:   0,
 		SLOComplianceRate: 0.5,
-	}
+		DurationHistogram: initHistogram(),
+	})
 }
 
-// Update applies exponential moving average to statistics
+func deepCopyProfile(p *ProfileStats) *ProfileStats {
+	if p == nil {
+		return nil
+	}
+
+	pCopy := *p
+	pCopy.DurationHistogram = make([]HistogramBucket, len(p.DurationHistogram))
+	for i := range p.DurationHistogram {
+		pCopy.DurationHistogram[i] = p.DurationHistogram[i]
+	}
+
+	return &pCopy
+}
+
 func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	keyStr := key.String()
 	profile, exists := ps.profiles[keyStr]
+
 	if !exists {
-		profile = ps.GetOrDefault(key)
-		// Deep copy to avoid modifying defaults
-		profileCopy := *profile
-		profile = &profileCopy
+		// Check capacity before adding
+		if len(ps.profiles) >= ps.maxEntries {
+			ps.evictLRU()
+		}
+
+		profile = ps.getOrDefaultLocked(key)
 		ps.profiles[keyStr] = profile
+		ps.lruMap[keyStr] = ps.lru.PushFront(&lruEntry{key: keyStr, stats: profile})
+	} else {
+		// Move to front of LRU
+		if elem, ok := ps.lruMap[keyStr]; ok {
+			ps.lru.MoveToFront(elem)
+		}
 	}
 
-	// Exponential moving average weight (alpha = 0.2 for ~5-sample window)
 	alpha := 0.2
 
-	// Update mean duration
 	oldMean := profile.MeanDurationMs
 	profile.MeanDurationMs = alpha*update.ObservedDurationMs + (1-alpha)*oldMean
 
-	// Update variance (Welford's online algorithm approximation)
 	diff := update.ObservedDurationMs - profile.MeanDurationMs
 	profile.StdDevDurationMs = math.Sqrt(
 		alpha*diff*diff + (1-alpha)*profile.StdDevDurationMs*profile.StdDevDurationMs,
 	)
 
-	// Update P95 (approximation: mean + 1.65*stddev)
-	profile.P95DurationMs = profile.MeanDurationMs + 1.65*profile.StdDevDurationMs
+	// Update histogram and compute true P95
+	updateHistogram(profile.DurationHistogram, update.ObservedDurationMs)
+	profile.P95DurationMs = computeP95FromHistogram(profile.DurationHistogram)
 
-	// Update queue wait
 	profile.MeanQueueWaitMs = alpha*update.QueueWaitMs + (1-alpha)*profile.MeanQueueWaitMs
 
-	// Update SLO compliance rate
 	sloMetric := 0.0
 	if update.SLOMet {
 		sloMetric = 1.0
 	}
 	profile.SLOComplianceRate = alpha*sloMetric + (1-alpha)*profile.SLOComplianceRate
 
-	// Update confidence (caps at 1.0 after 20 samples)
 	profile.Count++
 	profile.ConfidenceScore = math.Min(1.0, float64(profile.Count)/20.0)
-
 	profile.LastUpdated = time.Now()
 
 	klog.V(4).Infof("Profile updated: %s count=%d conf=%.2f mean=%.1fms p95=%.1fms slo=%.2f%%",
@@ -167,77 +224,188 @@ func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
 		profile.SLOComplianceRate*100)
 }
 
-// SaveToConfigMap persists profiles for restart resilience
-func (ps *ProfileStore) SaveToConfigMap(
-	clientset kubernetes.Interface,
-) error {
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-
-	data, err := json.Marshal(ps.profiles)
-	if err != nil {
-		return fmt.Errorf("marshal profiles: %w", err)
+// LRU eviction
+func (ps *ProfileStore) evictLRU() {
+	if ps.lru.Len() == 0 {
+		return
 	}
 
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "scheduler-profiles",
-			Namespace: "kube-system",
-		},
-		Data: map[string]string{
-			"profiles.json": string(data),
-		},
+	elem := ps.lru.Back()
+	if elem == nil {
+		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	entry := elem.Value.(*lruEntry)
+	ps.lru.Remove(elem)
+	delete(ps.lruMap, entry.key)
+	delete(ps.profiles, entry.key)
 
-	_, err = clientset.CoreV1().ConfigMaps("kube-system").Update(ctx, cm, metav1.UpdateOptions{})
-	if err != nil {
-		// Try create if update fails
-		_, err = clientset.CoreV1().ConfigMaps("kube-system").Create(ctx, cm, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("save configmap: %w", err)
+	klog.V(3).Infof("Evicted profile %s from LRU cache", entry.key)
+}
+
+func (ps *ProfileStore) getOrDefaultLocked(key ProfileKey) *ProfileStats {
+	defaultKey := fmt.Sprintf("%s-%s", key.Class, key.CPUTier)
+	if def, exists := ps.defaults[defaultKey]; exists {
+		pCopy := deepCopyProfile(def)
+		pCopy.Count = 0
+		pCopy.ConfidenceScore = 0.0
+		return pCopy
+	}
+
+	return &ProfileStats{
+		MeanDurationMs:    100,
+		P95DurationMs:     200,
+		StdDevDurationMs:  50,
+		ConfidenceScore:   0.0,
+		SLOComplianceRate: 0.5,
+		DurationHistogram: initHistogram(),
+	}
+}
+
+// Histogram helpers
+func initHistogram() []HistogramBucket {
+	// Buckets: 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, +Inf
+	bounds := []float64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, math.Inf(1)}
+	buckets := make([]HistogramBucket, len(bounds))
+	for i, bound := range bounds {
+		buckets[i] = HistogramBucket{UpperBound: bound, Count: 0}
+	}
+	return buckets
+}
+
+func updateHistogram(buckets []HistogramBucket, value float64) {
+	now := time.Now()
+
+	// Decay every hour (half-life)
+	for i := range buckets {
+		if now.Sub(buckets[i].LastDecay) > time.Hour {
+			buckets[i].Count = buckets[i].Count / 2
+			buckets[i].LastDecay = now
+		}
+
+		if value <= buckets[i].UpperBound {
+			buckets[i].Count++
+			return
+		}
+	}
+}
+
+func computeP95FromHistogram(buckets []HistogramBucket) float64 {
+	totalCount := 0
+	for _, b := range buckets {
+		totalCount += b.Count
+	}
+
+	if totalCount == 0 {
+		return 200 // Default
+	}
+
+	p95Count := int(float64(totalCount) * 0.95)
+	cumulative := 0
+
+	for i, b := range buckets {
+		cumulative += b.Count
+		if cumulative >= p95Count {
+			if i == 0 {
+				return b.UpperBound
+			}
+			// Linear interpolation within bucket
+			prevBound := 0.0
+			if i > 0 {
+				prevBound = buckets[i-1].UpperBound
+			}
+			ratio := float64(p95Count-(cumulative-b.Count)) / float64(b.Count)
+			return prevBound + ratio*(b.UpperBound-prevBound)
 		}
 	}
 
-	klog.V(3).Infof("Saved %d profiles to ConfigMap", len(ps.profiles))
+	return buckets[len(buckets)-2].UpperBound // Use second-to-last bucket (before +Inf)
+}
+
+// CRD-based persistence
+func (ps *ProfileStore) SaveToConfigMap(_ kubernetes.Interface) error {
+	// Deprecated: Use SaveToCRD instead
+	klog.Warning("SaveToConfigMap is deprecated, use SaveToCRD")
+	return fmt.Errorf("SaveToConfigMap is deprecated")
+}
+
+func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for keyStr, profile := range ps.profiles {
+		res := dynClient.Resource(workloadProfileGVR).Namespace("kube-system")
+		// Get current resource version
+		existing, _ := res.Get(ctx, keyStr, metav1.GetOptions{})
+
+		obj := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "scheduling.hybrid.io/v1alpha1",
+				"kind":       "WorkloadProfile",
+				"metadata": map[string]interface{}{
+					"name":            keyStr,
+					"namespace":       "kube-system",
+					"resourceVersion": existing.GetResourceVersion(), // ADD THIS
+				},
+				"spec": map[string]interface{}{
+					"profile": profileToMap(profile),
+				},
+			},
+		}
+
+		// This will now fail if resource version changed (conflict)
+		if _, err := res.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+			if errors.IsConflict(err) {
+				klog.V(4).Infof("Profile %s conflict, will retry next cycle", keyStr)
+				continue
+			}
+		}
+	}
+
+	klog.V(3).Infof("Saved %d profiles to CRDs", len(ps.profiles))
 	return nil
 }
 
-// LoadFromConfigMap restores profiles from persistent storage
-func (ps *ProfileStore) LoadFromConfigMap(
-	clientset kubernetes.Interface,
-) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (ps *ProfileStore) LoadFromConfigMap(_ kubernetes.Interface) error {
+	// Deprecated
+	klog.Warning("LoadFromConfigMap is deprecated, use LoadFromCRD")
+	return fmt.Errorf("LoadFromConfigMap is deprecated")
+}
+
+func (ps *ProfileStore) LoadFromCRD(dynClient dynamic.Interface) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cm, err := clientset.CoreV1().ConfigMaps("kube-system").Get(
-		ctx, "scheduler-profiles", metav1.GetOptions{},
-	)
+	dList, err := dynClient.Resource(workloadProfileGVR).Namespace("kube-system").
+		List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("load configmap: %w", err)
-	}
-
-	data := cm.Data["profiles.json"]
-	if data == "" {
-		return fmt.Errorf("empty profiles data")
+		return fmt.Errorf("list CRDs: %w", err)
 	}
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	if err := json.Unmarshal([]byte(data), &ps.profiles); err != nil {
-		return fmt.Errorf("unmarshal profiles: %w", err)
+	for _, item := range dList.Items {
+		keyStr := item.GetName()
+		specMap, found, _ := unstructured.NestedMap(item.Object, "spec", "profile")
+		if !found {
+			continue
+		}
+
+		profile := mapToProfile(specMap)
+		ps.profiles[keyStr] = profile
+		ps.lruMap[keyStr] = ps.lru.PushFront(&lruEntry{key: keyStr, stats: profile})
 	}
 
-	klog.Infof("Loaded %d profiles from ConfigMap", len(ps.profiles))
+	klog.Infof("Loaded %d profiles from CRDs", len(ps.profiles))
 	return nil
 }
 
-// StartAutoSave periodically persists profiles
 func (ps *ProfileStore) StartAutoSave(
-	clientset kubernetes.Interface,
+	dynClient dynamic.Interface,
 	interval time.Duration,
 	stopCh <-chan struct{},
 ) {
@@ -247,12 +415,11 @@ func (ps *ProfileStore) StartAutoSave(
 	for {
 		select {
 		case <-ticker.C:
-			if err := ps.SaveToConfigMap(clientset); err != nil {
+			if err := ps.SaveToCRD(dynClient); err != nil {
 				klog.Warningf("Failed to auto-save profiles: %v", err)
 			}
 		case <-stopCh:
-			// Final save before shutdown
-			if err := ps.SaveToConfigMap(clientset); err != nil {
+			if err := ps.SaveToCRD(dynClient); err != nil {
 				klog.Errorf("Failed to save profiles on shutdown: %v", err)
 			}
 			return
@@ -260,22 +427,59 @@ func (ps *ProfileStore) StartAutoSave(
 	}
 }
 
-// defaultProfiles returns conservative initial estimates
+func (ps *ProfileStore) ExportAllProfiles() map[string]*ProfileStats {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	export := make(map[string]*ProfileStats, len(ps.profiles))
+	for k, v := range ps.profiles {
+		export[k] = deepCopyProfile(v)
+	}
+	return export
+}
+
+func profileToMap(p *ProfileStats) map[string]interface{} {
+	data, err := json.Marshal(p)
+	if err != nil {
+		klog.Errorf("Failed to marshal profile: %v", err)
+		return map[string]interface{}{}
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		klog.Errorf("Failed to unmarshal profile: %v", err)
+		return map[string]interface{}{}
+	}
+	return m
+}
+
+func mapToProfile(m map[string]interface{}) *ProfileStats {
+	data, _ := json.Marshal(m)
+	var p ProfileStats
+	_ = json.Unmarshal(data, &p)
+	return &p
+}
+
 func defaultProfiles() map[string]*ProfileStats {
 	profiles := make(map[string]*ProfileStats)
 
-	classes := []string{"latency", "throughput", "batch"}
+	classes := []string{"latency", "throughput", "batch", "interactive", "streaming"}
 	tiers := []string{"small", "medium", "large"}
 	estimates := map[string]struct{ mean, p95 float64 }{
-		"latency-small":     {50, 80},
-		"latency-medium":    {100, 160},
-		"latency-large":     {200, 320},
-		"throughput-small":  {200, 300},
-		"throughput-medium": {400, 600},
-		"throughput-large":  {800, 1200},
-		"batch-small":       {500, 800},
-		"batch-medium":      {1000, 1600},
-		"batch-large":       {2000, 3200},
+		"latency-small":      {50, 80},
+		"latency-medium":     {100, 160},
+		"latency-large":      {200, 320},
+		"throughput-small":   {200, 300},
+		"throughput-medium":  {400, 600},
+		"throughput-large":   {800, 1200},
+		"batch-small":        {500, 800},
+		"batch-medium":       {1000, 1600},
+		"batch-large":        {2000, 3200},
+		"interactive-small":  {30, 50},
+		"interactive-medium": {60, 100},
+		"interactive-large":  {120, 200},
+		"streaming-small":    {100, 150},
+		"streaming-medium":   {200, 300},
+		"streaming-large":    {400, 600},
 	}
 
 	for _, class := range classes {
@@ -291,10 +495,10 @@ func defaultProfiles() map[string]*ProfileStats {
 				MeanDurationMs:    est.mean,
 				StdDevDurationMs:  (est.p95 - est.mean) / 1.65,
 				P95DurationMs:     est.p95,
-				MeanQueueWaitMs:   0,
 				SLOComplianceRate: 0.5,
 				ConfidenceScore:   0.0,
 				LastUpdated:       time.Now(),
+				DurationHistogram: initHistogram(),
 			}
 		}
 	}

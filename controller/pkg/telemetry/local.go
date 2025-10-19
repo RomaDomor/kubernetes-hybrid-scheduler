@@ -7,12 +7,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 )
@@ -30,7 +33,24 @@ type LocalCollector struct {
 	cacheMu       sync.RWMutex
 	podLister     corelisters.PodLister
 	nodeLister    corelisters.NodeLister
+	podIndexer    cache.Indexer
 }
+
+// Add at top:
+var (
+	localFreeCPUGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_edge_free_cpu_millicores",
+		Help: "Free CPU on edge nodes in millicores",
+	})
+	localFreeMemGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_edge_free_memory_mebibytes",
+		Help: "Free memory on edge nodes in MiB",
+	})
+	localStaleGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_local_stale_seconds",
+		Help: "Seconds since last successful local telemetry refresh",
+	})
+)
 
 func NewLocalCollector(
 	kube kubernetes.Interface,
@@ -38,12 +58,35 @@ func NewLocalCollector(
 	podInformer coreinformers.PodInformer,
 	nodeInformer coreinformers.NodeInformer,
 ) *LocalCollector {
+	err := podInformer.Informer().AddIndexers(cache.Indexers{
+		"nodeName": func(obj interface{}) ([]string, error) {
+			pod := obj.(*corev1.Pod)
+			if pod.Spec.NodeName == "" {
+				return []string{}, nil
+			}
+			return []string{pod.Spec.NodeName}, nil
+		},
+		"edgeManaged": func(obj interface{}) ([]string, error) {
+			pod := obj.(*corev1.Pod)
+			if pod.Labels["scheduling.hybrid.io/managed"] == "true" &&
+				(pod.Spec.NodeSelector["node.role/edge"] == "true" || wantsEdge(pod)) {
+				return []string{"true"}, nil
+			}
+			return []string{}, nil
+		},
+	})
+	if err != nil {
+		klog.Errorf("Failed to add custom indexers for podInformer: %v", err)
+		return nil
+	}
+
 	return &LocalCollector{
 		kubeClient:    kube,
 		metricsClient: metrics,
 		cache:         &LocalState{PendingPodsPerClass: make(map[string]int)},
 		podLister:     podInformer.Lister(),
 		nodeLister:    nodeInformer.Lister(),
+		podIndexer:    podInformer.Informer().GetIndexer(),
 	}
 }
 
@@ -75,10 +118,51 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		totalAllocMemMi += n.Status.Allocatable.Memory().Value() / (1024 * 1024)
 	}
 
-	// List all pods once
-	pods, err := l.podLister.List(labels.Everything())
+	edgeManagedObjs, err := l.podIndexer.ByIndex("edgeManaged", "true")
 	if err != nil {
-		return l.cache, err
+		klog.V(4).Infof("Index lookup failed, falling back to full list: %v", err)
+		edgeManagedObjs = []interface{}{} // Fallback to empty
+	}
+
+	// Also get all pods bound to edge nodes (may not be in edgeManaged index)
+	allEdgeBoundPods := make([]*corev1.Pod, 0, len(edgeManagedObjs)+100)
+	for nodeName := range edgeNodes {
+		nodePodsObjs, err := l.podIndexer.ByIndex("nodeName", nodeName)
+		if err != nil {
+			continue
+		}
+		for _, obj := range nodePodsObjs {
+			pod := obj.(*corev1.Pod)
+			// Skip completed
+			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			allEdgeBoundPods = append(allEdgeBoundPods, pod)
+		}
+	}
+
+	// Merge edgeManaged pods (for pending pressure calculation)
+	edgeManagedPods := make([]*corev1.Pod, 0, len(edgeManagedObjs))
+	for _, obj := range edgeManagedObjs {
+		pod := obj.(*corev1.Pod)
+		if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+			edgeManagedPods = append(edgeManagedPods, pod)
+		}
+	}
+
+	// Combine for processing (deduplicate by UID)
+	podsMap := make(map[string]*corev1.Pod, len(allEdgeBoundPods)+len(edgeManagedPods))
+	for _, p := range allEdgeBoundPods {
+		podsMap[string(p.UID)] = p
+	}
+	for _, p := range edgeManagedPods {
+		podsMap[string(p.UID)] = p
+	}
+
+	// Convert back to slice for compatibility with existing logic
+	pods := make([]*corev1.Pod, 0, len(podsMap))
+	for _, p := range podsMap {
+		pods = append(pods, p)
 	}
 
 	// Index pods by node and precompute per-pod requests
@@ -86,12 +170,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	type podReq struct{ cpuM, memMi int64 }
 	podReqCache := make(map[*corev1.Pod]podReq, len(pods))
 
-	for i := range pods {
-		p := pods[i]
-		// Skip completed pods entirely
-		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-			continue
-		}
+	for _, p := range pods {
 		// Precompute aggregate requests
 		var cpuM, memMi int64
 		for _, c := range p.Spec.Containers {
@@ -166,9 +245,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	var pendingCPU, pendingMemMi int64
 	pendingPerClass := make(map[string]int, 8)
 
-	for i := range pods {
-		p := pods[i]
-		// Skip completed pods (already filtered), and skip not edge-intended if unbound
+	for _, p := range pods {
 		// For managed per-class count (your queue model)
 		if p.Labels["scheduling.hybrid.io/managed"] == "true" &&
 			p.Status.Phase == corev1.PodPending && p.Spec.NodeName == "" {
@@ -233,6 +310,8 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		PendingPodsPerClass: pendingPerClass,
 		Timestamp:           time.Now(),
 		BestEdgeNode:        BestNode{Name: bestName, FreeCPU: bestFreeCPU, FreeMem: bestFreeMemMi},
+		IsStale:             false,
+		StaleDuration:       0,
 	}
 
 	l.setCache(st)
@@ -242,7 +321,26 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 func (l *LocalCollector) GetCachedLocalState() *LocalState {
 	l.cacheMu.RLock()
 	defer l.cacheMu.RUnlock()
-	return l.cache
+
+	if l.cache == nil {
+		return &LocalState{PendingPodsPerClass: make(map[string]int), IsStale: true}
+	}
+
+	staleDuration := time.Since(l.cache.Timestamp)
+	isStale := staleDuration > 60*time.Second
+
+	state := *l.cache // Copy
+	state.IsStale = isStale
+	state.StaleDuration = staleDuration
+
+	return &state
+}
+
+func (l *LocalCollector) UpdateMetrics() {
+	state := l.GetCachedLocalState()
+	localFreeCPUGauge.Set(float64(state.FreeCPU))
+	localFreeMemGauge.Set(float64(state.FreeMem))
+	localStaleGauge.Set(state.StaleDuration.Seconds())
 }
 
 func (l *LocalCollector) setCache(state *LocalState) {

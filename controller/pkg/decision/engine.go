@@ -3,6 +3,7 @@ package decision
 import (
 	"fmt"
 	"math/rand"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -25,27 +26,27 @@ type Result struct {
 	WanRttMs       int
 }
 
-type Engine struct {
-	config       Config
-	profileStore *ProfileStore
-}
-
-type Config struct {
+type EngineConfig struct {
 	RTTThresholdMs   int
 	LossThresholdPct float64
+	RTTUnusableMs    int
+	LossUnusablePct  float64
+	LocalityBonus    float64
+	ConfidenceWeight float64
+	ExplorationRate  float64
+	MaxProfileCount  int
 	ProfileStore     *ProfileStore
 }
 
-func NewEngine(config Config) *Engine {
-	e := &Engine{
-		config:       config,
-		profileStore: config.ProfileStore,
+type Engine struct {
+	config EngineConfig
+}
+
+func NewEngine(config EngineConfig) *Engine {
+	if config.ProfileStore == nil {
+		klog.Fatal("ProfileStore must be provided")
 	}
-	if e.profileStore == nil {
-		e.profileStore = NewProfileStore()
-		klog.Warning("ProfileStore not provided; using in-memory store without persistence")
-	}
-	return e
+	return &Engine{config: config}
 }
 
 type ETAEstimate struct {
@@ -59,110 +60,169 @@ func (e *Engine) Decide(
 	local *telemetry.LocalState,
 	wan *telemetry.WANState,
 ) Result {
-	// Defensive defaults for nil telemetry to avoid panics in tests or degraded modes
 	if wan == nil {
-		wan = &telemetry.WANState{RTTMs: 999, LossPct: 100}
+		klog.Warning("WAN state is nil, using pessimistic defaults")
+		wan = &telemetry.WANState{RTTMs: 999, LossPct: 100, IsStale: true}
 	}
 	if local == nil {
+		klog.Warning("Local state is nil, using empty state")
 		local = &telemetry.LocalState{
 			FreeCPU:             0,
 			FreeMem:             0,
-			PendingPodsPerClass: map[string]int{},
+			PendingPodsPerClass: make(map[string]int),
+			BestEdgeNode:        telemetry.BestNode{},
 		}
 	}
 
-	// Inputs summary
-	pending := 0
-	if local.PendingPodsPerClass != nil {
-		pending = local.PendingPodsPerClass[slo.Class]
+	// Circuit breaker
+	if local.StaleDuration > 5*time.Minute {
+		klog.Errorf("Local telemetry stale >5min, forcing edge-only mode")
+		result := Result{Edge, "telemetry_circuit_breaker", 0, wan.RTTMs}
+		recordDecision(result, slo.Class)
+		return result
 	}
+
+	if wan.StaleDuration > 10*time.Minute {
+		klog.Errorf("WAN telemetry stale >10min, disabling cloud")
+		result := Result{Edge, "wan_circuit_breaker", 0, 999}
+		recordDecision(result, slo.Class)
+		return result
+	}
+
+	// Observability
+	defer func(start time.Time) {
+		decisionLatency.Observe(time.Since(start).Seconds())
+	}(time.Now())
+
+	pending := local.PendingPodsPerClass[slo.Class]
 	klog.V(4).Infof(
-		"Decide for pod=%s class=%s prio=%d deadline=%d offload=%v wan={rtt=%dms loss=%.1f%%} edge={freeCPU=%dm freeMem=%dMi pending[%s]=%d}",
-		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), slo.Class, slo.Priority, slo.DeadlineMs, slo.OffloadAllowed,
-		wan.RTTMs, wan.LossPct, local.FreeCPU, local.FreeMem, slo.Class, pending,
+		"Decide for pod=%s class=%s prio=%d deadline=%d offload=%v wan={rtt=%dms loss=%.1f%% stale=%v} edge={freeCPU=%dm freeMem=%dMi pending[%s]=%d bestNode=%s}",
+		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
+		slo.Class, slo.Priority, slo.DeadlineMs, slo.OffloadAllowed,
+		wan.RTTMs, wan.LossPct, wan.IsStale,
+		local.FreeCPU, local.FreeMem, slo.Class, pending, local.BestEdgeNode.Name,
 	)
 
 	// 1. Hard safety constraints
 	if !slo.OffloadAllowed {
 		klog.V(4).Info("Offload disabled by SLO")
-		return Result{Edge, "offload_disabled", 0, wan.RTTMs}
-	}
-	if wan.RTTMs > 300 || wan.LossPct > 10 {
-		klog.V(4).Info("WAN deemed unusable by thresholds (rtt>300ms or loss>10%)")
-		return Result{Edge, "wan_unusable", 0, wan.RTTMs}
+		result := Result{Edge, "offload_disabled", 0, wan.RTTMs}
+		recordDecision(result, slo.Class)
+		return result
 	}
 
-	// 2. Profiles
+	if wan.RTTMs > e.config.RTTUnusableMs || wan.LossPct > e.config.LossUnusablePct {
+		klog.V(4).Infof("WAN deemed unusable (rtt=%d>%d or loss=%.1f>%.1f)",
+			wan.RTTMs, e.config.RTTUnusableMs, wan.LossPct, e.config.LossUnusablePct)
+		result := Result{Edge, "wan_unusable", 0, wan.RTTMs}
+		recordDecision(result, slo.Class)
+		return result
+	}
+
+	// Check telemetry staleness and adjust confidence
+	confidenceAdjustment := 1.0
+	if wan.IsStale {
+		klog.V(4).Info("WAN telemetry is stale, reducing confidence")
+		confidenceAdjustment = 0.5 // Reduce confidence in cloud predictions
+	}
+	if local.IsStale {
+		klog.V(4).Info("Local telemetry is stale, reducing confidence")
+		confidenceAdjustment *= 0.7
+	}
+
+	// 2. Get profiles
 	edgeKey := GetProfileKey(pod, Edge)
 	cloudKey := GetProfileKey(pod, Cloud)
-	edgeProfile := e.profileStore.GetOrDefault(edgeKey)
-	cloudProfile := e.profileStore.GetOrDefault(cloudKey)
+	edgeProfile := e.config.ProfileStore.GetOrDefault(edgeKey)
+	cloudProfile := e.config.ProfileStore.GetOrDefault(cloudKey)
 
 	klog.V(4).Infof("Profiles edge[%s]: %s | cloud[%s]: %s",
 		edgeKey.String(), fmtProfile(edgeProfile), cloudKey.String(), fmtProfile(cloudProfile))
 
-	// 3. ETA
+	// 3. Predict ETA
 	edgeETA := e.predictETA(pod, Edge, edgeProfile, local, wan)
 	cloudETA := e.predictETA(pod, Cloud, cloudProfile, local, wan)
 	klog.V(4).Infof("ETA edge=%s cloud=%s", fmtETA(edgeETA), fmtETA(cloudETA))
 
-	// 4. Exploration
-	edgeConf := edgeProfile.ConfidenceScore
-	cloudConf := cloudProfile.ConfidenceScore
+	// 4. Exploration with configurable rate
+	edgeConf := edgeProfile.ConfidenceScore * confidenceAdjustment
+	cloudConf := cloudProfile.ConfidenceScore * confidenceAdjustment
 	explorationBonus := 0.0
+
 	if edgeConf < 0.5 || cloudConf < 0.5 {
-		if rand.Float64() < 0.2 { // 20% exploration
+		if rand.Float64() < e.config.ExplorationRate {
 			explorationBonus = 50.0
-			klog.V(5).Infof("Exploration bonus applied: +%.0fms to cloud P95 feasibility", explorationBonus)
+			klog.V(5).Infof("Exploration bonus applied: +%.0fms", explorationBonus)
 		}
 	}
 
-	// 5. Feasibility
+	// 5. Feasibility checks
 	reqCPU := getCPURequest(pod)
 	reqMem := getMemRequestMi(pod)
-	nodeOK := local.BestEdgeNode.FreeCPU >= reqCPU && local.BestEdgeNode.FreeMem >= reqMem
+
+	// Null-safe access to BestEdgeNode
+	nodeOK := false
+	if local.BestEdgeNode.Name != "" {
+		nodeOK = local.BestEdgeNode.FreeCPU >= reqCPU && local.BestEdgeNode.FreeMem >= reqMem
+	}
+
 	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs) && nodeOK
 	cloudFeasible := (cloudETA.P95 + explorationBonus) <= float64(slo.DeadlineMs)
-	klog.V(5).Infof("Feasibility edge=%v cloud=%v (deadline=%dms, reqCPU=%dm, freeCPU=%dm)",
-		edgeFeasible, cloudFeasible, slo.DeadlineMs, getCPURequest(pod), local.FreeCPU)
+
+	klog.V(5).Infof("Feasibility edge=%v cloud=%v (deadline=%dms, reqCPU=%dm, reqMem=%dMi)",
+		edgeFeasible, cloudFeasible, slo.DeadlineMs, reqCPU, reqMem)
 
 	// 6. Decision logic
 	if edgeFeasible && !cloudFeasible {
-		klog.Infof("Decision for %s: EDGE reason=edge_feasible_only eta=%.0fms wanRTT=%dms",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), edgeETA.Mean, wan.RTTMs)
-		return Result{Edge, "edge_feasible_only", edgeETA.Mean, wan.RTTMs}
+		result := Result{Edge, "edge_feasible_only", edgeETA.Mean, wan.RTTMs}
+		klog.Infof("Decision for %s: EDGE reason=%s eta=%.0fms",
+			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
+		recordDecision(result, slo.Class)
+		return result
 	}
+
 	if cloudFeasible && !edgeFeasible {
-		klog.Infof("Decision for %s: CLOUD reason=cloud_feasible_only eta=%.0fms wanRTT=%dms",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), cloudETA.Mean, wan.RTTMs)
-		return Result{Cloud, "cloud_feasible_only", cloudETA.Mean, wan.RTTMs}
+		result := Result{Cloud, "cloud_feasible_only", cloudETA.Mean, wan.RTTMs}
+		klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms",
+			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
+		recordDecision(result, slo.Class)
+		return result
 	}
 
 	if edgeFeasible && cloudFeasible {
 		edgeScore := e.computeScore(Edge, edgeETA, edgeConf, slo)
 		cloudScore := e.computeScore(Cloud, cloudETA, cloudConf, slo)
-		klog.V(5).Infof("Scores edge=%.1f cloud=%.1f (conf edge=%.2f cloud=%.2f)", edgeScore, cloudScore, edgeConf, cloudConf)
+		klog.V(5).Infof("Scores edge=%.1f cloud=%.1f", edgeScore, cloudScore)
 
 		if edgeScore >= cloudScore {
-			klog.Infof("Decision for %s: EDGE reason=edge_preferred eta=%.0fms wanRTT=%dms",
-				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), edgeETA.Mean, wan.RTTMs)
-			return Result{Edge, "edge_preferred", edgeETA.Mean, wan.RTTMs}
+			result := Result{Edge, "edge_preferred", edgeETA.Mean, wan.RTTMs}
+			klog.Infof("Decision for %s: EDGE reason=%s eta=%.0fms",
+				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
+			recordDecision(result, slo.Class)
+			return result
 		}
-		klog.Infof("Decision for %s: CLOUD reason=cloud_faster eta=%.0fms wanRTT=%dms",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), cloudETA.Mean, wan.RTTMs)
-		return Result{Cloud, "cloud_faster", cloudETA.Mean, wan.RTTMs}
+
+		result := Result{Cloud, "cloud_faster", cloudETA.Mean, wan.RTTMs}
+		klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms",
+			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
+		recordDecision(result, slo.Class)
+		return result
 	}
 
-	// 7. Neither feasible
+	// 7. Neither feasible - best effort
 	if slo.Priority >= 7 && cloudETA.Mean < edgeETA.Mean {
-		klog.Infof("Decision for %s: CLOUD reason=best_effort_cloud eta=%.0fms wanRTT=%dms",
-			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), cloudETA.Mean, wan.RTTMs)
-		return Result{Cloud, "best_effort_cloud", cloudETA.Mean, wan.RTTMs}
+		result := Result{Cloud, "best_effort_cloud", cloudETA.Mean, wan.RTTMs}
+		klog.Infof("Decision for %s: CLOUD reason=%s eta=%.0fms",
+			PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
+		recordDecision(result, slo.Class)
+		return result
 	}
 
-	klog.Infof("Decision for %s: EDGE reason=best_effort_edge eta=%.0fms wanRTT=%dms",
-		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), edgeETA.Mean, wan.RTTMs)
-	return Result{Edge, "best_effort_edge", edgeETA.Mean, wan.RTTMs}
+	result := Result{Edge, "best_effort_edge", edgeETA.Mean, wan.RTTMs}
+	klog.Infof("Decision for %s: EDGE reason=%s eta=%.0fms",
+		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Reason, result.PredictedETAMs)
+	recordDecision(result, slo.Class)
+	return result
 }
 
 func (e *Engine) predictETA(
@@ -172,11 +232,9 @@ func (e *Engine) predictETA(
 	local *telemetry.LocalState,
 	wan *telemetry.WANState,
 ) ETAEstimate {
-	// Base execution time from learned profile
 	execTime := profile.MeanDurationMs
 	execTimeP95 := profile.P95DurationMs
 
-	// Queue wait (location-specific)
 	queueWait := 0.0
 	if loc == Edge {
 		class := pod.Annotations["slo.hybrid.io/class"]
@@ -184,7 +242,6 @@ func (e *Engine) predictETA(
 		queueWait = float64(pendingCount) * profile.MeanDurationMs
 	}
 
-	// WAN overhead for cloud
 	wanOverhead := 0.0
 	if loc == Cloud {
 		wanOverhead = 2.0 * float64(wan.RTTMs)
@@ -204,19 +261,15 @@ func (e *Engine) computeScore(
 ) float64 {
 	score := 0.0
 
-	// Locality preference
 	if loc == Edge {
-		score += 50.0
+		score += e.config.LocalityBonus
 	}
 
-	// Performance: deadline margin
 	deadlineMargin := float64(slo.DeadlineMs) - eta.P95
 	score += deadlineMargin * 0.5
 
-	// Confidence bonus
-	score += confidence * 30.0
+	score += confidence * e.config.ConfidenceWeight
 
-	// High-priority critical workloads prefer edge
 	if slo.Priority >= 8 && loc == Edge {
 		score += 20.0
 	}
@@ -225,12 +278,17 @@ func (e *Engine) computeScore(
 }
 
 func getCPURequest(pod *corev1.Pod) int64 {
-	if len(pod.Spec.Containers) == 0 {
-		return 0
-	}
 	var total int64
 	for _, c := range pod.Spec.Containers {
 		total += c.Resources.Requests.Cpu().MilliValue()
+	}
+	return total
+}
+
+func getMemRequestMi(pod *corev1.Pod) int64 {
+	var total int64
+	for _, c := range pod.Spec.Containers {
+		total += c.Resources.Requests.Memory().Value() / (1024 * 1024)
 	}
 	return total
 }
@@ -243,20 +301,17 @@ func fmtProfile(p *ProfileStats) string {
 	if p == nil {
 		return "nil"
 	}
-	return fmt.Sprintf("count=%d conf=%.2f mean=%.0fms p95=%.0fms slo=%.0f%% qwait=%.0fms",
-		p.Count, p.ConfidenceScore, p.MeanDurationMs, p.P95DurationMs, p.SLOComplianceRate*100, p.MeanQueueWaitMs)
+	return fmt.Sprintf("count=%d conf=%.2f mean=%.0fms p95=%.0fms slo=%.0f%%",
+		p.Count, p.ConfidenceScore, p.MeanDurationMs, p.P95DurationMs, p.SLOComplianceRate*100)
 }
 
-func PodID(ns string, name string, genName string, uid string) string {
-	// Prefer name if present
+func PodID(ns, name, genName, uid string) string {
 	if name != "" {
 		if ns == "" {
 			ns = "default"
 		}
 		return ns + "/" + name
 	}
-	// Fall back to generateName + UID tail for uniqueness
-	// Example: offload/build-job-xxxxx (uid: abcde)
 	shortUID := uid
 	if len(shortUID) > 8 {
 		shortUID = shortUID[:8]
@@ -268,12 +323,4 @@ func PodID(ns string, name string, genName string, uid string) string {
 		genName = "<no-generateName>"
 	}
 	return fmt.Sprintf("%s/%s* (uid=%s)", ns, genName, shortUID)
-}
-
-func getMemRequestMi(pod *corev1.Pod) int64 {
-	var total int64
-	for _, c := range pod.Spec.Containers {
-		total += c.Resources.Requests.Memory().Value() / (1024 * 1024)
-	}
-	return total
 }

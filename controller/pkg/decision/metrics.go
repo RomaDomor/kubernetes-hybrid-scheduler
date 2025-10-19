@@ -8,6 +8,22 @@ import (
 )
 
 var (
+	decisionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scheduler_decisions_total",
+			Help: "Total scheduling decisions by location, reason, and class",
+		},
+		[]string{"location", "reason", "class"},
+	)
+
+	decisionLatency = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "scheduler_decision_duration_seconds",
+			Help:    "Time spent making scheduling decisions",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5},
+		},
+	)
+
 	profileCount = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "scheduler_profile_samples_total",
@@ -42,12 +58,19 @@ var (
 	)
 )
 
+func recordDecision(result Result, class string) {
+	decisionsTotal.WithLabelValues(
+		string(result.Location),
+		result.Reason,
+		class,
+	).Inc()
+}
+
 func (ps *ProfileStore) UpdateMetrics() {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
 	for keyStr, profile := range ps.profiles {
-		// keyStr format: "class-tier-location"
 		parts := strings.Split(keyStr, "-")
 		class, tier, location := "unknown", "unknown", "unknown"
 		if len(parts) >= 3 {

@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"time"
 
+	"golang.org/x/time/rate"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
@@ -18,15 +21,35 @@ import (
 )
 
 type Server struct {
-	dec *decision.Engine
-	tel telemetry.Collector
+	dec           *decision.Engine
+	tel           telemetry.Collector
+	limiter       *rate.Limiter
+	kubeClient    kubernetes.Interface
+	eventRecorder record.EventRecorder
 }
 
-func NewServer(dec *decision.Engine, tel telemetry.Collector) *Server {
-	return &Server{dec: dec, tel: tel}
+func NewServer(dec *decision.Engine, tel telemetry.Collector, limiter *rate.Limiter) *Server {
+	return &Server{
+		dec:     dec,
+		tel:     tel,
+		limiter: limiter,
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		admissionLatency.Observe(time.Since(start).Seconds())
+	}()
+
+	// Rate limiting
+	if !s.limiter.Allow() {
+		klog.Warning("Admission rate limit exceeded")
+		admissionRateLimited.Inc()
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+
 	klog.V(4).Infof("Webhook request from %s", r.RemoteAddr)
 
 	if r.Method != http.MethodPost {
@@ -53,7 +76,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"Processing %s %s/%s (UID=%s)",
 		req.Operation, req.Kind.Kind, req.Name, req.UID)
 
-	// Only handle Pod CREATE operations
 	if req.Kind.Kind != "Pod" || req.Operation != admissionv1.Create {
 		writeResponse(w, review, allow())
 		return
@@ -66,7 +88,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only process managed pods
 	if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
 		klog.V(4).Infof("Pod %s/%s not managed, skipping",
 			pod.Namespace, pod.Name)
@@ -74,7 +95,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Skip if already decided
 	if pod.Annotations != nil &&
 		pod.Annotations["scheduling.hybrid.io/decision"] != "" {
 		klog.V(4).Infof("Pod %s/%s already decided, skipping",
@@ -96,31 +116,43 @@ func (s *Server) processScheduling(
 	if err != nil {
 		klog.Warningf("Invalid SLO for %s/%s: %v",
 			pod.Namespace, pod.Name, err)
-		return allow() // Fail open on invalid SLO
+		return allow()
 	}
 
-	// Get telemetry (with fallback to cached)
 	local := s.tel.GetCachedLocalState()
 	wan := s.tel.GetCachedWANState()
 
-	// One bounded live refresh to keep admission snappy
-	ctxBound, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
-	if ls, err := s.tel.GetLocalState(ctxBound); err == nil {
-		local = ls
-	}
-	cancel()
-
-	// WAN live refresh
-	if ws, err := s.tel.GetWANState(ctx); err == nil {
-		wan = ws
-	}
-
 	// Decide
 	result := s.dec.Decide(pod, sloData, local, wan)
-	klog.Infof("Decision for %s: %s (reason=%s, rtt=%dms)",
-		decision.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), result.Location, result.Reason, wan.RTTMs)
 
-	// Build patch
+	// Record event
+	_, err = s.kubeClient.CoreV1().Events(pod.Namespace).Create(ctx, &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s.%x", pod.Name, time.Now().UnixNano()),
+			Namespace: pod.Namespace,
+		},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:      "Pod",
+			Namespace: pod.Namespace,
+			Name:      pod.Name,
+			UID:       pod.UID,
+		},
+		Reason: "SchedulingDecision",
+		Message: fmt.Sprintf("Scheduled to %s: %s (ETA: %.0fms, WAN RTT: %dms)",
+			result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs),
+		Type:           corev1.EventTypeNormal,
+		FirstTimestamp: metav1.NewTime(time.Now()),
+		LastTimestamp:  metav1.NewTime(time.Now()),
+		Count:          1,
+	}, metav1.CreateOptions{})
+	if err != nil {
+		klog.Warningf("Failed to create event for pod %s", pod.Name)
+	}
+
+	klog.Infof("Decision for %s: %s (reason=%s, rtt=%dms)",
+		decision.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
+		result.Location, result.Reason, wan.RTTMs)
+
 	return s.buildPatchResponse(pod, result)
 }
 

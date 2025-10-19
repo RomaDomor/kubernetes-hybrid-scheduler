@@ -18,7 +18,6 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// PodObserver watches pod lifecycle and extracts ground truth
 type PodObserver struct {
 	kubeClient  kubernetes.Interface
 	store       *ProfileStore
@@ -37,21 +36,13 @@ func NewPodObserver(
 	}
 }
 
-// Watch starts monitoring pod lifecycle events
-func (o *PodObserver) Watch() {
-	klog.Info("PodObserver registering handlers")
+func (o *PodObserver) Watch(stopCh <-chan struct{}) {
+	klog.Info("PodObserver starting")
+
 	_, err := o.podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			pod := obj.(*corev1.Pod)
-			klog.V(6).Infof("Pod add: %s phase=%s node=%s",
-				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), pod.Status.Phase, pod.Spec.NodeName)
-		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			pod := newObj.(*corev1.Pod)
-			klog.V(6).Infof("Pod update: %s phase=%s node=%s",
-				PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), pod.Status.Phase, pod.Spec.NodeName)
 
-			// Only track managed pods with scheduling decision
 			if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
 				return
 			}
@@ -59,13 +50,11 @@ func (o *PodObserver) Watch() {
 				return
 			}
 
-			// Record start time when pod transitions to Running
 			if pod.Status.Phase == corev1.PodRunning &&
 				pod.Annotations["scheduling.hybrid.io/actualStart"] == "" {
 				o.recordStart(pod)
 			}
 
-			// Record completion when pod finishes
 			if pod.Status.Phase == corev1.PodSucceeded ||
 				pod.Status.Phase == corev1.PodFailed {
 				o.recordCompletion(pod)
@@ -73,11 +62,12 @@ func (o *PodObserver) Watch() {
 		},
 	})
 	if err != nil {
-		klog.Errorf("Failed to start informer: %v", err)
+		klog.Errorf("Failed to register PodObserver handlers: %v", err)
 		return
 	}
 
 	klog.Info("PodObserver handlers registered")
+	<-stopCh
 }
 
 func (o *PodObserver) recordStart(pod *corev1.Pod) {
@@ -92,7 +82,6 @@ func (o *PodObserver) recordStart(pod *corev1.Pod) {
 
 	queueWait := startTime.Sub(decisionTime).Milliseconds()
 
-	// Update annotations (RFC3339 for timestamps, ms for durations)
 	o.annotate(pod, "scheduling.hybrid.io/actualStart", startTime.Format(time.RFC3339))
 	o.annotate(pod, "scheduling.hybrid.io/queueWaitMs", fmt.Sprintf("%d", queueWait))
 
@@ -101,7 +90,6 @@ func (o *PodObserver) recordStart(pod *corev1.Pod) {
 }
 
 func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
-	// Extract measurements
 	decision := Location(pod.Annotations["scheduling.hybrid.io/decision"])
 	predictedETA, _ := parseFloat64(pod.Annotations["scheduling.hybrid.io/predictedETAMs"])
 	queueWait, _ := parseFloat64(pod.Annotations["scheduling.hybrid.io/queueWaitMs"])
@@ -112,7 +100,6 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 		return
 	}
 
-	// Calculate actual duration
 	endTime := time.Now()
 	if len(pod.Status.ContainerStatuses) > 0 {
 		if state := pod.Status.ContainerStatuses[0].State.Terminated; state != nil {
@@ -121,7 +108,6 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	}
 	actualDuration := endTime.Sub(startTime).Milliseconds()
 
-	// Check SLO compliance
 	deadlineMs, _ := parseFloat64(pod.Annotations["slo.hybrid.io/deadlineMs"])
 	totalTime := float64(queueWait) + float64(actualDuration)
 	sloMet := true
@@ -129,7 +115,6 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 		sloMet = totalTime <= deadlineMs
 	}
 
-	// Update profile
 	key := GetProfileKey(pod, decision)
 	o.store.Update(key, ProfileUpdate{
 		ObservedDurationMs: float64(actualDuration),
@@ -137,7 +122,6 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 		SLOMet:             sloMet,
 	})
 
-	// Record prediction error for metrics
 	predErr := math.Abs(float64(actualDuration) - predictedETA)
 	recordPredictionError(key, predErr)
 
@@ -149,7 +133,6 @@ func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// Build JSON Patch ops
 	ops := []map[string]interface{}{}
 	if pod.Annotations == nil {
 		ops = append(ops, map[string]interface{}{
@@ -177,13 +160,13 @@ func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
-		klog.V(5).Infof("Retrying pod annotation patch due to: %v", err)
+		klog.V(5).Infof("Retrying pod annotation patch: %v", err)
 	}
 
-	klog.V(4).Infof("Failed to patch annotations on pod %s after retries", PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
+	klog.V(4).Infof("Failed to patch pod %s after retries",
+		PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 }
 
-// Helpers
 func parseTime(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, fmt.Errorf("empty time string")

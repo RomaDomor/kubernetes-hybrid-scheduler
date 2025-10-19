@@ -18,7 +18,6 @@ func (s *Server) buildPatchResponse(
 ) *admissionv1.AdmissionResponse {
 	patches := []map[string]interface{}{}
 
-	// Ensure annotations exist
 	if pod.Annotations == nil {
 		patches = append(patches, map[string]interface{}{
 			"op":    "add",
@@ -27,7 +26,6 @@ func (s *Server) buildPatchResponse(
 		})
 	}
 
-	// Add decision annotations (include predicted ETA)
 	patches = append(patches,
 		addAnnotation("scheduling.hybrid.io/decision", string(res.Location)),
 		addAnnotation("scheduling.hybrid.io/predictedETAMs", fmt.Sprintf("%.0f", res.PredictedETAMs)),
@@ -36,7 +34,6 @@ func (s *Server) buildPatchResponse(
 		addAnnotation("scheduling.hybrid.io/wanRttMs", fmt.Sprintf("%d", res.WanRttMs)),
 	)
 
-	// Ensure nodeSelector exists
 	if pod.Spec.NodeSelector == nil {
 		patches = append(patches, map[string]interface{}{
 			"op":    "add",
@@ -45,7 +42,6 @@ func (s *Server) buildPatchResponse(
 		})
 	}
 
-	// Add location-specific patches
 	if res.Location == decision.Edge {
 		patches = append(patches, map[string]interface{}{
 			"op":    "add",
@@ -59,8 +55,9 @@ func (s *Server) buildPatchResponse(
 				"path":  "/spec/nodeSelector/node.role~1cloud",
 				"value": "true",
 			},
-			addCloudToleration(len(pod.Spec.Tolerations) == 0),
 		)
+
+		patches = append(patches, s.addCloudTolerationSafe(pod))
 	}
 
 	patchBytes, _ := json.Marshal(patches)
@@ -81,28 +78,50 @@ func addAnnotation(key, val string) map[string]interface{} {
 	}
 }
 
-func addCloudToleration(isFirst bool) map[string]interface{} {
-	tol := map[string]string{
-		"key":      "virtual-node.liqo.io/not-allowed",
-		"operator": "Equal",
-		"value":    "true",
-		"effect":   "NoExecute",
+func (s *Server) addCloudTolerationSafe(pod *corev1.Pod) map[string]interface{} {
+	targetTol := corev1.Toleration{
+		Key:      "virtual-node.liqo.io/not-allowed",
+		Operator: corev1.TolerationOpEqual,
+		Value:    "true",
+		Effect:   corev1.TaintEffectNoExecute,
 	}
 
-	path := "/spec/tolerations"
-	if !isFirst {
-		path += "/-"
-	}
-
-	return map[string]interface{}{
-		"op":   "add",
-		"path": path,
-		"value": func() interface{} {
-			if isFirst {
-				return []map[string]string{tol}
+	// Check if toleration already exists
+	for _, tol := range pod.Spec.Tolerations {
+		if tol.Key == targetTol.Key &&
+			tol.Operator == targetTol.Operator &&
+			tol.Value == targetTol.Value &&
+			tol.Effect == targetTol.Effect {
+			// Already exists, return no-op
+			return map[string]interface{}{
+				"op":   "test",
+				"path": "/spec/tolerations",
 			}
-			return tol
-		}(),
+		}
+	}
+
+	// Convert to map for JSON patch
+	tolMap := map[string]string{
+		"key":      targetTol.Key,
+		"operator": string(targetTol.Operator),
+		"value":    targetTol.Value,
+		"effect":   string(targetTol.Effect),
+	}
+
+	if len(pod.Spec.Tolerations) == 0 {
+		// First toleration: replace entire array
+		return map[string]interface{}{
+			"op":    "add",
+			"path":  "/spec/tolerations",
+			"value": []map[string]string{tolMap},
+		}
+	}
+
+	// Append to existing
+	return map[string]interface{}{
+		"op":    "add",
+		"path":  "/spec/tolerations/-",
+		"value": tolMap,
 	}
 }
 

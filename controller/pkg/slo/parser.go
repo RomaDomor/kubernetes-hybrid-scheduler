@@ -22,27 +22,36 @@ func ParseSLO(pod *corev1.Pod) (*SLO, error) {
 	}
 
 	slo := &SLO{
-		Priority:       5, // default
+		Priority:       5,
 		OffloadAllowed: true,
 	}
 
 	if v, ok := annotations["slo.hybrid.io/deadlineMs"]; ok {
-		if val, err := strconv.Atoi(v); err == nil {
-			slo.DeadlineMs = val
+		val, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid deadlineMs: %v", err)
 		}
+		if val < 1 || val > 3600000 { // 1ms to 1 hour
+			return nil, fmt.Errorf("deadlineMs out of range [1-3600000]: %d", val)
+		}
+		slo.DeadlineMs = val
 	}
 
 	if v, ok := annotations["slo.hybrid.io/latencyTargetMs"]; ok {
-		if val, err := strconv.Atoi(v); err == nil {
-			slo.LatencyTargetMs = val
+		val, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid latencyTargetMs: %v", err)
 		}
+		if val < 1 || val > 3600000 {
+			return nil, fmt.Errorf("latencyTargetMs out of range [1-3600000]: %d", val)
+		}
+		slo.LatencyTargetMs = val
 	}
 
 	if slo.DeadlineMs == 0 && slo.LatencyTargetMs == 0 {
 		return nil, fmt.Errorf("at least one of deadlineMs or latencyTargetMs must be set")
 	}
 
-	// Use latencyTarget as deadline if deadline not set
 	if slo.DeadlineMs == 0 {
 		slo.DeadlineMs = slo.LatencyTargetMs
 	}
@@ -52,10 +61,27 @@ func ParseSLO(pod *corev1.Pod) (*SLO, error) {
 		return nil, fmt.Errorf("slo.hybrid.io/class annotation required")
 	}
 
+	// Validate class (whitelist)
+	validClasses := map[string]bool{
+		"latency":     true,
+		"throughput":  true,
+		"batch":       true,
+		"interactive": true,
+		"streaming":   true,
+	}
+	if !validClasses[slo.Class] {
+		return nil, fmt.Errorf("invalid class '%s', must be one of: latency, throughput, batch, interactive, streaming", slo.Class)
+	}
+
 	if v, ok := annotations["slo.hybrid.io/priority"]; ok {
-		if val, err := strconv.Atoi(v); err == nil {
-			slo.Priority = val
+		val, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid priority: %v", err)
 		}
+		if val < 0 || val > 10 {
+			return nil, fmt.Errorf("priority out of range [0-10]: %d", val)
+		}
+		slo.Priority = val
 	}
 
 	if v, ok := annotations["slo.hybrid.io/offloadAllowed"]; ok {

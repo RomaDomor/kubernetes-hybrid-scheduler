@@ -22,15 +22,26 @@ spec:
             - containerPort: 8443
               name: webhook
               protocol: TCP
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
           command:
             - /smart-scheduler
           args:
-            - --v=6
+            - --v=4
+            - --rtt-threshold=100
+            - --loss-threshold=2.0
+            - --rtt-unusable=300
+            - --loss-unusable=10.0
+            - --locality-bonus=50.0
+            - --confidence-weight=30.0
+            - --exploration-rate=0.2
+            - --max-profiles=100
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8443
-              scheme: HTTPS
+              port: 8080
+              scheme: HTTP
             initialDelaySeconds: 20
             periodSeconds: 10
             timeoutSeconds: 2
@@ -38,8 +49,8 @@ spec:
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8443
-              scheme: HTTPS
+              port: 8080
+              scheme: HTTP
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 2
@@ -67,7 +78,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 128Mi
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
       volumes:
         - name: certs
           secret:
