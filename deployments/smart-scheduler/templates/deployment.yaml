@@ -16,6 +16,21 @@ spec:
         {{- include "smart-scheduler.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ .Values.serviceAccountName }}
+      initContainers:
+        - name: wait-for-certs
+          image: busybox:1.36
+          command: [ 'sh', '-c' ]
+          args:
+            - |
+              echo "Waiting for webhook certificate secret to be populated..."
+              while [ ! -f /certs/tls.crt ]; do
+                sleep 2
+              done
+              echo "Certificate found."
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+              readOnly: true
       containers:
         - name: controller
           image: "{{ .Values.image.name }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
