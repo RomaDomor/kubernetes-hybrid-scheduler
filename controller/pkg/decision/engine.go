@@ -33,6 +33,7 @@ type EngineConfig struct {
 	CloudMarginOverridePct  float64 // % of deadline where cloud is preferred if safer
 	WanStaleConfFactor      float64 // confidence multiplier when WAN is stale
 	EdgeHeadroomOverridePct float64 // % buffer needed on BestNode to allow scheduling
+	EdgePendingPessimismPct int     // % to inflate pending pod requests for capacity calcs
 	ProfileStore            *ProfileStore
 }
 

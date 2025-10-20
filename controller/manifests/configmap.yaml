@@ -11,6 +11,7 @@ data:
   cloudMarginOverridePct: "0.15"
   wanStaleConfFactor: "0.8"
   edgeHeadroomOverridePct: "0.1"
+  edgePendingPessimismPct: "10"
   
   # Histogram configuration
   histBoundsMode: "explicit"

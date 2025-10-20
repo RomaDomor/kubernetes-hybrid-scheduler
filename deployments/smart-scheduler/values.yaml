@@ -66,6 +66,8 @@ config:
   wanStaleConfFactor: "0.8"
   # -- Edge headroom override percentage
   edgeHeadroomOverridePct: "0.1"
+  # -- Edge pending pods resource pessimism
+  edgePendingPessimismPct: "10"
 
   # -- Histogram configuration
   histBoundsMode: "explicit"

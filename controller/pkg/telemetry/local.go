@@ -2,8 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -21,24 +19,6 @@ import (
 )
 
 var (
-	headroomCPUm     = int64(getEnvInt("HEADROOM_CPU_M", 200))  // 200m
-	headroomMemMi    = int64(getEnvInt("HEADROOM_MEM_MI", 256)) // 256Mi
-	pessimismPctEdge = int64(getEnvInt("EDGE_PENDING_PESSIMISM_PCT", 10))
-)
-
-type LocalCollector struct {
-	kubeClient kubernetes.Interface
-	cache      *LocalState
-	cacheMu    sync.RWMutex
-	podLister  corelisters.PodLister
-	nodeLister corelisters.NodeLister
-	podIndexer cache.Indexer
-
-	decisionMu sync.Mutex
-}
-
-// Add at top:
-var (
 	localFreeCPUGauge = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "scheduler_edge_free_cpu_millicores",
 		Help: "Free CPU on edge nodes in millicores",
@@ -53,10 +33,23 @@ var (
 	})
 )
 
+type LocalCollector struct {
+	kubeClient       kubernetes.Interface
+	cache            *LocalState
+	cacheMu          sync.RWMutex
+	podLister        corelisters.PodLister
+	nodeLister       corelisters.NodeLister
+	podIndexer       cache.Indexer
+	pessimismPctEdge int64
+
+	decisionMu sync.Mutex
+}
+
 func NewLocalCollector(
 	kube kubernetes.Interface,
 	podInformer coreinformers.PodInformer,
 	nodeInformer coreinformers.NodeInformer,
+	pessimismPctEdge int64,
 ) *LocalCollector {
 	err := podInformer.Informer().AddIndexers(cache.Indexers{
 		"nodeName": func(obj interface{}) ([]string, error) {
@@ -81,11 +74,12 @@ func NewLocalCollector(
 	}
 
 	return &LocalCollector{
-		kubeClient: kube,
-		cache:      &LocalState{PendingPodsPerClass: make(map[string]int)},
-		podLister:  podInformer.Lister(),
-		nodeLister: nodeInformer.Lister(),
-		podIndexer: podInformer.Informer().GetIndexer(),
+		kubeClient:       kube,
+		cache:            &LocalState{PendingPodsPerClass: make(map[string]int)},
+		podLister:        podInformer.Lister(),
+		nodeLister:       nodeInformer.Lister(),
+		podIndexer:       podInformer.Informer().GetIndexer(),
+		pessimismPctEdge: pessimismPctEdge,
 	}
 }
 
@@ -201,17 +195,6 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		freeCPU := allocCPU - resCPU
 		freeMemMi := allocMemMi - resMemMi
 
-		if freeCPU > headroomCPUm {
-			freeCPU -= headroomCPUm
-		} else {
-			freeCPU = 0
-		}
-		if freeMemMi > headroomMemMi {
-			freeMemMi -= headroomMemMi
-		} else {
-			freeMemMi = 0
-		}
-
 		sumFreeCPU += freeCPU
 		sumFreeMemMi += freeMemMi
 
@@ -263,10 +246,10 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		pr := podReqCache[p]
 		cpuM := pr.cpuM
 		memMi := pr.memMi
-		if unboundEdgeIntended && pessimismPctEdge > 0 {
+		if unboundEdgeIntended && l.pessimismPctEdge > 0 {
 			// add small pessimism for unbound edge-intended pods
-			cpuM += (cpuM * pessimismPctEdge) / 100
-			memMi += (memMi * pessimismPctEdge) / 100
+			cpuM += (cpuM * l.pessimismPctEdge) / 100
+			memMi += (memMi * l.pessimismPctEdge) / 100
 		}
 		pendingCPU += cpuM
 		pendingMemMi += memMi
@@ -325,15 +308,6 @@ func (l *LocalCollector) setCache(state *LocalState) {
 	l.cacheMu.Lock()
 	l.cache = state
 	l.cacheMu.Unlock()
-}
-
-func getEnvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if i, err := strconv.Atoi(v); err == nil {
-			return i
-		}
-	}
-	return def
 }
 
 // wantsEdge returns true if the pod explicitly targets edge via

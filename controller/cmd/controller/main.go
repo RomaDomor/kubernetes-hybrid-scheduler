@@ -71,6 +71,8 @@ func main() {
 		util.GetEnvFloat("WAN_STALE_CONF_FACTOR", 0.8), "WAN stale confidence factor (0-1)")
 	flag.Float64Var(&config.EdgeHeadroomOverridePct, "edge-headroom-override-pct",
 		util.GetEnvFloat("EDGE_HEADROOM_OVERRIDE_PCT", 0.1), "Edge headroom override % (0-1)")
+	flag.IntVar(&config.EdgePendingPessimismPct, "edge-pending-pessimism-pct",
+		util.GetEnvInt("EDGE_PENDING_PESSIMISM_PCT", 10), "Edge pending pod pessimism factor % (0-100)")
 
 	// Histogram config - parse directly into hcfg
 	flag.StringVar(&histBoundsModeStr, "hist-bounds-mode",
@@ -151,7 +153,7 @@ func main() {
 	nodeInformer := informerFactory.Core().V1().Nodes()
 
 	// Initialize telemetry collectors
-	localCollector := telemetry.NewLocalCollector(kubeClient, podInformer, nodeInformer)
+	localCollector := telemetry.NewLocalCollector(kubeClient, podInformer, nodeInformer, int64(config.EdgePendingPessimismPct))
 	wanProbe := telemetry.NewWANProbe(cloudEndpoint, 15*time.Second)
 	telemetryCollector := telemetry.NewCombinedCollector(localCollector, wanProbe)
 

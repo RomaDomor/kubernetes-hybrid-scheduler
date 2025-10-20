@@ -80,6 +80,11 @@ spec:
                 configMapKeyRef:
                   name: scheduler-config
                   key: edgeHeadroomOverridePct
+            - name: EDGE_PENDING_PESSIMISM_PCT
+              valueFrom:
+                configMapKeyRef:
+                  name: scheduler-config
+                  key: edgePendingPessimismPct
             # Histogram config
             - name: HIST_BOUNDS_MODE
               valueFrom:
