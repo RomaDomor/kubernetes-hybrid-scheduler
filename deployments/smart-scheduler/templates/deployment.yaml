@@ -44,6 +44,10 @@ spec:
               protocol: TCP
           command:
             - /smart-scheduler
+          {{- if .Values.logLevel }}
+          args:
+            - "--v={{ .Values.logLevel }}"
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

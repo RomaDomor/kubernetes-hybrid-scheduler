@@ -1,5 +1,9 @@
 replicaCount: 1
 
+# -- Set the klog verbosity level for the controller.
+# -- Higher values log more detail. Common values are 2-4 for debug info.
+logLevel: "2"
+
 image:
   name: ghcr.io/romadomor/kubernetes-smart-scheduler
   pullPolicy: IfNotPresent
