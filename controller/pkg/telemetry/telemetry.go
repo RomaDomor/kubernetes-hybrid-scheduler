@@ -17,13 +17,6 @@ var (
 		},
 		[]string{"class"},
 	)
-	queueWaitEstimateGauge = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "scheduler_queue_wait_estimate_ms",
-			Help: "Queue wait time estimate by model and class",
-		},
-		[]string{"model", "class"},
-	)
 )
 
 type ClassStats struct {

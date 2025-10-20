@@ -16,8 +16,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
+	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
 
@@ -54,7 +54,6 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 			oldPod := oldObj.(*corev1.Pod)
 			pod := newObj.(*corev1.Pod)
 			o.handlePodUpdate(oldPod, pod)
-
 		},
 	})
 	if err != nil {
@@ -67,51 +66,42 @@ func (o *PodObserver) Watch(stopCh <-chan struct{}) {
 }
 
 func (o *PodObserver) handlePodAdd(pod *corev1.Pod) {
-	if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
+	if pod == nil || pod.Labels[constants.LabelManaged] != constants.LabelValueTrue {
 		return
 	}
 
-			if pod.Labels[constants.LabelManaged] != "true" {
-				return
-			}
-			if pod.Annotations[constants.AnnotationDecision] == "" {
-				return
-			}
 	// Record arrival for new managed pods that are Pending
 	if pod.Status.Phase == corev1.PodPending {
-		if class := pod.Annotations["slo.hybrid.io/class"]; class != "" && o.queueStats != nil {
+		if class := pod.Annotations[constants.AnnotationSLOClass]; class != "" && o.queueStats != nil {
 			o.queueStats.RecordArrival(class)
 		}
 	}
 }
 
 func (o *PodObserver) handlePodUpdate(oldPod, pod *corev1.Pod) {
-	if pod.Labels["scheduling.hybrid.io/managed"] != "true" {
+	if pod == nil || pod.Labels[constants.LabelManaged] != constants.LabelValueTrue {
 		return
 	}
 
-	// Record arrival when pod transitions to Pending
-	if oldPod.Status.Phase != corev1.PodPending && pod.Status.Phase == corev1.PodPending {
-		if class := pod.Annotations["slo.hybrid.io/class"]; class != "" && o.queueStats != nil {
+	// Record arrival when pod transitions to Pending (unbound)
+	if oldPod != nil && oldPod.Status.Phase != corev1.PodPending && pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" {
+		if class := pod.Annotations[constants.AnnotationSLOClass]; class != "" && o.queueStats != nil {
 			o.queueStats.RecordArrival(class)
 		}
 	}
 
-	if pod.Annotations["scheduling.hybrid.io/decision"] == "" {
+	// If not decided yet, nothing to observe
+	if pod.Annotations[constants.AnnotationDecision] == "" {
 		return
 	}
 
-			if pod.Status.Phase == corev1.PodRunning &&
-				pod.Annotations[constants.AnnotationActualStart] == "" {
-				o.recordStart(pod)
-			}
-	if pod.Status.Phase == corev1.PodRunning &&
-		pod.Annotations["scheduling.hybrid.io/actualStart"] == "" {
+	// Record start (first time we see it running and missing start annotation)
+	if pod.Status.Phase == corev1.PodRunning && pod.Annotations[constants.AnnotationActualStart] == "" {
 		o.recordStart(pod)
 	}
 
-	if pod.Status.Phase == corev1.PodSucceeded ||
-		pod.Status.Phase == corev1.PodFailed {
+	// Record completion
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 		o.recordCompletion(pod)
 	}
 }

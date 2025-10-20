@@ -159,27 +159,6 @@ func (s *Server) processScheduling(
 	result := s.dec.Decide(pod, sloData, local, wan)
 
 	// Record event
-	_, err = s.kubeClient.CoreV1().Events(pod.Namespace).Create(ctx, &corev1.Event{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s.%x", pod.Name, time.Now().UnixNano()),
-			Namespace: pod.Namespace,
-		},
-		InvolvedObject: corev1.ObjectReference{
-			Kind:      "Pod",
-			Namespace: pod.Namespace,
-			Name:      pod.Name,
-			UID:       pod.UID,
-		},
-		Reason: "SchedulingDecision",
-		Message: fmt.Sprintf("Scheduled to %s: %s (ETA: %.0fms, WAN RTT: %dms)",
-			result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs),
-		Type:           corev1.EventTypeNormal,
-		FirstTimestamp: metav1.NewTime(time.Now()),
-		LastTimestamp:  metav1.NewTime(time.Now()),
-		Count:          1,
-	}, metav1.CreateOptions{})
-	if err != nil {
-		klog.Warningf("%s: Failed to create event", util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 	if s.kubeClient != nil {
 		_, err = s.kubeClient.CoreV1().Events(pod.Namespace).Create(ctx, &corev1.Event{
 			ObjectMeta: metav1.ObjectMeta{
@@ -201,7 +180,7 @@ func (s *Server) processScheduling(
 			Count:          1,
 		}, metav1.CreateOptions{})
 		if err != nil {
-			klog.Warningf("Failed to create event for pod %s", pod.Name)
+			klog.Warningf("%s: Failed to create event", util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 		}
 	}
 
