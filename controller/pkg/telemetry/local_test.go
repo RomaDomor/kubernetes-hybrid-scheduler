@@ -5,23 +5,20 @@ import (
 	"testing"
 	"time"
 
+	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-	metricsv "k8s.io/metrics/pkg/client/clientset/versioned/fake"
-
-	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 )
 
 func TestWantsEdge_NodeSelector(t *testing.T) {
 	kubeClient := fake.NewSimpleClientset()
-	metricsClient := metricsv.NewSimpleClientset()
 	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 
 	lc := telemetry.NewLocalCollector(
 		kubeClient,
-		metricsClient,
 		informerFactory.Core().V1().Pods(),
 		informerFactory.Core().V1().Nodes(),
 	)
@@ -53,12 +50,10 @@ func TestWantsEdge_NodeSelector(t *testing.T) {
 
 func TestLocalCollector_Staleness(t *testing.T) {
 	kubeClient := fake.NewSimpleClientset()
-	metricsClient := metricsv.NewSimpleClientset()
 	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 
 	lc := telemetry.NewLocalCollector(
 		kubeClient,
-		metricsClient,
 		informerFactory.Core().V1().Pods(),
 		informerFactory.Core().V1().Nodes(),
 	)
