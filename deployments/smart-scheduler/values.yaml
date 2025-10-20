@@ -31,7 +31,7 @@ resources:
 # -- Liveness and readiness probe settings
 probes:
   liveness:
-    initialDelaySeconds: 20
+    initialDelaySeconds: 10
     periodSeconds: 10
     timeoutSeconds: 2
     failureThreshold: 6
