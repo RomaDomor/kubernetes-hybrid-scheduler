@@ -89,7 +89,7 @@ jobs:
           ref_type="${GITHUB_REF_TYPE}"
           ref_name="${GITHUB_REF_NAME}"
           branch="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
-          safe_branch="$(echo "$branch" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')"
+          safe_branch="$(echo "$branch" | tr '[:upper:]' '[:lower:]' | awk '{gsub(/[^a-z0-9._-]+/,"-"); gsub(/^-+|-+$/,"")}1')"
           short_sha="$(git rev-parse --short=8 HEAD)"
 
           if [[ "$ref_type" == "tag" && "$ref_name" =~ ^v[0-9] ]]; then
