@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"net/http"
 	"time"
@@ -49,10 +50,6 @@ func main() {
 		"Cloud endpoint IP for WAN probe")
 
 	// Engine config
-	flag.IntVar(&config.RTTThresholdMs, "rtt-threshold",
-		util.GetEnvInt("RTT_THRESHOLD", 100), "WAN RTT threshold (ms)")
-	flag.Float64Var(&config.LossThresholdPct, "loss-threshold",
-		util.GetEnvFloat("LOSS_THRESHOLD", 2.0), "WAN packet loss threshold (%)")
 	flag.IntVar(&config.RTTUnusableMs, "rtt-unusable",
 		util.GetEnvInt("RTT_UNUSABLE", 300), "WAN RTT unusable threshold (ms)")
 	flag.Float64Var(&config.LossUnusablePct, "loss-unusable",
@@ -223,7 +220,7 @@ func main() {
 	}
 	go func() {
 		klog.Info("Starting admin server on :8080 (HTTP) for /metrics, /healthz, /readyz")
-		if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			klog.Fatalf("Admin server failed: %v", err)
 		}
 	}()

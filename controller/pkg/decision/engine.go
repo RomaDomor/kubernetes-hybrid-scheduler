@@ -22,8 +22,6 @@ type Result struct {
 }
 
 type EngineConfig struct {
-	RTTThresholdMs          int
-	LossThresholdPct        float64
 	RTTUnusableMs           int
 	LossUnusablePct         float64
 	LocalityBonus           float64

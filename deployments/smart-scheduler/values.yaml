@@ -52,10 +52,10 @@ webhookSecretName: smart-scheduler-certs
 # -- Configuration data for the smart-scheduler ConfigMap.
 # -- These values will populate the environment variables of the controller.
 config:
-  # -- WAN RTT threshold in milliseconds
-  rttThresholdMs: "100"
-  # -- WAN packet loss threshold in percent
-  lossThresholdPct: "2.0"
+  # -- WAN RTT unusable threshold in milliseconds
+  rttUnusableMs: "100"
+  # -- WAN packet loss unusable threshold in percent
+  lossUnusablePct: "2.0"
   # -- Cloud endpoint for WAN probe
   cloudEndpoint: "10.20.0.3"
   # -- Edge locality score bonus

@@ -55,16 +55,16 @@ spec:
                 configMapKeyRef:
                   name: scheduler-config
                   key: cloudEndpoint
-            - name: RTT_THRESHOLD
+            - name: RTT_UNUSABLE
               valueFrom:
                 configMapKeyRef:
                   name: scheduler-config
-                  key: rttThresholdMs
-            - name: LOSS_THRESHOLD
+                  key: rttUnusableMs
+            - name: LOSS_UNUSABLE
               valueFrom:
                 configMapKeyRef:
                   name: scheduler-config
-                  key: lossThresholdPct
+                  key: lossUnusablePct
             - name: CLOUD_MARGIN_OVERRIDE_PCT
               valueFrom:
                 configMapKeyRef:
