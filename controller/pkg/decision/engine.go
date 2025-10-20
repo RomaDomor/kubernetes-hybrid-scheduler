@@ -163,17 +163,26 @@ func (e *Engine) Decide(
 	}
 
 	// 5. Feasibility checks
-	nodeOK := false
-	if local.BestEdgeNode.Name != "" {
-		nodeOK = local.BestEdgeNode.FreeCPU >= reqCPU && local.BestEdgeNode.FreeMem >= reqMem
-	}
-
-	if local.FreeCPU < reqCPU || local.FreeMem < reqMem {
+	edgeHasNode := e.canNodeFitWithHeadroom(local.BestEdgeNode, reqCPU, reqMem)
+	edgeHasCapacity := local.FreeCPU >= reqCPU && local.FreeMem >= reqMem
+	if !edgeHasCapacity {
 		klog.V(4).Infof("%s: Cluster-wide free below request; treating edge as capacity-constrained", podID)
-		nodeOK = false
 	}
 
-	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs) && nodeOK
+	// 5a. Short-circuit: edge cannot run this pod at all -> force cloud
+	if !edgeHasCapacity || !edgeHasNode {
+		klog.Warningf("%s: Edge capacity insufficient: edgeHasCapacity=%v edgeHasNode=%v "+
+			"(need %dm/%dMi, have %dm/%dMi, bestNode=%s freeCPU=%dm freeMem=%dMi). Forcing cloud.",
+			podID, edgeHasCapacity, edgeHasNode,
+			reqCPU, reqMem, local.FreeCPU, local.FreeMem,
+			local.BestEdgeNode.Name, local.BestEdgeNode.FreeCPU, local.BestEdgeNode.FreeMem)
+		result := Result{constants.Cloud, "edge_no_capacity", cloudETA.Mean, wan.RTTMs}
+		recordDecision(result, slo.Class)
+		return result
+	}
+
+	// Compute location feasibility
+	edgeFeasible := edgeETA.P95 <= float64(slo.DeadlineMs)
 	cloudFeasible := (cloudETA.P95 + explorationBonus) <= float64(slo.DeadlineMs)
 
 	klog.V(5).Infof("%s: Feasibility edge=%v cloud=%v (deadline=%dms, reqCPU=%dm, reqMem=%dMi)",
@@ -203,13 +212,6 @@ func (e *Engine) Decide(
 
 		if marginDiff >= marginThreshold {
 			result := Result{constants.Cloud, "cloud_margin_override", cloudETA.Mean, wan.RTTMs}
-			recordDecision(result, slo.Class)
-			return result
-		}
-
-		// Sanity check: if BestEdgeNode has insufficient headroom, prefer cloud
-		if !e.canNodeFitWithHeadroom(local.BestEdgeNode, reqCPU, reqMem) {
-			result := Result{constants.Cloud, "edge_low_headroom", cloudETA.Mean, wan.RTTMs}
 			recordDecision(result, slo.Class)
 			return result
 		}

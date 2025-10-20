@@ -18,7 +18,6 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
-	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/signals"
@@ -137,7 +136,6 @@ func main() {
 	// Initialize Kubernetes clients
 	cfg := buildKubeConfig()
 	kubeClient := kubernetes.NewForConfigOrDie(cfg)
-	metricsClient := metricsv.NewForConfigOrDie(cfg)
 
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
@@ -153,7 +151,7 @@ func main() {
 	nodeInformer := informerFactory.Core().V1().Nodes()
 
 	// Initialize telemetry collectors
-	localCollector := telemetry.NewLocalCollector(kubeClient, metricsClient, podInformer, nodeInformer)
+	localCollector := telemetry.NewLocalCollector(kubeClient, podInformer, nodeInformer)
 	wanProbe := telemetry.NewWANProbe(cloudEndpoint, 15*time.Second)
 	telemetryCollector := telemetry.NewCombinedCollector(localCollector, wanProbe)
 

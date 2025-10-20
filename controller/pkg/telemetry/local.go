@@ -10,14 +10,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
-	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 )
@@ -29,13 +27,12 @@ var (
 )
 
 type LocalCollector struct {
-	kubeClient    kubernetes.Interface
-	metricsClient metricsv.Interface
-	cache         *LocalState
-	cacheMu       sync.RWMutex
-	podLister     corelisters.PodLister
-	nodeLister    corelisters.NodeLister
-	podIndexer    cache.Indexer
+	kubeClient kubernetes.Interface
+	cache      *LocalState
+	cacheMu    sync.RWMutex
+	podLister  corelisters.PodLister
+	nodeLister corelisters.NodeLister
+	podIndexer cache.Indexer
 
 	decisionMu sync.Mutex
 }
@@ -58,7 +55,6 @@ var (
 
 func NewLocalCollector(
 	kube kubernetes.Interface,
-	metrics metricsv.Interface,
 	podInformer coreinformers.PodInformer,
 	nodeInformer coreinformers.NodeInformer,
 ) *LocalCollector {
@@ -85,12 +81,11 @@ func NewLocalCollector(
 	}
 
 	return &LocalCollector{
-		kubeClient:    kube,
-		metricsClient: metrics,
-		cache:         &LocalState{PendingPodsPerClass: make(map[string]int)},
-		podLister:     podInformer.Lister(),
-		nodeLister:    nodeInformer.Lister(),
-		podIndexer:    podInformer.Informer().GetIndexer(),
+		kubeClient: kube,
+		cache:      &LocalState{PendingPodsPerClass: make(map[string]int)},
+		podLister:  podInformer.Lister(),
+		nodeLister: nodeInformer.Lister(),
+		podIndexer: podInformer.Informer().GetIndexer(),
 	}
 }
 
@@ -114,11 +109,8 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	}
 
 	edgeNodes := make(map[string]*corev1.Node, len(nodes))
-	var totalAllocCPU, totalAllocMemMi int64
 	for _, n := range nodes {
 		edgeNodes[n.Name] = n
-		totalAllocCPU += n.Status.Allocatable.Cpu().MilliValue()
-		totalAllocMemMi += n.Status.Allocatable.Memory().Value() / (1024 * 1024)
 	}
 
 	edgeManagedObjs, err := l.podIndexer.ByIndex("edgeManaged", constants.LabelValueTrue)
@@ -190,8 +182,10 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	}
 
 	// Compute best edge node free (per-node requests-based accounting)
+	// and simultaneously accumulate cluster-wide free as sum of per-node free.
 	var bestName string
 	var bestFreeCPU, bestFreeMemMi int64
+	var sumFreeCPU, sumFreeMemMi int64
 
 	for nodeName, nodeObj := range edgeNodes {
 		allocCPU := nodeObj.Status.Allocatable.Cpu().MilliValue()
@@ -218,29 +212,14 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 			freeMemMi = 0
 		}
 
+		sumFreeCPU += freeCPU
+		sumFreeMemMi += freeMemMi
+
 		// Track the most-free node by CPU (primary), mem as tie-breaker
 		if freeCPU > bestFreeCPU || (freeCPU == bestFreeCPU && freeMemMi > bestFreeMemMi) {
 			bestFreeCPU = freeCPU
 			bestFreeMemMi = freeMemMi
 			bestName = nodeName
-		}
-	}
-
-	// Global used from metrics-server
-	// If metrics-server call fails, we still return the best-node snapshot and pending-derived pressure.
-	var totalUsedCPU, totalUsedMemMi int64
-	if l.metricsClient != nil {
-		if nmList, err := l.metricsClient.MetricsV1beta1().NodeMetricses().
-			List(ctx, metav1.ListOptions{LabelSelector: constants.NodeRoleLabelEdge + "=" + constants.LabelValueTrue}); err == nil {
-			for _, nm := range nmList.Items {
-				if _, ok := edgeNodes[nm.Name]; ok {
-					totalUsedCPU += nm.Usage.Cpu().MilliValue()
-					totalUsedMemMi += nm.Usage.Memory().Value() / (1024 * 1024)
-				}
-			}
-		} else {
-			// Do not fail the snapshot on metrics errors
-			klog.V(4).Infof("Node metrics fetch failed: %v (using previous global free)", err)
 		}
 	}
 
@@ -293,17 +272,13 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		pendingMemMi += memMi
 	}
 
-	// Global free with headroom (keep for telemetry summary)
-	freeCPU := (totalAllocCPU - totalUsedCPU) - pendingCPU
-	freeMemMi := (totalAllocMemMi - totalUsedMemMi) - pendingMemMi
-	if freeCPU > headroomCPUm {
-		freeCPU -= headroomCPUm
-	} else {
+	// Cluster free as sum of per-node free, then subtract pending pressure once.
+	freeCPU := sumFreeCPU - pendingCPU
+	if freeCPU < 0 {
 		freeCPU = 0
 	}
-	if freeMemMi > headroomMemMi {
-		freeMemMi -= headroomMemMi
-	} else {
+	freeMemMi := sumFreeMemMi - pendingMemMi
+	if freeMemMi < 0 {
 		freeMemMi = 0
 	}
 
