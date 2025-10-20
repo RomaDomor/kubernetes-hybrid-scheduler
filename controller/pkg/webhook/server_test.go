@@ -35,6 +35,8 @@ func (f *fakeTel) GetCachedLocalState() *telemetry.LocalState {
 }
 func (f *fakeTel) GetCachedWANState() *telemetry.WANState { return &telemetry.WANState{RTTMs: 10} }
 func (f *fakeTel) UpdateMetrics()                         {}
+func (f *fakeTel) LockForDecision()                       {}
+func (f *fakeTel) UnlockForDecision()                     {}
 
 type fakeEngine struct{ res decision.Result }
 

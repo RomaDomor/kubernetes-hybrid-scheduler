@@ -36,6 +36,8 @@ type LocalCollector struct {
 	podLister     corelisters.PodLister
 	nodeLister    corelisters.NodeLister
 	podIndexer    cache.Indexer
+
+	decisionMu sync.Mutex
 }
 
 // Add at top:
@@ -392,6 +394,16 @@ func wantsEdge(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// Mutex
+func (l *LocalCollector) LockForDecision() {
+	l.decisionMu.Lock()
+}
+
+// UnlockForDecision releases the decision lock
+func (l *LocalCollector) UnlockForDecision() {
+	l.decisionMu.Unlock()
 }
 
 // Test helpers
