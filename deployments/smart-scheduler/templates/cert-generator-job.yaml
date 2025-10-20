@@ -4,9 +4,7 @@ metadata:
   name: {{ .Release.Name }}-cert-generator
   namespace: {{ .Release.Namespace }}
   annotations:
-    # This is a Helm hook that runs before install and upgrade
-    "helm.sh/hook": pre-install,pre-upgrade
-    # This policy cleans up the old job before a new one is created
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   template:
