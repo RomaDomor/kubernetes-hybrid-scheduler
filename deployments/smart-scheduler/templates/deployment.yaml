@@ -53,7 +53,7 @@ spec:
               readOnly: true
           env:
 {{- range $key, $val := .Values.config }}
-            - name: {{ $key | upper | replace "." "_" }}
+            - name: {{ $key | snakecase |upper }}
               valueFrom:
                 configMapKeyRef:
                   name: {{ include "smart-scheduler.fullname" $ }}-config
