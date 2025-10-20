@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/slo"
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
@@ -70,7 +70,7 @@ func TestWebhook_ManagedPodPatched(t *testing.T) {
 	body, _ := json.Marshal(review)
 
 	eng := &fakeEngine{res: decision.Result{
-		Location:       decision.Edge,
+		Location:       constants.Edge,
 		PredictedETAMs: 100,
 		WanRttMs:       10,
 		Reason:         "edge_preferred",

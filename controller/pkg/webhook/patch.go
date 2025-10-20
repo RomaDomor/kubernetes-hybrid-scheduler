@@ -3,12 +3,12 @@ package webhook
 import (
 	"encoding/json"
 	"fmt"
-	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
@@ -17,7 +17,7 @@ func (s *Server) buildPatchResponse(
 	pod *corev1.Pod,
 	res decision.Result,
 ) *admissionv1.AdmissionResponse {
-	patches := []map[string]interface{}{}
+	var patches []map[string]interface{}
 
 	if pod.Annotations == nil {
 		patches = append(patches, map[string]interface{}{
@@ -43,7 +43,7 @@ func (s *Server) buildPatchResponse(
 		})
 	}
 
-	if res.Location == decision.Edge {
+	if res.Location == constants.Edge {
 		patches = append(patches, map[string]interface{}{
 			"op":    "add",
 			"path":  "/spec/nodeSelector/" + util.EscapeJSONPointer(constants.NodeRoleLabelEdge),

@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/webhook"
 )
@@ -14,7 +15,7 @@ import (
 func TestBuildPatchResponse_Edge(t *testing.T) {
 	s := webhook.NewServer(nil, nil, nil, fake.NewSimpleClientset())
 	pod := &corev1.Pod{}
-	res := decision.Result{Location: decision.Edge, PredictedETAMs: 123, WanRttMs: 10, Reason: "edge_preferred"}
+	res := decision.Result{Location: constants.Edge, PredictedETAMs: 123, WanRttMs: 10, Reason: "edge_preferred"}
 
 	resp := s.BuildPatchResponseForTest(pod, res)
 	if resp.Patch == nil {

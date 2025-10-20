@@ -1,16 +1,16 @@
 package decision_test
 
 import (
-	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"testing"
-
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
+	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 )
 
 func testPod(cpuMillis, memMi int64, class string) *corev1.Pod {
@@ -48,12 +48,12 @@ func resourceMi(mi int64) resource.Quantity {
 
 func TestProfileKey_TieringAndClass(t *testing.T) {
 	p := testPod(250, 128, "latency")
-	key := decision.GetProfileKey(p, decision.Edge)
-	if key.CPUTier != "small" || key.Class != "latency" || key.Location != decision.Edge {
+	key := decision.GetProfileKey(p, constants.Edge)
+	if key.CPUTier != "small" || key.Class != "latency" || key.Location != constants.Edge {
 		t.Fatalf("unexpected key: %+v", key)
 	}
 	p2 := testPod(2500, 1024, "unknown")
-	key2 := decision.GetProfileKey(p2, decision.Cloud)
+	key2 := decision.GetProfileKey(p2, constants.Cloud)
 	if key2.CPUTier != "large" || key2.Class != "batch" {
 		t.Fatalf("class normalization failed: %+v", key2)
 	}
@@ -61,7 +61,7 @@ func TestProfileKey_TieringAndClass(t *testing.T) {
 
 func TestProfileStore_UpdateAndHistogram(t *testing.T) {
 	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
-	key := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: decision.Edge}
+	key := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
 
 	// Feed some durations
 	for _, v := range []float64{40, 45, 50, 55, 60, 100, 150} {
@@ -79,9 +79,9 @@ func TestProfileStore_UpdateAndHistogram(t *testing.T) {
 func TestProfileStore_LRUEviction(t *testing.T) {
 	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 2, decision.DefaultHistogramConfig())
 	keys := []decision.ProfileKey{
-		{Class: "latency", CPUTier: "small", Location: decision.Edge},
-		{Class: "batch", CPUTier: "small", Location: decision.Edge},
-		{Class: "throughput", CPUTier: "small", Location: decision.Edge},
+		{Class: "latency", CPUTier: "small", Location: constants.Edge},
+		{Class: "batch", CPUTier: "small", Location: constants.Edge},
+		{Class: "throughput", CPUTier: "small", Location: constants.Edge},
 	}
 	for _, k := range keys {
 		ps.Update(k, decision.ProfileUpdate{ObservedDurationMs: 10})
@@ -99,7 +99,7 @@ func TestProfileStore_LRUEviction(t *testing.T) {
 
 func TestProfileStore_Serialization(t *testing.T) {
 	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 10, decision.DefaultHistogramConfig())
-	k := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: decision.Edge}
+	k := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
 	ps.Update(k, decision.ProfileUpdate{ObservedDurationMs: 42, SLOMet: true})
 
 	// Export and check we have data

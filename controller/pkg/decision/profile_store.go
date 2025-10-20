@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"context"
 	"fmt"
-	constants2 "kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"math"
 	"sync"
 	"time"
@@ -18,6 +17,9 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
+	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
 
 var workloadProfileGVR = schema.GroupVersionResource{
@@ -29,7 +31,7 @@ var workloadProfileGVR = schema.GroupVersionResource{
 type ProfileKey struct {
 	Class    string
 	CPUTier  string
-	Location Location
+	Location constants.Location
 }
 
 func (pk ProfileKey) String() string {
@@ -116,8 +118,8 @@ func NewProfileStore(kubeClient kubernetes.Interface, maxEntries int, hcfg Histo
 	return ps
 }
 
-func GetProfileKey(pod *corev1.Pod, loc Location) ProfileKey {
-	cpuMillis := getCPURequest(pod)
+func GetProfileKey(pod *corev1.Pod, loc constants.Location) ProfileKey {
+	cpuMillis := util.GetCPURequest(pod)
 
 	tier := "medium"
 	if cpuMillis < 500 {
@@ -126,7 +128,7 @@ func GetProfileKey(pod *corev1.Pod, loc Location) ProfileKey {
 		tier = "large"
 	}
 
-	class := pod.Annotations[constants2.AnnotationSLOClass]
+	class := pod.Annotations[constants.AnnotationSLOClass]
 	if class == "" {
 		class = "batch"
 	}
@@ -143,13 +145,13 @@ func GetProfileKey(pod *corev1.Pod, loc Location) ProfileKey {
 
 // Whitelist of allowed classes
 func normalizeClass(class string) string {
-	if constants2.ValidSLOClasses[class] {
+	if constants.ValidSLOClasses[class] {
 		return class
 	}
 
-	klog.V(4).Infof("Unknown class '%s', defaulting to '%s'", class, constants2.DefaultSLOClass)
+	klog.V(4).Infof("Unknown class '%s', defaulting to '%s'", class, constants.DefaultSLOClass)
 	// Use centralized constant for default
-	return constants2.DefaultSLOClass
+	return constants.DefaultSLOClass
 }
 
 func (ps *ProfileStore) GetOrDefault(key ProfileKey) *ProfileStats {
@@ -599,8 +601,8 @@ func (ps *ProfileStore) ExportAllProfiles() map[string]*ProfileStats {
 func defaultProfilesStatic() map[string]*ProfileStats {
 	profiles := make(map[string]*ProfileStats)
 
-	classes := make([]string, 0, len(constants2.ValidSLOClasses))
-	for class := range constants2.ValidSLOClasses {
+	classes := make([]string, 0, len(constants.ValidSLOClasses))
+	for class := range constants.ValidSLOClasses {
 		classes = append(classes, class)
 	}
 	tiers := []string{"small", "medium", "large"}

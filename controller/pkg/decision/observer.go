@@ -93,7 +93,7 @@ func (o *PodObserver) recordStart(pod *corev1.Pod) {
 
 func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
-	decision := Location(pod.Annotations[constants.AnnotationDecision])
+	decision := constants.Location(pod.Annotations[constants.AnnotationDecision])
 	predictedETA, _ := parseFloat64(pod.Annotations[constants.AnnotationPredictedETA])
 	queueWait, _ := parseFloat64(pod.Annotations[constants.AnnotationQueueWait])
 	startTime, err := parseTime(pod.Annotations[constants.AnnotationActualStart])

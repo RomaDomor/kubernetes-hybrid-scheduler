@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 // GetEnvOrDefault retrieves the value of the environment variable named by the key.
@@ -65,4 +67,20 @@ func PodID(ns, name, genName, uid string) string {
 		genName = "<no-generateName>"
 	}
 	return fmt.Sprintf("%s/%s* (uid=%s)", ns, genName, shortUID)
+}
+
+func GetCPURequest(pod *corev1.Pod) int64 {
+	var total int64
+	for _, c := range pod.Spec.Containers {
+		total += c.Resources.Requests.Cpu().MilliValue()
+	}
+	return total
+}
+
+func GetMemRequestMi(pod *corev1.Pod) int64 {
+	var total int64
+	for _, c := range pod.Spec.Containers {
+		total += c.Resources.Requests.Memory().Value() / (1024 * 1024)
+	}
+	return total
 }

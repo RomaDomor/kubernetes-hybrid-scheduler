@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/slo"
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
@@ -50,7 +51,7 @@ func TestDecide_WANUnusable_ForcesEdge(t *testing.T) {
 	wan := &telemetry.WANState{RTTMs: 400, LossPct: 15}
 
 	res := e.Decide(p, s, local, wan)
-	if res.Location != decision.Edge || res.Reason != "wan_unusable" {
+	if res.Location != constants.Edge || res.Reason != "wan_unusable" {
 		t.Fatalf("want EDGE wan_unusable, got %v %s", res.Location, res.Reason)
 	}
 }
@@ -63,7 +64,7 @@ func TestDecide_OffloadDisabled_StaysEdge(t *testing.T) {
 	wan := &telemetry.WANState{RTTMs: 50, LossPct: 0.1}
 
 	res := e.Decide(p, s, local, wan)
-	if res.Location != decision.Edge || res.Reason != "offload_disabled" {
+	if res.Location != constants.Edge || res.Reason != "offload_disabled" {
 		t.Fatalf("want EDGE offload_disabled, got %v %s", res.Location, res.Reason)
 	}
 }
@@ -84,7 +85,7 @@ func TestDecide_CloudFeasibleOnly(t *testing.T) {
 	wan := &telemetry.WANState{RTTMs: 10, LossPct: 0.0}
 
 	res := e.Decide(p, s, local, wan)
-	if res.Location != decision.Cloud {
+	if res.Location != constants.Cloud {
 		t.Fatalf("expected CLOUD, got %v (%s)", res.Location, res.Reason)
 	}
 }
@@ -103,7 +104,7 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 	wan := &telemetry.WANState{RTTMs: 50}
 
 	res := e.Decide(p, s, local, wan)
-	if res.Location != decision.Edge || res.Reason != "telemetry_circuit_breaker" {
+	if res.Location != constants.Edge || res.Reason != "telemetry_circuit_breaker" {
 		t.Fatalf("want EDGE telemetry_circuit_breaker, got %v %s", res.Location, res.Reason)
 	}
 
@@ -113,7 +114,7 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 	wan.IsStale = true
 	wan.StaleDuration = 11 * time.Minute
 	res2 := e.Decide(p, s, local, wan)
-	if res2.Location != decision.Edge || res2.Reason != "wan_circuit_breaker" {
+	if res2.Location != constants.Edge || res2.Reason != "wan_circuit_breaker" {
 		t.Fatalf("want EDGE wan_circuit_breaker, got %v %s", res2.Location, res2.Reason)
 	}
 }
