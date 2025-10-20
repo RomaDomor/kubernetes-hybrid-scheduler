@@ -2,6 +2,16 @@ apiVersion: v1
 entries:
   smart-scheduler:
   - apiVersion: v2
+    appVersion: 0.7.1
+    created: "2025-10-20T13:29:30.141370239Z"
+    description: A Helm chart for the Kubernetes Hybrid Smart Scheduler Controller.
+    digest: b0150e70ae992e4244f40f660642a3f03f535b995c69980c4889d3a7e841acad
+    name: smart-scheduler
+    type: application
+    urls:
+    - https://github.com/RomaDomor/kubernetes-hybrid-scheduler/releases/download/smart-scheduler-0.7.1/smart-scheduler-0.7.1.tgz
+    version: 0.7.1
+  - apiVersion: v2
     appVersion: 0.7.0
     created: "2025-10-19T23:12:05.519386513Z"
     description: A Helm chart for the Kubernetes Hybrid Smart Scheduler Controller.
@@ -11,4 +21,4 @@ entries:
     urls:
     - https://github.com/RomaDomor/kubernetes-hybrid-scheduler/releases/download/smart-scheduler-0.7.0/smart-scheduler-0.7.0.tgz
     version: 0.7.0
-generated: "2025-10-19T23:12:05.51939568Z"
+generated: "2025-10-20T13:29:30.141378424Z"
