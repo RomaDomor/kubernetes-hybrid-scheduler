@@ -15,43 +15,52 @@ def load_all_run_data(base_dir: Path) -> pd.DataFrame:
     """
     Walks the entire results tree, parses raw data from each run's JSON and TXT files,
     and aggregates everything into a single, powerful DataFrame for analysis.
-    This is the core data ingestion engine for all plots.
     """
     all_rows = []
     print("Scanning for runs and parsing all raw data files...")
 
-    for run_dir in base_dir.glob("wan-*/load-*/run-*/"):
-        result_subdirs = list(run_dir.glob("20*"))
-        if not result_subdirs: continue
-        result_dir = result_subdirs[0]
+    for profile_dir in base_dir.glob("wan-*_load-*"):
+        for run_dir in profile_dir.glob("run-*"):
+            try:
+                # Find the single subdirectory within the run directory.
+                result_dir = next(d for d in run_dir.iterdir() if d.is_dir())
+            except StopIteration:
+                continue
 
-        # --- Extract metadata from the path ---
-        path_parts = result_dir.parts
-        wan_profile = path_parts[-4].split("_")[0].replace("wan-", "")
-        load_profile = path_parts[-4].split("_")[1].replace("load-", "")
-        run_number = int(path_parts[-2].replace("run-", ""))
+            profile_dir_name = result_dir.parts[-3]  # e.g., "wan-clear_load-low"
+            run_number = int(result_dir.parts[-2].replace("run-", ""))
 
-        # --- Parse run-level raw files once ---
-        http_data = parse_http_benchmark(result_dir / "http_benchmark.txt")
+            # Robustly split the profile directory name
+            try:
+                wan_part, load_part = profile_dir_name.split("_load-")
+                wan_profile = wan_part.replace("wan-", "")
+                load_profile = load_part
+            except ValueError:
+                print(f"Warning: Skipping malformed directory name: {profile_dir_name}")
+                continue
 
-        # --- Parse the detailed SLO summary for workload-level data ---
-        slo_file = result_dir / "slo_summary.json"
-        if not slo_file.is_file(): continue
+            # --- Parse run-level raw files once ---
+            http_data = parse_http_benchmark(result_dir / "http_benchmark.txt")
 
-        with open(slo_file) as f:
-            slo_data = json.load(f)
-            for item in slo_data.get("items", []):
-                row = {
-                    "wan_profile": wan_profile,
-                    "local_load": load_profile,
-                    "run": run_number,
-                    **item,  # Unpack all SLO item details (workload, kind, metric, etc.)
-                    **http_data, # Add the run-level http data to each workload row
-                }
-                all_rows.append(row)
+            # --- Parse the detailed SLO summary for workload-level data ---
+            slo_file = result_dir / "slo_summary.json"
+            if not slo_file.is_file():
+                continue
+
+            with open(slo_file) as f:
+                slo_data = json.load(f)
+                for item in slo_data.get("items", []):
+                    row = {
+                        "wan_profile": wan_profile,
+                        "local_load": load_profile,
+                        "run": run_number,
+                        **item,  # Unpack all SLO item details
+                        **http_data, # Add http data to each workload row
+                    }
+                    all_rows.append(row)
 
     if not all_rows:
-        sys.exit("Error: No valid SLO summary data found. Did the benchmark runs complete?")
+        sys.exit("Error: No valid SLO summary data found. Check results directory structure and glob pattern.")
 
     return pd.DataFrame(all_rows)
 
@@ -184,7 +193,7 @@ def plot_6_slo_failure_magnitude(df: pd.DataFrame, output_dir: Path):
     """(Graph 6) Shows how badly jobs miss their deadline when they fail."""
     print("Generating: 6. SLO Failure Magnitude Analysis")
     plot_df = df[df['pass'] == False].copy()
-    plot_df = plot_df.dropna(subset=['measured_ms', 'target_ms'])
+    plot_df = plot_df[plot_df['measured_ms'].notna() & plot_df['target_ms'].notna()]
     if plot_df.empty:
         print("  Skipping: No SLO failures with targets found to plot.")
         return
