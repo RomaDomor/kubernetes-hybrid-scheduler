@@ -296,7 +296,7 @@ def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
     """(Graph 3) SLO pass rate heatmap."""
     print("Generating: 3. SLO Pass Rate Reliability Heatmap")
     pass_rate = (
-        df.groupby(['wan_profile', 'local_load', 'workload'])['pass']
+        df.groupby(['wan_profile', 'local_load', 'workload'], observed=True)['pass']
         .value_counts(normalize=True)
         .unstack(fill_value=0)
     )
@@ -305,7 +305,8 @@ def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
     heatmap_data = pass_rate.pivot_table(
         index='workload',
         columns=['local_load', 'wan_profile'],
-        values='pass_pct'
+        values='pass_pct',
+        observed=True
     )
 
     # Drop columns (load/wan combinations) that have no data
@@ -428,6 +429,9 @@ def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path):
     )
     plot_df = plot_df[plot_df['local_load'].isin(available_loads)]
 
+    # Reset categorical to only include available categories
+    plot_df['local_load'] = plot_df['local_load'].cat.remove_unused_categories()
+
     fig, ax = plt.subplots(figsize=(11, 6.5))
     sns.pointplot(
         data=plot_df,
@@ -439,7 +443,8 @@ def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path):
         palette='Set2',
         ax=ax,
         markers='o',
-        scale=1.2,
+        markersize=8,
+        linewidth=2,
         order=WAN_ORDER,
         hue_order=available_loads,
     )
@@ -601,11 +606,13 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
         return
 
     placement_counts = df.groupby(
-        ['wan_profile', 'local_load', 'workload', 'node_type']
+        ['wan_profile', 'local_load', 'workload', 'node_type'],
+        observed=True
     ).size().reset_index(name='count')
 
     mean_counts = placement_counts.groupby(
-        ['wan_profile', 'local_load', 'workload', 'node_type']
+        ['wan_profile', 'local_load', 'workload', 'node_type'],
+        observed=True
     )['count'].mean().reset_index()
 
     if mean_counts.empty:
@@ -613,7 +620,7 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
         return
 
     actual_combos = (
-        mean_counts.groupby(['wan_profile', 'local_load'])
+        mean_counts.groupby(['wan_profile', 'local_load'], observed=True)
         .size()
         .reset_index(name='_count')
     )
