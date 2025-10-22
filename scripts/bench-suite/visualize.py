@@ -4,7 +4,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -92,142 +92,225 @@ def load_all_run_data(base_dir: Path) -> pd.DataFrame:
     print("Scanning for runs and parsing raw data...")
 
     for run_dir in base_dir.glob("wan-*/load-*/run-*/"):
-        # The actual results are in a timestamped subdirectory
         result_subdirs = list(run_dir.glob("20*"))
         if not result_subdirs:
             continue
         result_dir = result_subdirs[0]
 
-        # Extract profile info from path
-        parts = result_dir.parts
-        wan_profile = parts[-4].replace("wan-", "")
-        load_profile = parts[-4].split("_")[-1].replace("load-", "")
-        run_number = int(parts[-2].replace("run-", ""))
+        wan_profile = result_dir.parts[-4].replace("wan-", "")
+        load_profile = result_dir.parts[-4].split("_")[-1].replace("load-", "")
+        run_number = int(result_dir.parts[-2].replace("run-", ""))
 
-        # Parse all relevant files
-        run_data = {
-            "wan_profile": wan_profile,
-            "local_load": load_profile,
-            "run": run_number,
-            **parse_slo_summary(result_dir / "slo_summary.json"),
-            **parse_http_benchmark(result_dir / "http_benchmark.txt"),
-            **parse_stream_logs(result_dir / "stream-data-generator_logs.txt"),
-            **parse_wan_state(result_dir / "router_qdisc.txt"),
-        }
-        all_runs_data.append(run_data)
+        # We now parse the detailed SLO file, not just the summary
+        slo_file = result_dir / "slo_summary.json"
+        if not slo_file.is_file():
+            continue
+
+        with open(slo_file) as f:
+            slo_data = json.load(f)
+            for item in slo_data.get("items", []):
+                run_data = {
+                    "wan_profile": wan_profile,
+                    "local_load": load_profile,
+                    "run": run_number,
+                    **item # Unpack all SLO item details (workload, kind, metric, etc.)
+                }
+                all_runs_data.append(run_data)
 
     if not all_runs_data:
-        sys.exit("Error: No valid run data found. Did the benchmark complete successfully?")
+        sys.exit("Error: No valid run data found. Check results directory structure.")
 
     return pd.DataFrame(all_runs_data)
 
-# --- Plotting Functions ---
 
-def plot_wan_verification(df: pd.DataFrame, output_dir: Path):
-    """Verifies that the WAN emulation settings were applied correctly."""
-    print("Generating WAN state verification plot...")
-    wan_df = df[['wan_profile', 'wan_actual_delay_ms', 'wan_actual_loss_pct']].drop_duplicates()
-    wan_df = wan_df.set_index('wan_profile').reindex(['clear', 'good', 'moderate', 'poor']).reset_index()
+# --- COMPARATIVE PLOTTING FUNCTIONS ---
+def plot_latency_trends(df: pd.DataFrame, output_dir: Path):
+    """
+    **Insight:** How does latency for interactive workloads degrade as WAN conditions worsen,
+    and how is this trend affected by local cluster load?
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-    sns.barplot(data=wan_df, x='wan_profile', y='wan_actual_delay_ms', ax=ax1, palette="Blues_d")
-    ax1.set_title('Applied Network Latency')
-    ax1.set_xlabel('WAN Profile')
-    ax1.set_ylabel('Delay (ms)')
-
-    sns.barplot(data=wan_df, x='wan_profile', y='wan_actual_loss_pct', ax=ax2, palette="Reds_d")
-    ax2.set_title('Applied Packet Loss')
-    ax2.set_xlabel('WAN Profile')
-    ax2.set_ylabel('Packet Loss (%)')
-
-    plt.suptitle("WAN Emulation State Verification")
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    path = output_dir / "wan_verification.png"
-    plt.savefig(path, dpi=300)
-    plt.close()
-    print(f"  Saved: {path}")
-
-def plot_http_latency_distribution(df: pd.DataFrame, output_dir: Path):
-    """Plots the distribution of p99 latency to show variance and outliers."""
-    print("Generating HTTP p99 latency distribution plot...")
-    if 'http_p99_ms' not in df.columns:
-        print("  Skipping: No http_p99_ms data found.")
+    This plot uses lines to clearly show the performance trend. A steeper line indicates
+    a greater sensitivity to network conditions. Comparing the lines shows the impact
+    of local load.
+    """
+    print("Generating: 1. Latency Degradation Trends")
+    latency_df = df[df['workload'].isin(['http-latency', 'stream-processor'])].copy()
+    if latency_df.empty:
+        print("  Skipping: No latency data found.")
         return
 
-    g = sns.displot(
-        data=df, x='http_p99_ms',
-        col='wan_profile', row='local_load',
-        kind='kde', fill=True,
-        col_order=['clear', 'good', 'moderate', 'poor'],
-        facet_kws=dict(margin_titles=True)
-    )
-    g.set_axis_labels("HTTP p99 Latency (ms)", "Density")
-    g.fig.suptitle("Distribution of HTTP p99 Latency Across All Runs", y=1.03)
-    path = output_dir / "http_latency_distribution.png"
-    plt.savefig(path, dpi=300)
-    plt.close()
-    print(f"  Saved: {path}")
-
-def plot_stream_processing_details(df: pd.DataFrame, output_dir: Path):
-    """Plots stream latency and anomalies to give a fuller picture."""
-    print("Generating stream processing details plot...")
-    stream_df = df[['wan_profile', 'local_load', 'stream_avg_latency_ms', 'stream_anomalies']].copy()
-    if stream_df.empty or stream_df['stream_avg_latency_ms'].isnull().all():
-        print("  Skipping: No stream processing data found.")
-        return
-
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-
-    sns.boxplot(data=stream_df, x='wan_profile', y='stream_avg_latency_ms', hue='local_load', ax=axes[0],
-                order=['clear', 'good', 'moderate', 'poor'])
-    axes[0].set_title('Stream Processor Average Latency Distribution')
-    axes[0].set_ylabel('Average Latency (ms)')
-    axes[0].set_xlabel('')
-
-    sns.stripplot(data=stream_df, x='wan_profile', y='stream_anomalies', hue='local_load', ax=axes[1],
-                  order=['clear', 'good', 'moderate', 'poor'], dodge=True, alpha=0.7)
-    axes[1].set_title('Anomalies Detected by Stream Processor')
-    axes[1].set_ylabel('Anomaly Count')
-    axes[1].set_xlabel('WAN Profile')
-
-    plt.suptitle("Stream Processing Performance Details")
-    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-    path = output_dir / "stream_details.png"
-    plt.savefig(path, dpi=300)
-    plt.close()
-    print(f"  Saved: {path}")
-
-def plot_slo_adherence_variance(df: pd.DataFrame, output_dir: Path):
-    """Shows the variance in SLO pass counts across multiple runs."""
-    print("Generating SLO adherence variance plot...")
-    if 'slo_passed' not in df.columns:
-        print("  Skipping: No SLO data found.")
-        return
-
-    df['slo_pass_rate'] = (df['slo_passed'] / df['slo_total']) * 100
-
-    plt.figure(figsize=(12, 7))
-    sns.boxplot(
-        data=df,
+    g = sns.relplot(
+        data=latency_df,
         x='wan_profile',
-        y='slo_pass_rate',
+        y='measured_ms',
         hue='local_load',
+        col='workload',
+        kind='line',
+        errorbar='sd', # Show standard deviation as a shaded area
+        marker='o',
+        height=5,
+        aspect=1.2,
+        facet_kws=dict(sharey=False),
+        col_order=sorted(latency_df['workload'].unique()),
         order=['clear', 'good', 'moderate', 'poor']
     )
-    plt.title('Variance of SLO Pass Rate Across Runs')
-    plt.ylabel('SLO Pass Rate (%)')
-    plt.xlabel('WAN Profile')
-    plt.legend(title='Local Load')
-    plt.ylim(0, 105) # Set y-axis from 0% to 105%
-    path = output_dir / "slo_adherence_variance.png"
+
+    g.set_axis_labels("WAN Profile", "Latency (ms)")
+    g.set_titles("Workload: {col_name}")
+    g.legend.set_title("Local Load")
+    plt.suptitle("Interactive Workload Latency Trends vs. WAN & Local Load", y=1.05)
+
+    # Add SLO lines for context
+    for ax, workload in zip(g.axes.flat, g.col_names):
+        slo_val = latency_df[latency_df['workload'] == workload]['target_ms'].median()
+        if pd.notna(slo_val):
+            ax.axhline(slo_val, ls='--', color='red', label=f'SLO Target ({slo_val:.0f}ms)')
+            ax.legend()
+
+    path = output_dir / "1_latency_degradation_trends.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def plot_job_duration_impact(df: pd.DataFrame, output_dir: Path):
+    """
+    **Insight:** How do WAN conditions and local load independently and jointly impact
+    the completion time of different types of batch jobs?
+
+    This plot uses faceting to create a matrix, allowing direct comparison of how a single
+    job behaves under all tested conditions.
+    """
+    print("Generating: 2. Job Duration Impact Analysis")
+    job_df = df[df['kind'] == 'Job'].copy()
+    if job_df.empty:
+        print("  Skipping: No job data found.")
+        return
+
+    job_df['duration_s'] = job_df['measured_ms'] / 1000.0
+
+    # Select key jobs for clarity, or plot all
+    key_jobs = ['cpu-batch', 'build-job', 'io-job', 'stream-data-generator']
+    plot_df = job_df[job_df['workload'].isin(key_jobs)]
+    if plot_df.empty:
+        plot_df = job_df # Fallback to all jobs if key jobs aren't found
+
+    g = sns.catplot(
+        data=plot_df,
+        x='wan_profile',
+        y='duration_s',
+        hue='local_load',
+        col='workload',
+        kind='bar',
+        errorbar='sd',
+        capsize=.05,
+        height=5,
+        aspect=0.8,
+        col_wrap=2, # Arrange plots in a grid
+        sharey=False,
+        order=['clear', 'good', 'moderate', 'poor'],
+        col_order=sorted(plot_df['workload'].unique())
+    )
+
+    g.set_axis_labels("WAN Profile", "Mean Duration (s)")
+    g.set_titles("Job: {col_name}")
+    g.add_legend(title="Local Load")
+    g.set_xticklabels(rotation=30, ha='right')
+    plt.suptitle("Impact of WAN and Local Load on Batch Job Runtimes", y=1.05)
+    path = output_dir / "2_job_duration_impact_matrix.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def plot_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
+    """
+    **Insight:** What is the overall system reliability under each combination of conditions?
+    Where are the "failure zones"?
+
+    A heatmap provides a high-level, dense summary of performance, making it easy to
+    spot which combinations of factors lead to poor outcomes.
+    """
+    print("Generating: 3. SLO Pass Rate Heatmap")
+
+    # Calculate pass rate for each group
+    pass_rate = df.groupby(['wan_profile', 'local_load', 'workload'])['pass'].value_counts(normalize=True).unstack(fill_value=0)
+    pass_rate['pass_pct'] = pass_rate.get(True, 0) * 100
+
+    heatmap_data = pass_rate.pivot_table(index='workload', columns=['local_load', 'wan_profile'], values='pass_pct')
+    # Create multi-level columns and sort them logically
+    heatmap_data.columns = pd.MultiIndex.from_tuples(heatmap_data.columns)
+    heatmap_data = heatmap_data.reindex(sorted(heatmap_data.columns), axis=1)
+
+    plt.figure(figsize=(16, 8))
+    sns.heatmap(
+        heatmap_data,
+        annot=True,
+        fmt=".1f",
+        cmap="viridis_r", # Reversed: green=high, yellow=low
+        linewidths=.5,
+        cbar_kws={'label': 'SLO Pass Rate (%)'}
+    )
+
+    plt.title("System Reliability: SLO Pass Rate (%) Under All Conditions", fontsize=16)
+    plt.xlabel("Local Load & WAN Profile Combination", fontsize=12)
+    plt.ylabel("Workload", fontsize=12)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    path = output_dir / "3_slo_pass_rate_heatmap.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+
+def plot_performance_vs_slo(df: pd.DataFrame, output_dir: Path):
+    """
+    **Insight:** How close is each workload to its SLO target? Is it consistently meeting
+    the target, or is it highly variable and sometimes failing?
+
+    This plot shows the distribution of raw measurements against the SLO target, giving a
+    clear picture of performance margin and stability.
+    """
+    print("Generating: 4. Performance vs. SLO Target Distribution")
+
+    # Filter for data that has a valid SLO target
+    plot_df = df.dropna(subset=['measured_ms', 'target_ms']).copy()
+    if plot_df.empty:
+        print("  Skipping: No data with both measured and target values.")
+        return
+
+    plot_df['performance_margin_pct'] = ((plot_df['target_ms'] - plot_df['measured_ms']) / plot_df['target_ms']) * 100
+
+    g = sns.catplot(
+        data=plot_df,
+        x='wan_profile',
+        y='performance_margin_pct',
+        hue='local_load',
+        col='workload',
+        kind='box',
+        col_wrap=3,
+        sharey=False,
+        showfliers=False, # Hide outliers for a cleaner look
+        order=['clear', 'good', 'moderate', 'poor'],
+        col_order=sorted(plot_df['workload'].unique())
+    )
+
+    g.set_axis_labels("WAN Profile", "Performance Margin (%)")
+    g.set_titles("Workload: {col_name}")
+    g.add_legend(title="Local Load")
+
+    # Add a horizontal line at 0%, which represents the SLO target
+    for ax in g.axes.flat:
+        ax.axhline(0, ls='--', color='red')
+
+    plt.suptitle("Performance Margin Relative to SLO Target (0% = SLO Met Exactly)", y=1.05)
+    path = output_dir / "4_performance_vs_slo_margin.png"
     plt.savefig(path, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {path}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize Kubernetes SLO benchmark results from raw run data.")
+    parser = argparse.ArgumentParser(description="Visualize and compare Kubernetes SLO benchmark results.")
     parser.add_argument("results_dir", type=Path, help="Path to the multi-run results directory (e.g., ./results/multi-run-...).")
     args = parser.parse_args()
 
@@ -235,26 +318,22 @@ def main():
     output_dir = results_dir / "_analysis_plots"
     output_dir.mkdir(exist_ok=True)
 
-    # The new script first aggregates all data from scratch
+    # Step 1: Aggregate all raw data into a single DataFrame
     df = load_all_run_data(results_dir)
 
-    # Save the aggregated data to a CSV for manual inspection
-    agg_csv_path = results_dir / "aggregated_raw_data.csv"
+    # Save the powerful, newly aggregated data for external use
+    agg_csv_path = results_dir / "aggregated_detailed_data.csv"
     df.to_csv(agg_csv_path, index=False)
-    print(f"\n✅ Aggregated raw data from {len(df)} runs saved to {agg_csv_path}")
+    print(f"\n✅ Aggregated detailed data from {len(df)} measurements saved to {agg_csv_path}")
 
     # --- Generate Plots ---
     sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
 
-    # Plot 1: Verify the environment was set up correctly
-    plot_wan_verification(df, output_dir)
-
-    # Plot 2 & 3: Deep dive into specific workload performance and variance
-    plot_http_latency_distribution(df, output_dir)
-    plot_stream_processing_details(df, output_dir)
-
-    # Plot 4: High-level view of system reliability and stability
-    plot_slo_adherence_variance(df, output_dir)
+    # Generate the 4 key comparative plots
+    plot_latency_trends(df, output_dir)
+    plot_job_duration_impact(df, output_dir)
+    plot_slo_pass_rate_heatmap(df, output_dir)
+    plot_performance_vs_slo(df, output_dir)
 
     print("\n✅ Visualization complete!")
     print(f"Graphs saved in: {output_dir}")
