@@ -242,6 +242,12 @@ def plot_2_job_duration_bars(df: pd.DataFrame, output_dir: Path):
         return
     job_df['duration_s'] = job_df['measured_ms'] / 1000.0
 
+    # Only use load profiles that have actual data
+    available_loads = sorted(
+        job_df['local_load'].unique(),
+        key=lambda x: LOAD_ORDER.index(str(x)) if str(x) in LOAD_ORDER else 999
+    )
+
     g = sns.catplot(
         data=job_df,
         x='workload',
@@ -254,7 +260,7 @@ def plot_2_job_duration_bars(df: pd.DataFrame, output_dir: Path):
         aspect=1.3,
         height=5.5,
         palette="husl",
-        col_order=LOAD_ORDER,
+        col_order=available_loads,
     )
     g.set_axis_labels(
         "Job Name",
@@ -263,7 +269,11 @@ def plot_2_job_duration_bars(df: pd.DataFrame, output_dir: Path):
         fontweight='semibold'
     )
     g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
-    g.add_legend(title="WAN Profile", bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    # Update the existing legend title (don't create a new one)
+    if g.figure.legends:
+        g.figure.legends[0].set_title("WAN Profile")
+
     for ax in g.axes.flat:
         ax.tick_params(axis='x', rotation=45)
         sns.despine(ax=ax)
@@ -297,6 +307,15 @@ def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
         columns=['local_load', 'wan_profile'],
         values='pass_pct'
     )
+
+    # Drop columns (load/wan combinations) that have no data
+    heatmap_data = heatmap_data.dropna(axis=1, how='all')
+    # Drop rows (workloads) that have all NaN
+    heatmap_data = heatmap_data.dropna(axis=0, how='all')
+
+    if heatmap_data.empty:
+        print("  Skipping: No SLO data to display.")
+        return
 
     fig, ax = plt.subplots(figsize=(14, 7))
     sns.heatmap(
@@ -350,6 +369,11 @@ def plot_4_http_latency_full_distribution(df: pd.DataFrame, output_dir: Path):
         .str.replace('_ms', '')
     )
 
+    available_loads = sorted(
+        plot_df['local_load'].unique(),
+        key=lambda x: LOAD_ORDER.index(str(x)) if str(x) in LOAD_ORDER else 999
+    )
+
     g = sns.catplot(
         data=plot_df,
         x='wan_profile',
@@ -362,7 +386,7 @@ def plot_4_http_latency_full_distribution(df: pd.DataFrame, output_dir: Path):
         height=5.5,
         aspect=1.3,
         palette='muted',
-        col_order=LOAD_ORDER,
+        col_order=available_loads,
     )
     g.set_axis_labels(
         "WAN Profile",
@@ -397,6 +421,13 @@ def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path):
         return
     plot_df['duration_s'] = plot_df['measured_ms'] / 1000.0
 
+    # Only include load profiles with actual data
+    available_loads = sorted(
+        plot_df['local_load'].unique(),
+        key=lambda x: LOAD_ORDER.index(str(x)) if str(x) in LOAD_ORDER else 999
+    )
+    plot_df = plot_df[plot_df['local_load'].isin(available_loads)]
+
     fig, ax = plt.subplots(figsize=(11, 6.5))
     sns.pointplot(
         data=plot_df,
@@ -409,6 +440,8 @@ def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path):
         ax=ax,
         markers='o',
         scale=1.2,
+        order=WAN_ORDER,
+        hue_order=available_loads,
     )
     ax.set_title(
         f"Interaction: WAN & Load on '{job_to_plot}' Runtime",
@@ -444,6 +477,11 @@ def plot_6_slo_failure_magnitude(df: pd.DataFrame, output_dir: Path):
             * 100
     )
 
+    available_loads = sorted(
+        plot_df['local_load'].unique(),
+        key=lambda x: LOAD_ORDER.index(str(x)) if str(x) in LOAD_ORDER else 999
+    )
+
     g = sns.catplot(
         data=plot_df,
         x='workload',
@@ -456,7 +494,7 @@ def plot_6_slo_failure_magnitude(df: pd.DataFrame, output_dir: Path):
         height=5.5,
         aspect=1.3,
         palette="OrRd",
-        col_order=LOAD_ORDER,
+        col_order=available_loads,
     )
     g.set_axis_labels(
         "Workload",
@@ -493,6 +531,16 @@ def plot_7_raw_data_variance(df: pd.DataFrame, output_dir: Path):
         return
     plot_df['duration_s'] = plot_df['measured_ms'] / 1000.0
 
+    # Only include load profiles with actual data
+    available_loads = sorted(
+        plot_df['local_load'].unique(),
+        key=lambda x: LOAD_ORDER.index(str(x)) if str(x) in LOAD_ORDER else 999
+    )
+    plot_df = plot_df[plot_df['local_load'].isin(available_loads)]
+
+    # Reset categorical to only include available categories
+    plot_df['local_load'] = plot_df['local_load'].cat.remove_unused_categories()
+
     fig, ax = plt.subplots(figsize=(13, 7))
     sns.boxplot(
         data=plot_df,
@@ -502,6 +550,8 @@ def plot_7_raw_data_variance(df: pd.DataFrame, output_dir: Path):
         showfliers=False,
         palette='Set2',
         ax=ax,
+        order=WAN_ORDER,
+        hue_order=available_loads,
     )
     sns.stripplot(
         data=plot_df,
@@ -514,6 +564,8 @@ def plot_7_raw_data_variance(df: pd.DataFrame, output_dir: Path):
         size=5,
         palette='Set2',
         legend=False,
+        order=WAN_ORDER,
+        hue_order=available_loads,
     )
     ax.set_title(
         f"Runtime Variance of '{job_to_plot}' Across All Runs",
@@ -525,8 +577,8 @@ def plot_7_raw_data_variance(df: pd.DataFrame, output_dir: Path):
     ax.set_ylabel("Duration (s)", fontsize=11, fontweight='semibold')
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(
-        handles[:len(LOAD_ORDER)],
-        labels[:len(LOAD_ORDER)],
+        handles[:len(available_loads)],
+        labels[:len(available_loads)],
         title='Local Load',
         loc='upper left'
     )
