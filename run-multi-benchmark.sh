@@ -150,7 +150,6 @@ echo "WAN Profiles:          ${PROFILES[*]}"
 echo "Local Load Profiles:   ${LOCAL_LOAD_PROFILES[*]}"
 echo "Sleep Between:         ${SLEEP_BETWEEN}s"
 echo "Job Timeout:           ${JOB_TIMEOUT}s"
-echo "Cleanup (post-run):    ${NO_CLEANUP}"
 echo "Pre-Clean (pre-run):   ${PRE_CLEAN}"
 echo "Dry Run:               ${DRY_RUN}"
 echo "========================================="
@@ -288,10 +287,6 @@ for i in "${!PROFILES[@]}"; do
             --local-load-profile "${local_load}"
             --timeout-job-sec "${JOB_TIMEOUT}"
         )
-
-        if [[ "${NO_CLEANUP}" == "true" ]]; then
-            cmd+=("--no-cleanup")
-        fi
 
         if [[ "${DRY_RUN}" == "true" ]]; then
             echo "Would run: ${cmd[*]}"
