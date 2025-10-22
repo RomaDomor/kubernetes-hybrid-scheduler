@@ -239,16 +239,19 @@ for wan_profile in "${PROFILES[@]}"; do
         echo "  Runs to perform:    ${RUNS}"
         echo "========================================="
 
-        # Optional pre-clean ONCE per profile combination
-        if [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" != "true" ]]; then
-            cleanup_namespace "${NAMESPACE}" "${KUBECONFIG}"
-            cleanup_namespace "${LOCAL_NAMESPACE}" "${KUBECONFIG}"
-        elif [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" == "true" ]]; then
-            echo "Would pre-clean namespaces '${NAMESPACE}' and '${LOCAL_NAMESPACE}'"
-        fi
 
         # Inner loop for multiple runs
         for run_num in $(seq 1 "${RUNS}"); do
+            # Optional pre-clean ONCE per combination
+            if [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" != "true" ]]; then
+                cleanup_namespace "${NAMESPACE}" "${KUBECONFIG}"
+                cleanup_namespace "${LOCAL_NAMESPACE}" "${KUBECONFIG}"
+                echo "Sleeping 10 seconds after cleanup..."
+                sleep 10
+            elif [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" == "true" ]]; then
+                echo "Would pre-clean namespaces '${NAMESPACE}' and '${LOCAL_NAMESPACE}'"
+            fi
+
             echo "-----------------------------------------"
             echo "  Running iteration [$run_num/$RUNS]..."
             echo "-----------------------------------------"
