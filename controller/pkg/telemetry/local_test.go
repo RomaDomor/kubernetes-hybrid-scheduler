@@ -21,6 +21,7 @@ func TestWantsEdge_NodeSelector(t *testing.T) {
 		kubeClient,
 		informerFactory.Core().V1().Pods(),
 		informerFactory.Core().V1().Nodes(),
+		0, // staleness threshold in seconds, set to 0 for testing purposes
 	)
 
 	if lc == nil {
@@ -56,6 +57,7 @@ func TestLocalCollector_Staleness(t *testing.T) {
 		kubeClient,
 		informerFactory.Core().V1().Pods(),
 		informerFactory.Core().V1().Nodes(),
+		0, // staleness threshold in seconds, set to 0 for testing purposes
 	)
 
 	if lc == nil {
