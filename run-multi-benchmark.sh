@@ -9,9 +9,10 @@ DEFAULT_RESULTS_ROOT="./results"
 DEFAULT_KUBECONFIG="$HOME/.kube/config"
 DEFAULT_WAN_ROUTER="router"
 DEFAULT_PROFILES="clear,good,moderate,poor"
-DEFAULT_LOCAL_LOAD_PROFILES="none"  # Can be single value or comma-separated
+DEFAULT_LOCAL_LOAD_PROFILES="none"
 DEFAULT_VENV_PATH="scripts/bench-suite/.venv"
 DEFAULT_PRE_CLEAN=false
+DEFAULT_RUNS=1
 
 # Function to show usage
 usage() {
@@ -28,36 +29,23 @@ OPTIONS:
     -k, --kubeconfig PATH           Path to kubeconfig file (default: ${DEFAULT_KUBECONFIG})
     -w, --wan-router ROUTER         WAN router SSH target (default: ${DEFAULT_WAN_ROUTER})
     -p, --profiles PROFILES         Comma-separated WAN profiles (default: ${DEFAULT_PROFILES})
-    -l, --local-load-profiles LOAD  Local load profiles: single value or comma-separated list
-                                    Options: none, low, medium, high (default: ${DEFAULT_LOCAL_LOAD_PROFILES})
-                                    If single value: applied to all WAN profiles
-                                    If multiple: must match count of WAN profiles
+    -l, --local-load-profiles LOAD  Local load profiles (default: ${DEFAULT_LOCAL_LOAD_PROFILES})
+                                    - If single value: applied to all WAN profiles
+                                    - If multiple: must match count of WAN profiles
+    --runs N                        Number of times to repeat each profile run (default: ${DEFAULT_RUNS})
     -v, --venv-path PATH            Path to Python virtual environment (default: ${DEFAULT_VENV_PATH})
     -s, --sleep SECONDS             Sleep time between runs in seconds (default: 30)
     -t, --timeout SECONDS           Job timeout in seconds (default: 900)
-    --no-cleanup                    Don't cleanup namespace between runs
-    --pre-clean                     Run kubectl cleanup on the offloaded namespace before each profile
+    --pre-clean                     Run kubectl cleanup on namespaces before each profile
     --dry-run                       Show what would be run without executing
     -h, --help                      Show this help message
 
 EXAMPLES:
-    # Run with defaults (no local load)
-    $0
+    # Run all profiles 3 times to gather variance data
+    $0 --runs 3 -l "none,low,medium,high" -p "clear,good,moderate,poor"
 
-    # Apply medium load to all profiles
-    $0 --local-load-profiles medium --profiles "clear,good,poor"
-
-    # Different load per profile (must match profile count)
-    $0 --profiles "clear,good,poor" --local-load-profiles "none,medium,high"
-
-    # Test local cluster under load with different WAN conditions
-    $0 -p "clear,good,moderate,poor" -l "low,medium,medium,high"
-
-    # Dry run to see what would be executed
-    $0 --dry-run --profiles "good,poor" --local-load-profiles "medium,high"
-
-    # Pre-clean namespace before each profile with medium local load
-    $0 --pre-clean -l medium
+    # Dry run to see the new run structure
+    $0 --dry-run --runs 2 --profiles "good,poor" --local-load-profiles "medium,high"
 EOF
 }
 
@@ -73,78 +61,29 @@ LOCAL_LOAD_PROFILES_STR="${DEFAULT_LOCAL_LOAD_PROFILES}"
 VENV_PATH="${DEFAULT_VENV_PATH}"
 SLEEP_BETWEEN=30
 JOB_TIMEOUT=900
-NO_CLEANUP=false
 PRE_CLEAN="${DEFAULT_PRE_CLEAN}"
 DRY_RUN=false
+RUNS="${DEFAULT_RUNS}"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -n|--namespace)
-            NAMESPACE="$2"
-            shift 2
-            ;;
-        --local-namespace)
-            LOCAL_NAMESPACE="$2"
-            shift 2
-            ;;
-        -m|--manifests-dir)
-            MANIFESTS_DIR="$2"
-            shift 2
-            ;;
-        -r|--results-root)
-            RESULTS_ROOT="$2"
-            shift 2
-            ;;
-        -k|--kubeconfig)
-            KUBECONFIG="$2"
-            shift 2
-            ;;
-        -w|--wan-router)
-            WAN_ROUTER="$2"
-            shift 2
-            ;;
-        -p|--profiles)
-            PROFILES_STR="$2"
-            shift 2
-            ;;
-        -l|--local-load-profiles)
-            LOCAL_LOAD_PROFILES_STR="$2"
-            shift 2
-            ;;
-        -v|--venv-path)
-            VENV_PATH="$2"
-            shift 2
-            ;;
-        -s|--sleep)
-            SLEEP_BETWEEN="$2"
-            shift 2
-            ;;
-        -t|--timeout)
-            JOB_TIMEOUT="$2"
-            shift 2
-            ;;
-        --no-cleanup)
-            NO_CLEANUP=true
-            shift
-            ;;
-        --pre-clean)
-            PRE_CLEAN=true
-            shift
-            ;;
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "Unknown option $1"
-            usage
-            exit 1
-            ;;
+        -n|--namespace) NAMESPACE="$2"; shift 2 ;;
+        --local-namespace) LOCAL_NAMESPACE="$2"; shift 2 ;;
+        -m|--manifests-dir) MANIFESTS_DIR="$2"; shift 2 ;;
+        -r|--results-root) RESULTS_ROOT="$2"; shift 2 ;;
+        -k|--kubeconfig) KUBECONFIG="$2"; shift 2 ;;
+        -w|--wan-router) WAN_ROUTER="$2"; shift 2 ;;
+        -p|--profiles) PROFILES_STR="$2"; shift 2 ;;
+        -l|--local-load-profiles) LOCAL_LOAD_PROFILES_STR="$2"; shift 2 ;;
+        --runs) RUNS="$2"; shift 2 ;;
+        -v|--venv-path) VENV_PATH="$2"; shift 2 ;;
+        -s|--sleep) SLEEP_BETWEEN="$2"; shift 2 ;;
+        -t|--timeout) JOB_TIMEOUT="$2"; shift 2 ;;
+        --pre-clean) PRE_CLEAN=true; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option $1"; usage; exit 1 ;;
     esac
 done
 
@@ -197,12 +136,6 @@ fi
 # Add timestamp to results
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 BASE_RESULTS="${RESULTS_ROOT}/multi-run-${TIMESTAMP}"
-
-# Build cleanup flag
-CLEANUP_FLAG=""
-#if [[ "${NO_CLEANUP}" == "false" ]]; then
-#    CLEANUP_FLAG="--cleanup-namespace"
-#fi
 
 echo "========================================="
 echo "Multi-Profile Benchmark Configuration"
@@ -318,72 +251,71 @@ for i in "${!PROFILES[@]}"; do
     profile_num=$((i + 1))
     total_profiles="${#PROFILES[@]}"
 
-    echo ""
     echo "========================================="
-    echo "[$profile_num/$total_profiles] Running benchmark"
+    echo "[$profile_num/$total_profiles] Starting Profile"
     echo "  WAN Profile:        ${wan_profile}"
     echo "  Local Load Profile: ${local_load}"
+    echo "  Runs to perform:    ${RUNS}"
     echo "========================================="
 
-    # Create profile-specific results directory
-    PROFILE_RESULTS="${BASE_RESULTS}/wan-${wan_profile}_load-${local_load}"
-
-    # Optional pre-clean per profile (offloaded namespace)
+    # Optional pre-clean ONCE per profile
     if [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" != "true" ]]; then
         cleanup_namespace "${NAMESPACE}" "${KUBECONFIG}"
         cleanup_namespace "${LOCAL_NAMESPACE}" "${KUBECONFIG}"
     elif [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" == "true" ]]; then
-        echo "Would pre-clean namespace '${NAMESPACE}' with kubeconfig '${KUBECONFIG}'"
+        echo "Would pre-clean namespaces '${NAMESPACE}' and '${LOCAL_NAMESPACE}'"
     fi
 
-    # Build the command
-    cmd=(
-        python3 scripts/bench-suite/app.py
-        --namespace "${NAMESPACE}"
-        --local-namespace "${LOCAL_NAMESPACE}"
-        --manifests-dir "${MANIFESTS_DIR}"
-        --results-root "${PROFILE_RESULTS}"
-        --kubeconfig "${KUBECONFIG}"
-        --wan-router "${WAN_ROUTER}"
-        --wan-profile "${wan_profile}"
-        --local-load-profile "${local_load}"
-        --timeout-job-sec "${JOB_TIMEOUT}"
-    )
+    # Inner loop for multiple runs
+    for run_num in $(seq 1 "${RUNS}"); do
+        echo "-----------------------------------------"
+        echo "  Running iteration [$run_num/$RUNS]..."
+        echo "-----------------------------------------"
 
-    # Add cleanup flag if not disabled
-    if [[ -n "${CLEANUP_FLAG}" ]]; then
-        cmd+=("${CLEANUP_FLAG}")
-    fi
+        # Create profile-specific results directory for this run
+        PROFILE_RESULTS_BASE="${BASE_RESULTS}/wan-${wan_profile}_load-${local_load}"
+        RUN_RESULTS_DIR="${PROFILE_RESULTS_BASE}/run-${run_num}"
 
-    if [[ "${DRY_RUN}" == "true" ]]; then
-        echo "Would run: ${cmd[*]}"
-    else
-        # Run the benchmark
-        echo "Executing: ${cmd[*]}"
-        "${cmd[@]}"
+        cmd=(
+            python3 scripts/bench-suite/app.py
+            --namespace "${NAMESPACE}"
+            --local-namespace "${LOCAL_NAMESPACE}"
+            --manifests-dir "${MANIFESTS_DIR}"
+            --results-root "${RUN_RESULTS_DIR}"
+            --kubeconfig "${KUBECONFIG}"
+            --wan-router "${WAN_ROUTER}"
+            --wan-profile "${wan_profile}"
+            --local-load-profile "${local_load}"
+            --timeout-job-sec "${JOB_TIMEOUT}"
+        )
 
-        echo "✅ Completed: WAN=${wan_profile}, Load=${local_load}"
-        echo "📁 Results saved to: ${PROFILE_RESULTS}"
-
-        # Sleep between runs (except after the last one)
-        if [[ $profile_num -lt $total_profiles && $SLEEP_BETWEEN -gt 0 ]]; then
-            echo "⏳ Waiting ${SLEEP_BETWEEN} seconds before next run..."
-            sleep "${SLEEP_BETWEEN}"
+        if [[ "${NO_CLEANUP}" == "true" ]]; then
+            cmd+=("--no-cleanup")
         fi
-    fi
+
+        if [[ "${DRY_RUN}" == "true" ]]; then
+            echo "Would run: ${cmd[*]}"
+        else
+            echo "Executing: ${cmd[*]}"
+            "${cmd[@]}"
+
+            echo "✅ Completed run [$run_num/$RUNS]"
+            echo "📁 Results saved to: ${RUN_RESULTS_DIR}"
+
+            # Sleep between runs (except after the last one of the last profile)
+            is_last_run=$(( profile_num == total_profiles && run_num == RUNS ))
+            if [[ $is_last_run -eq 0 && $SLEEP_BETWEEN -gt 0 ]]; then
+                echo "⏳ Waiting ${SLEEP_BETWEEN} seconds before next run..."
+                sleep "${SLEEP_BETWEEN}"
+            fi
+        fi
+    done
 done
 
-if [[ "${DRY_RUN}" == "true" ]]; then
-    echo ""
-    echo "DRY RUN completed. Use without --dry-run to execute."
-    exit 0
-fi
 
-echo ""
 echo "🎉 All benchmarks completed!"
-echo "📊 Generating summary report..."
+echo "📊 Generating aggregated summary report..."
 
-# Generate comparative summary
 python3 - <<EOF
 import json
 import os
@@ -392,85 +324,69 @@ from pathlib import Path
 
 base_dir = Path("${BASE_RESULTS}")
 if not base_dir.exists():
-    print(f"Error: Results directory {base_dir} does not exist")
-    sys.exit(1)
+    sys.exit(f"Error: Results directory {base_dir} does not exist")
 
 summary = {
     "timestamp": "${TIMESTAMP}",
     "config": {
         "namespace": "${NAMESPACE}",
-        "local_namespace": "${LOCAL_NAMESPACE}",
-        "wan_router": "${WAN_ROUTER}",
-        "wan_profiles": "${PROFILES_STR}".split(","),
-        "local_load_profiles": "${LOCAL_LOAD_PROFILES_STR}".split(","),
-        "sleep_between": ${SLEEP_BETWEEN},
-        "job_timeout": ${JOB_TIMEOUT},
-        "pre_clean": $([[ "${PRE_CLEAN}" == "true" ]] && echo "True" || echo "False")
+        "runs_per_profile": ${RUNS},
     },
     "runs": []
 }
 
-profiles_found = 0
+runs_processed = 0
 for profile_dir in sorted(base_dir.glob("wan-*_load-*")):
-    # Parse directory name
     dir_name = profile_dir.name
-    parts = dir_name.split("_")
-    if len(parts) != 2:
-        continue
-    wan_profile = parts[0].replace("wan-", "")
-    load_profile = parts[1].replace("load-", "")
+    wan_profile = dir_name.split("_")[0].replace("wan-", "")
+    load_profile = dir_name.split("_")[1].replace("load-", "")
 
-    # Find the actual results directory (timestamped subdirectory)
-    result_dirs = sorted(profile_dir.glob("*"))
-    if result_dirs:
-        result_dir = result_dirs[0]  # Should be only one
+    # Find all runs for this profile
+    for run_dir in sorted(profile_dir.glob("run-*")):
+        run_num = int(run_dir.name.replace("run-", ""))
 
-        # Read SLO summary
+        # The python script creates a timestamped subdir, find it
+        result_subdirs = list(run_dir.glob("*"))
+        if not result_subdirs:
+            continue
+
+        result_dir = result_subdirs[0]
         slo_file = result_dir / "slo_summary.json"
+
         if slo_file.exists():
             with open(slo_file) as f:
                 data = json.load(f)
-
                 run_info = {
                     "wan_profile": wan_profile,
                     "local_load_profile": load_profile,
+                    "run_number": run_num,
                     "slo_results": data
                 }
                 summary["runs"].append(run_info)
-                profiles_found += 1
+                runs_processed += 1
 
-                # Print quick summary
-                items = data.get("items", [])
-                passed = sum(1 for item in items if item.get("pass", False))
-                total = len(items)
-                pass_rate = (passed/total)*100 if total > 0 else 0
-                print(f"📋 WAN: {wan_profile:10} Load: {load_profile:6} → {passed:2}/{total:2} ({pass_rate:5.1f}%)")
-
-# Save comparative summary
+# Save detailed comparative summary
 comparison_file = base_dir / "comparative_summary.json"
 with open(comparison_file, "w") as f:
     json.dump(summary, f, indent=2)
 
-print(f"\\n📊 Comparative summary saved to: {comparison_file}")
-print(f"✅ Processed {profiles_found} run(s)")
+print(f"\\n📊 Detailed summary with all runs saved to: {comparison_file}")
+print(f"✅ Processed {runs_processed} total run(s)")
 
-if profiles_found == 0:
-    print("⚠️  Warning: No profile results found!")
-    sys.exit(1)
+if runs_processed == 0:
+    sys.exit("⚠️ Warning: No profile results found!")
 
-# Generate CSV for easy analysis
+# Generate aggregated CSV for easy analysis by the visualizer
 csv_file = base_dir / "summary.csv"
 with open(csv_file, "w") as f:
-    f.write("wan_profile,local_load,workload,kind,metric,target_ms,measured_ms,pass\\n")
+    f.write("wan_profile,local_load,run,workload,kind,metric,target_ms,measured_ms,pass\\n")
     for run in summary["runs"]:
-        wan = run["wan_profile"]
-        load = run["local_load_profile"]
         for item in run["slo_results"].get("items", []):
-            f.write(f"{wan},{load},{item.get('workload','')},{item.get('kind','')},")
-            f.write(f"{item.get('metric','')},{item.get('target_ms','')},")
-            f.write(f"{item.get('measured_ms','')},{item.get('pass',False)}\\n")
+            f.write(f"{run['wan_profile']},{run['local_load_profile']},{run['run_number']},")
+            f.write(f"{item.get('workload','')},{item.get('kind','')},{item.get('metric','')},")
+            f.write(f"{item.get('target_ms','')},{item.get('measured_ms','')},{item.get('pass',False)}\\n")
 
-print(f"📊 CSV summary saved to: {csv_file}")
+print(f"📊 Aggregated CSV for visualization saved to: {csv_file}")
 EOF
 
 echo ""
