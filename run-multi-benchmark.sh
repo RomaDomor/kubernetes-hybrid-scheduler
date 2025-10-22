@@ -30,21 +30,19 @@ OPTIONS:
     -w, --wan-router ROUTER         WAN router SSH target (default: ${DEFAULT_WAN_ROUTER})
     -p, --profiles PROFILES         Comma-separated WAN profiles (default: ${DEFAULT_PROFILES})
     -l, --local-load-profiles LOAD  Local load profiles (default: ${DEFAULT_LOCAL_LOAD_PROFILES})
-                                    - If single value: applied to all WAN profiles
-                                    - If multiple: must match count of WAN profiles
     --runs N                        Number of times to repeat each profile run (default: ${DEFAULT_RUNS})
     -v, --venv-path PATH            Path to Python virtual environment (default: ${DEFAULT_VENV_PATH})
     -s, --sleep SECONDS             Sleep time between runs in seconds (default: 30)
     -t, --timeout SECONDS           Job timeout in seconds (default: 900)
-    --pre-clean                     Run kubectl cleanup on namespaces before each profile
+    --pre-clean                     Run kubectl cleanup on namespaces before each combination
     --dry-run                       Show what would be run without executing
     -h, --help                      Show this help message
 
 EXAMPLES:
-    # Run all profiles 3 times to gather variance data
-    $0 --runs 3 -l "none,low,medium,high" -p "clear,good,moderate,poor"
+    # Run all WAN profiles against all specified local load profiles, 3 times each
+    $0 --runs 3 -l "none,low,medium" -p "clear,good,moderate,poor"
 
-    # Dry run to see the new run structure
+    # Dry run to see the new run structure for a matrix of combinations
     $0 --dry-run --runs 2 --profiles "good,poor" --local-load-profiles "medium,high"
 EOF
 }
@@ -89,27 +87,7 @@ done
 
 # Convert comma-separated profiles to arrays
 IFS=',' read -ra PROFILES <<< "${PROFILES_STR}"
-IFS=',' read -ra LOCAL_LOAD_PROFILES_ARRAY <<< "${LOCAL_LOAD_PROFILES_STR}"
-
-# Process local load profiles
-# If single value, replicate it for all WAN profiles
-# If multiple values, must match WAN profile count
-if [[ ${#LOCAL_LOAD_PROFILES_ARRAY[@]} -eq 1 ]]; then
-    # Single value - replicate for all profiles
-    single_load="${LOCAL_LOAD_PROFILES_ARRAY[0]}"
-    LOCAL_LOAD_PROFILES=()
-    for _ in "${PROFILES[@]}"; do
-        LOCAL_LOAD_PROFILES+=("$single_load")
-    done
-elif [[ ${#LOCAL_LOAD_PROFILES_ARRAY[@]} -eq ${#PROFILES[@]} ]]; then
-    # Multiple values matching profile count
-    LOCAL_LOAD_PROFILES=("${LOCAL_LOAD_PROFILES_ARRAY[@]}")
-else
-    echo "Error: Local load profile count (${#LOCAL_LOAD_PROFILES_ARRAY[@]}) must be 1 or match WAN profile count (${#PROFILES[@]})"
-    echo "WAN profiles: ${PROFILES_STR}"
-    echo "Local load profiles: ${LOCAL_LOAD_PROFILES_STR}"
-    exit 1
-fi
+IFS=',' read -ra LOCAL_LOAD_PROFILES <<< "${LOCAL_LOAD_PROFILES_STR}"
 
 # Validate local load profile values
 valid_loads=("none" "low" "medium" "high")
@@ -148,6 +126,7 @@ echo "Kubeconfig:            ${KUBECONFIG}"
 echo "WAN Router:            ${WAN_ROUTER}"
 echo "WAN Profiles:          ${PROFILES[*]}"
 echo "Local Load Profiles:   ${LOCAL_LOAD_PROFILES[*]}"
+echo "Runs per combination:  ${RUNS}"
 echo "Sleep Between:         ${SLEEP_BETWEEN}s"
 echo "Job Timeout:           ${JOB_TIMEOUT}s"
 echo "Pre-Clean (pre-run):   ${PRE_CLEAN}"
@@ -156,12 +135,15 @@ echo "========================================="
 
 # Print mapping table
 echo ""
-echo "Profile Mapping:"
-echo "----------------"
-for i in "${!PROFILES[@]}"; do
-    echo "  ${PROFILES[$i]:10} → local-load: ${LOCAL_LOAD_PROFILES[$i]}"
+echo "Execution Matrix:"
+echo "-----------------"
+for wan_profile in "${PROFILES[@]}"; do
+    for local_load in "${LOCAL_LOAD_PROFILES[@]}"; do
+        echo "  - WAN: ${wan_profile}, Local Load: ${local_load}"
+    done
 done
 echo "========================================="
+
 
 if [[ "${DRY_RUN}" == "true" ]]; then
     echo "DRY RUN MODE - Commands that would be executed:"
@@ -243,67 +225,67 @@ cleanup_namespace() {
   wait_ns_empty "${ns}" "${kubeconfig_path}" "${wait_timeout}" 3 || true
 }
 
-# Run benchmarks for each profile
-for i in "${!PROFILES[@]}"; do
-    wan_profile="${PROFILES[$i]}"
-    local_load="${LOCAL_LOAD_PROFILES[$i]}"
-    profile_num=$((i + 1))
-    total_profiles="${#PROFILES[@]}"
+total_combinations=$(( ${#PROFILES[@]} * ${#LOCAL_LOAD_PROFILES[@]} ))
+current_combination=0
 
-    echo "========================================="
-    echo "[$profile_num/$total_profiles] Starting Profile"
-    echo "  WAN Profile:        ${wan_profile}"
-    echo "  Local Load Profile: ${local_load}"
-    echo "  Runs to perform:    ${RUNS}"
-    echo "========================================="
+# Run benchmarks for each profile combination
+for wan_profile in "${PROFILES[@]}"; do
+    for local_load in "${LOCAL_LOAD_PROFILES[@]}"; do
+        current_combination=$((current_combination + 1))
+        echo "========================================="
+        echo "[$current_combination/$total_combinations] Starting Profile Combination"
+        echo "  WAN Profile:        ${wan_profile}"
+        echo "  Local Load Profile: ${local_load}"
+        echo "  Runs to perform:    ${RUNS}"
+        echo "========================================="
 
-    # Optional pre-clean ONCE per profile
-    if [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" != "true" ]]; then
-        cleanup_namespace "${NAMESPACE}" "${KUBECONFIG}"
-        cleanup_namespace "${LOCAL_NAMESPACE}" "${KUBECONFIG}"
-    elif [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" == "true" ]]; then
-        echo "Would pre-clean namespaces '${NAMESPACE}' and '${LOCAL_NAMESPACE}'"
-    fi
-
-    # Inner loop for multiple runs
-    for run_num in $(seq 1 "${RUNS}"); do
-        echo "-----------------------------------------"
-        echo "  Running iteration [$run_num/$RUNS]..."
-        echo "-----------------------------------------"
-
-        # Create profile-specific results directory for this run
-        PROFILE_RESULTS_BASE="${BASE_RESULTS}/wan-${wan_profile}_load-${local_load}"
-        RUN_RESULTS_DIR="${PROFILE_RESULTS_BASE}/run-${run_num}"
-
-        cmd=(
-            python3 scripts/bench-suite/app.py
-            --namespace "${NAMESPACE}"
-            --local-namespace "${LOCAL_NAMESPACE}"
-            --manifests-dir "${MANIFESTS_DIR}"
-            --results-root "${RUN_RESULTS_DIR}"
-            --kubeconfig "${KUBECONFIG}"
-            --wan-router "${WAN_ROUTER}"
-            --wan-profile "${wan_profile}"
-            --local-load-profile "${local_load}"
-            --timeout-job-sec "${JOB_TIMEOUT}"
-        )
-
-        if [[ "${DRY_RUN}" == "true" ]]; then
-            echo "Would run: ${cmd[*]}"
-        else
-            echo "Executing: ${cmd[*]}"
-            "${cmd[@]}"
-
-            echo "✅ Completed run [$run_num/$RUNS]"
-            echo "📁 Results saved to: ${RUN_RESULTS_DIR}"
-
-            # Sleep between runs (except after the last one of the last profile)
-            is_last_run=$(( profile_num == total_profiles && run_num == RUNS ))
-            if [[ $is_last_run -eq 0 && $SLEEP_BETWEEN -gt 0 ]]; then
-                echo "⏳ Waiting ${SLEEP_BETWEEN} seconds before next run..."
-                sleep "${SLEEP_BETWEEN}"
-            fi
+        # Optional pre-clean ONCE per profile combination
+        if [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" != "true" ]]; then
+            cleanup_namespace "${NAMESPACE}" "${KUBECONFIG}"
+            cleanup_namespace "${LOCAL_NAMESPACE}" "${KUBECONFIG}"
+        elif [[ "${PRE_CLEAN}" == "true" && "${DRY_RUN}" == "true" ]]; then
+            echo "Would pre-clean namespaces '${NAMESPACE}' and '${LOCAL_NAMESPACE}'"
         fi
+
+        # Inner loop for multiple runs
+        for run_num in $(seq 1 "${RUNS}"); do
+            echo "-----------------------------------------"
+            echo "  Running iteration [$run_num/$RUNS]..."
+            echo "-----------------------------------------"
+
+            # Create profile-specific results directory for this run
+            PROFILE_RESULTS_BASE="${BASE_RESULTS}/wan-${wan_profile}_load-${local_load}"
+            RUN_RESULTS_DIR="${PROFILE_RESULTS_BASE}/run-${run_num}"
+
+            cmd=(
+                python3 scripts/bench-suite/app.py
+                --namespace "${NAMESPACE}"
+                --local-namespace "${LOCAL_NAMESPACE}"
+                --manifests-dir "${MANIFESTS_DIR}"
+                --results-root "${RUN_RESULTS_DIR}"
+                --kubeconfig "${KUBECONFIG}"
+                --wan-router "${WAN_ROUTER}"
+                --wan-profile "${wan_profile}"
+                --local-load-profile "${local_load}"
+                --timeout-job-sec "${JOB_TIMEOUT}"
+            )
+
+            if [[ "${DRY_RUN}" == "true" ]]; then
+                echo "Would run: ${cmd[*]}"
+            else
+                echo "Executing: ${cmd[*]}"
+                "${cmd[@]}"
+
+                echo "✅ Completed run [$run_num/$RUNS]"
+                echo "📁 Results saved to: ${RUN_RESULTS_DIR}"
+
+                is_last_run_of_last_combo=$(( current_combination == total_combinations && run_num == RUNS ))
+                if [[ $is_last_run_of_last_combo -eq 0 && $SLEEP_BETWEEN -gt 0 ]]; then
+                    echo "⏳ Waiting ${SLEEP_BETWEEN} seconds before next run..."
+                    sleep "${SLEEP_BETWEEN}"
+                fi
+            fi
+        done
     done
 done
 
@@ -325,7 +307,7 @@ summary = {
     "timestamp": "${TIMESTAMP}",
     "config": {
         "namespace": "${NAMESPACE}",
-        "runs_per_profile": ${RUNS},
+        "runs_per_profile_combination": ${RUNS},
     },
     "runs": []
 }
