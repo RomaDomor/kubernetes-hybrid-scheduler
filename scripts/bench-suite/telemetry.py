@@ -92,7 +92,7 @@ def get_events(v1: client.CoreV1Api, ns: str, out_path: Path):
     try:
         events = sorted([e.to_dict() for e in v1.list_namespaced_event(ns).items],
                         key=lambda x: (x.get("last_timestamp") or x.get("event_time") or ""))
-        out_path.write_text(json.dumps(events, indent=2))
+        out_path.write_text(json.dumps(events, indent=2, default=str))
     except ApiException as e:
         log(f"Warning: could not retrieve events for {ns}: {e}")
 
