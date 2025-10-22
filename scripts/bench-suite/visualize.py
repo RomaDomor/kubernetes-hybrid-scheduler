@@ -608,24 +608,24 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
         ['wan_profile', 'local_load', 'workload', 'node_type']
     )['count'].mean().reset_index()
 
-    # Filter to only available combinations
+    if mean_counts.empty:
+        print("  Skipping: No placement data.")
+        return
+
+    actual_combos = (
+        mean_counts.groupby(['wan_profile', 'local_load'])
+        .size()
+        .reset_index(name='_count')
+    )
+
     available_wans = sorted(
-        mean_counts['wan_profile'].unique(),
+        actual_combos['wan_profile'].unique(),
         key=lambda x: WAN_ORDER.index(str(x)) if str(x) in WAN_ORDER else 999
     )
     available_loads = sorted(
-        mean_counts['local_load'].unique(),
+        actual_combos['local_load'].unique(),
         key=lambda x: LOAD_ORDER.index(str(x)) if str(x) in LOAD_ORDER else 999
     )
-
-    mean_counts = mean_counts[
-        (mean_counts['wan_profile'].isin(available_wans)) &
-        (mean_counts['local_load'].isin(available_loads))
-        ]
-
-    if mean_counts.empty:
-        print("  Skipping: No placement data after filtering.")
-        return
 
     g = sns.catplot(
         data=mean_counts,
