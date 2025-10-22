@@ -503,7 +503,9 @@ def plot_6_slo_failure_magnitude(df: pd.DataFrame, output_dir: Path):
         fontweight='semibold'
     )
     g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
-    g.add_legend(title="WAN Profile")
+
+    g.legend.set_title("WAN Profile")
+
     for ax in g.axes.flat:
         ax.tick_params(axis='x', rotation=30)
         sns.despine(ax=ax)
@@ -606,6 +608,25 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
         ['wan_profile', 'local_load', 'workload', 'node_type']
     )['count'].mean().reset_index()
 
+    # Filter to only available combinations
+    available_wans = sorted(
+        mean_counts['wan_profile'].unique(),
+        key=lambda x: WAN_ORDER.index(str(x)) if str(x) in WAN_ORDER else 999
+    )
+    available_loads = sorted(
+        mean_counts['local_load'].unique(),
+        key=lambda x: LOAD_ORDER.index(str(x)) if str(x) in LOAD_ORDER else 999
+    )
+
+    mean_counts = mean_counts[
+        (mean_counts['wan_profile'].isin(available_wans)) &
+        (mean_counts['local_load'].isin(available_loads))
+        ]
+
+    if mean_counts.empty:
+        print("  Skipping: No placement data after filtering.")
+        return
+
     g = sns.catplot(
         data=mean_counts,
         x='workload',
@@ -618,8 +639,8 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
         aspect=1.6,
         palette={'cloud': '#4A90E2', 'edge': '#F5A623'},
         legend=False,
-        row_order=WAN_ORDER,
-        col_order=LOAD_ORDER,
+        row_order=available_wans,
+        col_order=available_loads,
     )
     g.set_axis_labels(
         "Workload",
@@ -633,7 +654,22 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
         fontsize=11,
         fontweight='semibold'
     )
-    g.add_legend(title="Node Type", bbox_to_anchor=(1.02, 1), loc='upper left')
+
+    # Add legend with proper placement
+    handles = [
+        plt.Rectangle((0, 0), 1, 1, fc='#4A90E2'),
+        plt.Rectangle((0, 0), 1, 1, fc='#F5A623')
+    ]
+    g.figure.legend(
+        handles,
+        ['cloud', 'edge'],
+        title='Node Type',
+        loc='upper center',
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=2,
+        frameon=True
+    )
+
     for ax in g.axes.flat:
         ax.tick_params(axis='x', rotation=45)
         sns.despine(ax=ax)
