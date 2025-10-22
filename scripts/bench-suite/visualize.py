@@ -11,18 +11,47 @@ import seaborn as sns
 
 # --- Global Configuration for Consistency ---
 
-# Define the desired order for profiles. This ensures all graphs are consistent.
 WAN_ORDER = ['clear', 'good', 'moderate', 'poor']
 LOAD_ORDER = ['none', 'low', 'medium', 'high']
-EDGE_NODE_IDENTIFIER = 'edge'
+CLOUD_NODE_IDENTIFIER = 'mypool'
 
-# --- Data Loading and Parsing Engine (Unchanged) ---
+# Professional color palettes
+CATEGORICAL_PALETTE = "Set2"
+SEQUENTIAL_PALETTE = "YlOrRd"
+DIVERGING_PALETTE = "RdYlBu_r"
+
+
+# --- Theme Configuration ---
+
+def setup_theme():
+    """Configure global seaborn and matplotlib styling."""
+    sns.set_theme(
+        style="whitegrid",
+        palette=CATEGORICAL_PALETTE,
+        font_scale=1.0
+    )
+    plt.rcParams.update({
+        'figure.facecolor': 'white',
+        'axes.facecolor': '#f8f9fa',
+        'axes.edgecolor': '#e0e0e0',
+        'grid.color': '#e8e8e8',
+        'grid.linewidth': 0.7,
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'Helvetica'],
+        'axes.labelsize': 11,
+        'axes.titlesize': 13,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'legend.fontsize': 10,
+        'lines.linewidth': 1.5,
+        'patch.linewidth': 0.5,
+    })
+
+
+# --- Data Loading and Parsing Engine ---
 
 def load_all_run_data(base_dir: Path) -> pd.DataFrame:
-    """
-    Walks the entire results tree, parses raw data from each run's files,
-    and aggregates everything into a single DataFrame for analysis.
-    """
+    """Load and aggregate all run data."""
     all_rows = []
     print("Scanning for runs and parsing all raw data files...")
 
@@ -41,7 +70,7 @@ def load_all_run_data(base_dir: Path) -> pd.DataFrame:
                 wan_profile = wan_part.replace("wan-", "")
                 load_profile = load_part
             except ValueError:
-                print(f"Warning: Skipping malformed directory name: {profile_dir_name}")
+                print(f"Warning: Skipping malformed directory: {profile_dir_name}")
                 continue
 
             # --- Parse run-level raw files once ---
@@ -49,40 +78,49 @@ def load_all_run_data(base_dir: Path) -> pd.DataFrame:
 
             # --- Parse the detailed SLO summary for workload-level data ---
             slo_file = result_dir / "slo_summary.json"
-            if not slo_file.is_file(): continue
+            if not slo_file.is_file():
+                continue
 
             with open(slo_file) as f:
                 slo_data = json.load(f)
                 for item in slo_data.get("items", []):
                     all_rows.append({
-                        "wan_profile": wan_profile, "local_load": load_profile,
-                        "run": run_number, **item, **http_data,
+                        "wan_profile": wan_profile,
+                        "local_load": load_profile,
+                        "run": run_number,
+                        **item,
+                        **http_data,
                     })
 
     if not all_rows:
-        sys.exit("Error: No valid SLO summary data found. Did the benchmark runs complete?")
+        sys.exit("Error: No valid SLO summary data found.")
 
     # Convert profile columns to Categorical type to enforce sorting in all plots
     df = pd.DataFrame(all_rows)
-    df['wan_profile'] = pd.Categorical(df['wan_profile'], categories=WAN_ORDER, ordered=True)
-    df['local_load'] = pd.Categorical(df['local_load'], categories=LOAD_ORDER, ordered=True)
+    df['wan_profile'] = pd.Categorical(
+        df['wan_profile'], categories=WAN_ORDER, ordered=True
+    )
+    df['local_load'] = pd.Categorical(
+        df['local_load'], categories=LOAD_ORDER, ordered=True
+    )
     return df
 
+
 def parse_http_benchmark(path: Path) -> dict:
-    """Parses 'hey' output to extract latency percentiles."""
-    if not path.is_file(): return {}
+    """Parse 'hey' output for latency percentiles."""
+    if not path.is_file():
+        return {}
     content, results = path.read_text(), {}
     for p in ["50", "90", "95", "99"]:
         if match := re.search(rf"\s+{p}%\s+in\s+([\d.]+)", content):
             results[f'http_p{p}_ms'] = float(match.group(1)) * 1000
     return results
 
+
 def load_placement_data(base_dir: Path) -> pd.DataFrame:
-    """
-    Scans all pod_node_map.csv files to build a specific DataFrame for placement analysis.
-    """
+    """Load pod placement data."""
     all_placements = []
-    print("\nScanning for pod placement data (pod_node_map.csv)...")
+    print("\nScanning for pod placement data...")
 
     for profile_dir in base_dir.glob("wan-*_load-*"):
         for run_dir in profile_dir.glob("run-*"):
@@ -115,213 +153,403 @@ def load_placement_data(base_dir: Path) -> pd.DataFrame:
                     "pod_name": row['pod_name'],
                     "node_name": row['node_name'],
                     "workload": get_workload_from_pod_name(row['pod_name']),
-                    "node_type": 'edge' if EDGE_NODE_IDENTIFIER in row['node_name'] else 'cloud'
+                    "node_type": (
+                        'cloud' if CLOUD_NODE_IDENTIFIER in row['node_name']
+                        else 'edge'
+                    )
                 })
 
     if not all_placements:
         return pd.DataFrame()
 
     df = pd.DataFrame(all_placements)
-    df['wan_profile'] = pd.Categorical(df['wan_profile'], categories=WAN_ORDER, ordered=True)
-    df['local_load'] = pd.Categorical(df['local_load'], categories=LOAD_ORDER, ordered=True)
+    df['wan_profile'] = pd.Categorical(
+        df['wan_profile'], categories=WAN_ORDER, ordered=True
+    )
+    df['local_load'] = pd.Categorical(
+        df['local_load'], categories=LOAD_ORDER, ordered=True
+    )
     return df
 
+
 def get_workload_from_pod_name(pod_name: str) -> str:
-    """Heuristic to extract the base workload name from a generated pod name."""
-    # For Jobs like 'cpu-batch-sn5xx'
+    """Extract workload name from pod name."""
     match = re.match(r'([a-z-]+)-[a-z0-9]{5}', pod_name)
     if match:
         return match.group(1)
-    # For Deployments like 'http-latency-58bd4fb596-lcvgt'
     match = re.match(r'([a-z-]+)-[a-z0-9]{9,10}-[a-z0-9]{5}', pod_name)
     if match:
         return match.group(1)
-    return pod_name # Fallback
+    return pod_name
 
-# --- Plotting Library (All 7 Graphs) ---
 
-# --- Group A: High-Level Comparative Summaries ---
+# --- Plotting Library ---
 
 def plot_1_latency_comparison_bars(df: pd.DataFrame, output_dir: Path):
-    """(Graph 1) High-level bar chart comparing mean latency."""
+    """(Graph 1) Mean latency comparison."""
     print("Generating: 1. Mean Latency Comparison (Bar Chart)")
-    latency_df = df[df['workload'].isin(['http-latency', 'stream-processor'])].copy()
+    latency_df = df[
+        df['workload'].isin(['http-latency', 'stream-processor'])
+    ].copy()
     if latency_df.empty:
         print("  Skipping: No latency workload data found.")
         return
 
     for load_profile in LOAD_ORDER:
         group = latency_df[latency_df['local_load'] == load_profile]
-        if group.empty:  # Skip this specific load profile
+        if group.empty:
             continue
 
-        group = latency_df[latency_df['local_load'] == load_profile]
         g = sns.catplot(
-            data=group, x='wan_profile', y='measured_ms', hue='workload',
-            kind='bar', errorbar='sd', capsize=.1, aspect=1.5
+            data=group,
+            x='wan_profile',
+            y='measured_ms',
+            hue='workload',
+            kind='bar',
+            errorbar='sd',
+            capsize=0.15,
+            aspect=1.6,
+            height=5,
+            palette="Set2",
         )
-        g.set_axis_labels("WAN Profile", "Mean Measured Latency (ms)")
+        g.set_axis_labels(
+            "WAN Profile",
+            "Mean Latency (ms)",
+            fontsize=12,
+            fontweight='semibold'
+        )
         g.legend.set_title("Workload")
-        plt.suptitle(f'Mean Latency under "{load_profile}" Local Load', y=1.05)
+        g.figure.suptitle(
+            f'Mean Latency under "{load_profile}" Local Load',
+            fontsize=14,
+            fontweight='bold',
+            y=0.98
+        )
+        g.tight_layout()
+        sns.despine(ax=g.ax)
+
         path = output_dir / f"A1_mean_latency_bars_load_{load_profile}.png"
-        g.savefig(path, dpi=300, bbox_inches="tight")
+        g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
         plt.close()
         print(f"  Saved: {path}")
 
+
 def plot_2_job_duration_bars(df: pd.DataFrame, output_dir: Path):
-    """(Graph 2) High-level bar chart comparing mean job durations."""
+    """(Graph 2) Job duration comparison."""
     print("Generating: 2. Mean Job Duration Comparison (Bar Chart)")
     job_df = df[df['kind'] == 'Job'].copy()
-    if job_df.empty: return
+    if job_df.empty:
+        return
     job_df['duration_s'] = job_df['measured_ms'] / 1000.0
 
     g = sns.catplot(
-        data=job_df, x='workload', y='duration_s', hue='wan_profile',
-        col='local_load', kind='bar', errorbar='sd', capsize=.05,
-        aspect=1.2, height=5
+        data=job_df,
+        x='workload',
+        y='duration_s',
+        hue='wan_profile',
+        col='local_load',
+        kind='bar',
+        errorbar='sd',
+        capsize=0.1,
+        aspect=1.3,
+        height=5.5,
+        palette="husl",
+        col_order=LOAD_ORDER,
     )
-    g.set_axis_labels("Job Name", "Mean Duration (seconds)")
-    g.set_titles('Local Load: "{col_name}"')
-    g.add_legend(title="WAN Profile") # add_legend ensures it's drawn
-    g.set_xticklabels(rotation=45, ha='right')
-    plt.suptitle("Mean Batch Job Duration Comparison", y=1.03)
+    g.set_axis_labels(
+        "Job Name",
+        "Mean Duration (seconds)",
+        fontsize=11,
+        fontweight='semibold'
+    )
+    g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
+    g.add_legend(title="WAN Profile", bbox_to_anchor=(1.05, 1), loc='upper left')
+    for ax in g.axes.flat:
+        ax.tick_params(axis='x', rotation=45)
+        sns.despine(ax=ax)
+
+    g.figure.suptitle(
+        "Mean Batch Job Duration by Condition",
+        fontsize=14,
+        fontweight='bold',
+        y=0.995
+    )
+    g.tight_layout()
+
     path = output_dir / "A2_mean_job_duration_bars.png"
-    g.savefig(path, dpi=300, bbox_inches="tight")
+    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
     plt.close()
     print(f"  Saved: {path}")
+
 
 def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
-    """(Graph 3) High-level heatmap of overall system reliability."""
+    """(Graph 3) SLO pass rate heatmap."""
     print("Generating: 3. SLO Pass Rate Reliability Heatmap")
-    pass_rate = df.groupby(['wan_profile', 'local_load', 'workload'])['pass'].value_counts(normalize=True).unstack(fill_value=0)
+    pass_rate = (
+        df.groupby(['wan_profile', 'local_load', 'workload'])['pass']
+        .value_counts(normalize=True)
+        .unstack(fill_value=0)
+    )
     pass_rate['pass_pct'] = pass_rate.get(True, 0) * 100
 
-    # Pivot respects the categorical order set during data loading
-    heatmap_data = pass_rate.pivot_table(index='workload', columns=['local_load', 'wan_profile'], values='pass_pct')
+    heatmap_data = pass_rate.pivot_table(
+        index='workload',
+        columns=['local_load', 'wan_profile'],
+        values='pass_pct'
+    )
 
-    plt.figure(figsize=(16, 8))
-    sns.heatmap(heatmap_data, annot=True, fmt=".1f", cmap="viridis_r", linewidths=.5, cbar_kws={'label': 'SLO Pass Rate (%)'})
-    plt.title("System Reliability: SLO Pass Rate (%) Under All Conditions", fontsize=16)
-    plt.xlabel("Local Load & WAN Profile Combination", fontsize=12)
-    plt.ylabel("Workload", fontsize=12)
+    fig, ax = plt.subplots(figsize=(14, 7))
+    sns.heatmap(
+        heatmap_data,
+        annot=True,
+        fmt=".1f",
+        cmap="RdYlGn",
+        linewidths=1,
+        linecolor='white',
+        cbar_kws={'label': 'SLO Pass Rate (%)'},
+        vmin=0,
+        vmax=100,
+        ax=ax,
+        square=False,
+    )
+    ax.set_title(
+        "System Reliability: SLO Pass Rate Across All Conditions",
+        fontsize=14,
+        fontweight='bold',
+        pad=20
+    )
+    ax.set_xlabel(
+        "Load & WAN Profile",
+        fontsize=12,
+        fontweight='semibold'
+    )
+    ax.set_ylabel("Workload", fontsize=12, fontweight='semibold')
     plt.xticks(rotation=45, ha='right')
     plt.yticks(rotation=0)
+
     path = output_dir / "A3_slo_pass_rate_heatmap.png"
-    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
     plt.close()
     print(f"  Saved: {path}")
 
-# --- Group B: Deep-Dive Statistical and Variance Analyses ---
 
 def plot_4_http_latency_full_distribution(df: pd.DataFrame, output_dir: Path):
-    """(Graph 4) Compares full latency distributions using violin plots."""
+    """(Graph 4) HTTP latency distribution."""
     print("Generating: 4. Full HTTP Latency Distribution (Violin Plot)")
     plot_df = df[df['workload'] == 'http-latency'].melt(
-        id_vars=['wan_profile', 'local_load'], value_vars=['http_p50_ms', 'http_p95_ms', 'http_p99_ms'],
-        var_name='percentile', value_name='latency_ms'
+        id_vars=['wan_profile', 'local_load'],
+        value_vars=['http_p50_ms', 'http_p95_ms', 'http_p99_ms'],
+        var_name='percentile',
+        value_name='latency_ms'
     )
-    if plot_df.empty: return
-    plot_df['percentile'] = plot_df['percentile'].str.replace('http_p', '').str.replace('_ms', '')
+    if plot_df.empty:
+        return
+    plot_df['percentile'] = (
+        plot_df['percentile']
+        .str.replace('http_p', '')
+        .str.replace('_ms', '')
+    )
 
     g = sns.catplot(
-        data=plot_df, x='wan_profile', y='latency_ms', hue='percentile',
-        col='local_load', kind='violin', split=True, inner='quartiles',
-        height=6, aspect=1.2, palette='viridis'
+        data=plot_df,
+        x='wan_profile',
+        y='latency_ms',
+        hue='percentile',
+        col='local_load',
+        kind='violin',
+        split=False,
+        inner='quartiles',
+        height=5.5,
+        aspect=1.3,
+        palette='muted',
+        col_order=LOAD_ORDER,
     )
-    g.set_axis_labels("WAN Profile", "Latency (ms)")
-    g.set_titles("Local Load: {col_name}")
+    g.set_axis_labels(
+        "WAN Profile",
+        "Latency (ms)",
+        fontsize=11,
+        fontweight='semibold'
+    )
+    g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
     g.legend.set_title("Percentile")
-    plt.suptitle("HTTP Latency Distribution by Percentile", y=1.03)
+    g.figure.suptitle(
+        "HTTP Latency Distribution by Percentile",
+        fontsize=14,
+        fontweight='bold',
+        y=0.995
+    )
+    for ax in g.axes.flat:
+        sns.despine(ax=ax)
+    g.tight_layout()
+
     path = output_dir / "B1_http_latency_distribution.png"
-    plt.savefig(path, dpi=300, bbox_inches="tight")
+    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
     plt.close()
     print(f"  Saved: {path}")
 
+
 def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path):
-    """(Graph 5) Visualizes the interaction between WAN and local load."""
+    """(Graph 5) WAN and load interaction."""
     print("Generating: 5. Performance Interaction Plot")
     job_to_plot = 'build-job'
     plot_df = df[df['workload'] == job_to_plot].copy()
-    if plot_df.empty: return
+    if plot_df.empty:
+        return
     plot_df['duration_s'] = plot_df['measured_ms'] / 1000.0
 
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(11, 6.5))
     sns.pointplot(
-        data=plot_df, x='wan_profile', y='duration_s', hue='local_load',
-        errorbar='sd', capsize=.1
+        data=plot_df,
+        x='wan_profile',
+        y='duration_s',
+        hue='local_load',
+        errorbar='sd',
+        capsize=0.15,
+        palette='Set2',
+        ax=ax,
+        markers='o',
+        scale=1.2,
     )
-    plt.title(f"Interaction of WAN and Local Load on '{job_to_plot}' Runtime")
-    plt.xlabel("WAN Profile")
-    plt.ylabel("Mean Duration (s) with StdDev")
-    plt.legend(title="Local Load")
+    ax.set_title(
+        f"Interaction: WAN & Load on '{job_to_plot}' Runtime",
+        fontsize=13,
+        fontweight='bold',
+        pad=15
+    )
+    ax.set_xlabel("WAN Profile", fontsize=11, fontweight='semibold')
+    ax.set_ylabel("Mean Duration (s)", fontsize=11, fontweight='semibold')
+    ax.legend(title="Local Load", title_fontsize=10, fontsize=9)
+    sns.despine(ax=ax)
+    plt.tight_layout()
+
     path = output_dir / "B2_performance_interaction_plot.png"
-    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
     plt.close()
     print(f"  Saved: {path}")
+
 
 def plot_6_slo_failure_magnitude(df: pd.DataFrame, output_dir: Path):
-    """(Graph 6) Shows how badly jobs miss their deadline when they fail."""
+    """(Graph 6) SLO failure magnitude."""
     print("Generating: 6. SLO Failure Magnitude Analysis")
     plot_df = df[df['pass'] == False].copy()
-    plot_df = plot_df[plot_df['measured_ms'].notna() & plot_df['target_ms'].notna()]
+    plot_df = plot_df[
+        plot_df['measured_ms'].notna() & plot_df['target_ms'].notna()
+        ]
     if plot_df.empty:
-        print("  Skipping: No SLO failures with targets found to plot.")
+        print("  Skipping: No SLO failures found.")
         return
-    plot_df['overshoot_pct'] = (plot_df['measured_ms'] - plot_df['target_ms']) / plot_df['target_ms'] * 100
+    plot_df['overshoot_pct'] = (
+            (plot_df['measured_ms'] - plot_df['target_ms'])
+            / plot_df['target_ms']
+            * 100
+    )
 
     g = sns.catplot(
-        data=plot_df, x='workload', y='overshoot_pct', hue='wan_profile',
-        col='local_load', kind='bar', errorbar='sd', capsize=.05,
-        height=5, aspect=1.5, palette='autumn'
+        data=plot_df,
+        x='workload',
+        y='overshoot_pct',
+        hue='wan_profile',
+        col='local_load',
+        kind='bar',
+        errorbar='sd',
+        capsize=0.08,
+        height=5.5,
+        aspect=1.3,
+        palette="OrRd",
+        col_order=LOAD_ORDER,
     )
-    g.set_axis_labels("Workload", "Deadline Overshoot (%)")
-    g.set_titles("Local Load: {col_name}")
+    g.set_axis_labels(
+        "Workload",
+        "Deadline Overshoot (%)",
+        fontsize=11,
+        fontweight='semibold'
+    )
+    g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
     g.add_legend(title="WAN Profile")
-    g.set_xticklabels(rotation=30, ha='right')
-    plt.suptitle("Magnitude of SLO Failures (How badly deadlines are missed)", y=1.03)
+    for ax in g.axes.flat:
+        ax.tick_params(axis='x', rotation=30)
+        sns.despine(ax=ax)
+
+    g.figure.suptitle(
+        "Magnitude of SLO Failures (Deadline Overshoot %)",
+        fontsize=14,
+        fontweight='bold',
+        y=0.995
+    )
+    g.tight_layout()
+
     path = output_dir / "B3_slo_failure_magnitude.png"
-    plt.savefig(path, dpi=300, bbox_inches="tight")
+    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
     plt.close()
     print(f"  Saved: {path}")
 
+
 def plot_7_raw_data_variance(df: pd.DataFrame, output_dir: Path):
-    """(Graph 7) Shows every single data point to reveal outliers and variance."""
+    """(Graph 7) Raw data variance."""
     print("Generating: 7. Raw Data Point Variance Plot")
     job_to_plot = 'cpu-batch'
     plot_df = df[df['workload'] == job_to_plot].copy()
-    if plot_df.empty: return
+    if plot_df.empty:
+        return
     plot_df['duration_s'] = plot_df['measured_ms'] / 1000.0
 
-    plt.figure(figsize=(14, 8))
-    ax = sns.boxplot(data=plot_df, x='wan_profile', y='duration_s', hue='local_load', showfliers=False)
-    sns.stripplot(data=plot_df, x='wan_profile', y='duration_s', hue='local_load',
-                  dodge=True, ax=ax, alpha=0.5, legend=False, palette='dark:black')
+    fig, ax = plt.subplots(figsize=(13, 7))
+    sns.boxplot(
+        data=plot_df,
+        x='wan_profile',
+        y='duration_s',
+        hue='local_load',
+        showfliers=False,
+        palette='Set2',
+        ax=ax,
+    )
+    sns.stripplot(
+        data=plot_df,
+        x='wan_profile',
+        y='duration_s',
+        hue='local_load',
+        dodge=True,
+        ax=ax,
+        alpha=0.4,
+        size=5,
+        palette='Set2',
+        legend=False,
+    )
+    ax.set_title(
+        f"Runtime Variance of '{job_to_plot}' Across All Runs",
+        fontsize=13,
+        fontweight='bold',
+        pad=15
+    )
+    ax.set_xlabel("WAN Profile", fontsize=11, fontweight='semibold')
+    ax.set_ylabel("Duration (s)", fontsize=11, fontweight='semibold')
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(
+        handles[:len(LOAD_ORDER)],
+        labels[:len(LOAD_ORDER)],
+        title='Local Load',
+        loc='upper left'
+    )
+    sns.despine(ax=ax)
+    plt.tight_layout()
 
-    plt.title(f"Runtime Variance of '{job_to_plot}' Across All Runs")
-    plt.xlabel("WAN Profile")
-    plt.ylabel("Duration (s)")
-    ax.legend(title='Local Load') # Get the legend from the boxplot axis and set its title
     path = output_dir / "B4_raw_data_variance.png"
-    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
     plt.close()
     print(f"  Saved: {path}")
 
+
 def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
-    """
-    (Graph 8) Visualizes where pods for each workload were scheduled (cloud vs. edge)
-    across all experimental conditions.
-    """
+    """(Graph 8) Workload placement analysis."""
     print("Generating: 8. Workload Placement Analysis")
     if df.empty:
-        print("  Skipping: No pod placement data found to analyze.")
+        print("  Skipping: No pod placement data found.")
         return
 
-    # Count pods per group
     placement_counts = df.groupby(
         ['wan_profile', 'local_load', 'workload', 'node_type']
     ).size().reset_index(name='count')
 
-    # We take the mean count across runs to normalize for any failed runs
     mean_counts = placement_counts.groupby(
         ['wan_profile', 'local_load', 'workload', 'node_type']
     )['count'].mean().reset_index()
@@ -334,57 +562,87 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
         col='local_load',
         row='wan_profile',
         kind='bar',
-        height=4,
-        aspect=1.5,
-        palette={'cloud': 'skyblue', 'edge': 'salmon'},
+        height=4.5,
+        aspect=1.6,
+        palette={'cloud': '#4A90E2', 'edge': '#F5A623'},
         legend=False,
         row_order=WAN_ORDER,
-        col_order=LOAD_ORDER
+        col_order=LOAD_ORDER,
     )
+    g.set_axis_labels(
+        "Workload",
+        "Mean Pod Count",
+        fontsize=11,
+        fontweight='semibold'
+    )
+    g.set_titles(
+        row_template="WAN: {row_name}",
+        col_template="Load: {col_name}",
+        fontsize=11,
+        fontweight='semibold'
+    )
+    g.add_legend(title="Node Type", bbox_to_anchor=(1.02, 1), loc='upper left')
+    for ax in g.axes.flat:
+        ax.tick_params(axis='x', rotation=45)
+        sns.despine(ax=ax)
 
-    g.set_axis_labels("Workload", "Mean Pod Count")
-    g.set_titles(row_template="WAN: {row_name}", col_template="Local Load: {col_name}")
-    g.add_legend(title="Node Type")
-    g.set_xticklabels(rotation=45, ha='right')
+    g.figure.suptitle(
+        "Workload Placement by Node Type Across All Conditions",
+        fontsize=14,
+        fontweight='bold',
+        y=0.995
+    )
+    g.tight_layout()
 
-    plt.suptitle("Workload Placement by Node Type Across All Conditions", y=1.03)
     path = output_dir / "C1_workload_placement_matrix.png"
-    plt.savefig(path, dpi=300, bbox_inches="tight")
+    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
     plt.close()
     print(f"  Saved: {path}")
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Generate a comprehensive set of visualizations for SLO benchmarks.")
-    parser.add_argument("results_dir", type=Path, help="Path to the multi-run results directory.")
+    parser = argparse.ArgumentParser(
+        description="Generate professional visualizations for SLO benchmarks."
+    )
+    parser.add_argument(
+        "results_dir",
+        type=Path,
+        help="Path to the multi-run results directory."
+    )
     args = parser.parse_args()
 
     results_dir = args.results_dir
     output_dir = results_dir / "_analysis_plots"
     output_dir.mkdir(exist_ok=True)
 
-    # --- Data Loading ---
-    df_slo = load_all_run_data(results_dir) # For SLO and performance plots
-    df_placement = load_placement_data(results_dir) # For placement plot
+    # Setup professional styling
+    setup_theme()
 
-    # --- Save Aggregated Data ---
+    # Load data
+    df_slo = load_all_run_data(results_dir)
+    df_placement = load_placement_data(results_dir)
+
+    # Save aggregated data
     df_slo.to_csv(results_dir / "aggregated_slo_data.csv", index=False)
-    df_placement.to_csv(results_dir / "aggregated_placement_data.csv", index=False)
-    print(f"\n✅ Aggregated data saved to CSV files in {results_dir}")
+    df_placement.to_csv(
+        results_dir / "aggregated_placement_data.csv",
+        index=False
+    )
+    print(f"\n✅ Aggregated data saved")
 
-    sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
-
-    print("\n--- Generating High-Level Summary Plots (Group A) ---")
+    # Generate plots
+    print("\n--- Group A: High-Level Summary Plots ---")
     plot_1_latency_comparison_bars(df_slo, output_dir)
     plot_2_job_duration_bars(df_slo, output_dir)
     plot_3_slo_pass_rate_heatmap(df_slo, output_dir)
 
-    print("\n--- Generating Deep-Dive Statistical Plots (Group B) ---")
+    print("\n--- Group B: Deep-Dive Statistical Plots ---")
     plot_4_http_latency_full_distribution(df_slo, output_dir)
     plot_5_performance_interaction(df_slo, output_dir)
     plot_6_slo_failure_magnitude(df_slo, output_dir)
     plot_7_raw_data_variance(df_slo, output_dir)
 
-    print("\n--- Generating Scheduler Behavior Plots (Group C) ---")
+    print("\n--- Group C: Scheduler Behavior Plots ---")
     plot_8_placement_analysis(df_placement, output_dir)
 
     print("\n✅ Visualization complete!")
