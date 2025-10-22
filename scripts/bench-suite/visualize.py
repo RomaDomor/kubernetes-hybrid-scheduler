@@ -14,6 +14,7 @@ import seaborn as sns
 # Define the desired order for profiles. This ensures all graphs are consistent.
 WAN_ORDER = ['clear', 'good', 'moderate', 'poor']
 LOAD_ORDER = ['none', 'low', 'medium', 'high']
+EDGE_NODE_IDENTIFIER = 'edge'
 
 # --- Data Loading and Parsing Engine (Unchanged) ---
 
@@ -76,19 +77,83 @@ def parse_http_benchmark(path: Path) -> dict:
             results[f'http_p{p}_ms'] = float(match.group(1)) * 1000
     return results
 
+def load_placement_data(base_dir: Path) -> pd.DataFrame:
+    """
+    Scans all pod_node_map.csv files to build a specific DataFrame for placement analysis.
+    """
+    all_placements = []
+    print("\nScanning for pod placement data (pod_node_map.csv)...")
+
+    for profile_dir in base_dir.glob("wan-*_load-*"):
+        for run_dir in profile_dir.glob("run-*"):
+            try:
+                result_dir = next(d for d in run_dir.iterdir() if d.is_dir())
+            except StopIteration:
+                continue
+
+            # --- Extract metadata from the path ---
+            profile_dir_name = result_dir.parts[-3]
+            run_number = int(result_dir.parts[-2].replace("run-", ""))
+            try:
+                wan_part, load_part = profile_dir_name.split("_load-")
+                wan_profile = wan_part.replace("wan-", "")
+                load_profile = load_part
+            except ValueError:
+                continue
+
+            # --- Parse the placement file ---
+            placement_file = result_dir / "pod_node_map.csv"
+            if not placement_file.is_file():
+                continue
+
+            df_placements = pd.read_csv(placement_file)
+            for _, row in df_placements.iterrows():
+                all_placements.append({
+                    "wan_profile": wan_profile,
+                    "local_load": load_profile,
+                    "run": run_number,
+                    "pod_name": row['pod_name'],
+                    "node_name": row['node_name'],
+                    "workload": get_workload_from_pod_name(row['pod_name']),
+                    "node_type": 'edge' if EDGE_NODE_IDENTIFIER in row['node_name'] else 'cloud'
+                })
+
+    if not all_placements:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_placements)
+    df['wan_profile'] = pd.Categorical(df['wan_profile'], categories=WAN_ORDER, ordered=True)
+    df['local_load'] = pd.Categorical(df['local_load'], categories=LOAD_ORDER, ordered=True)
+    return df
+
+def get_workload_from_pod_name(pod_name: str) -> str:
+    """Heuristic to extract the base workload name from a generated pod name."""
+    # For Jobs like 'cpu-batch-sn5xx'
+    match = re.match(r'([a-z-]+)-[a-z0-9]{5}', pod_name)
+    if match:
+        return match.group(1)
+    # For Deployments like 'http-latency-58bd4fb596-lcvgt'
+    match = re.match(r'([a-z-]+)-[a-z0-9]{9,10}-[a-z0-9]{5}', pod_name)
+    if match:
+        return match.group(1)
+    return pod_name # Fallback
+
 # --- Plotting Library (All 7 Graphs) ---
 
 # --- Group A: High-Level Comparative Summaries ---
 
 def plot_1_latency_comparison_bars(df: pd.DataFrame, output_dir: Path):
-    """(Graph 1) High-level bar chart comparing mean latency of interactive workloads."""
+    """(Graph 1) High-level bar chart comparing mean latency."""
     print("Generating: 1. Mean Latency Comparison (Bar Chart)")
     latency_df = df[df['workload'].isin(['http-latency', 'stream-processor'])].copy()
-    if latency_df.empty: return
+    if latency_df.empty:
+        print("  Skipping: No latency workload data found.")
+        return
 
-    # Iterate in the desired order
     for load_profile in LOAD_ORDER:
-        if load_profile not in latency_df['local_load'].unique(): continue
+        group = latency_df[latency_df['local_load'] == load_profile]
+        if group.empty:  # Skip this specific load profile
+            continue
 
         group = latency_df[latency_df['local_load'] == load_profile]
         g = sns.catplot(
@@ -241,6 +306,53 @@ def plot_7_raw_data_variance(df: pd.DataFrame, output_dir: Path):
     plt.close()
     print(f"  Saved: {path}")
 
+def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
+    """
+    (Graph 8) Visualizes where pods for each workload were scheduled (cloud vs. edge)
+    across all experimental conditions.
+    """
+    print("Generating: 8. Workload Placement Analysis")
+    if df.empty:
+        print("  Skipping: No pod placement data found to analyze.")
+        return
+
+    # Count pods per group
+    placement_counts = df.groupby(
+        ['wan_profile', 'local_load', 'workload', 'node_type']
+    ).size().reset_index(name='count')
+
+    # We take the mean count across runs to normalize for any failed runs
+    mean_counts = placement_counts.groupby(
+        ['wan_profile', 'local_load', 'workload', 'node_type']
+    )['count'].mean().reset_index()
+
+    g = sns.catplot(
+        data=mean_counts,
+        x='workload',
+        y='count',
+        hue='node_type',
+        col='local_load',
+        row='wan_profile',
+        kind='bar',
+        height=4,
+        aspect=1.5,
+        palette={'cloud': 'skyblue', 'edge': 'salmon'},
+        legend=False,
+        row_order=WAN_ORDER,
+        col_order=LOAD_ORDER
+    )
+
+    g.set_axis_labels("Workload", "Mean Pod Count")
+    g.set_titles(row_template="WAN: {row_name}", col_template="Local Load: {col_name}")
+    g.add_legend(title="Node Type")
+    g.set_xticklabels(rotation=45, ha='right')
+
+    plt.suptitle("Workload Placement by Node Type Across All Conditions", y=1.03)
+    path = output_dir / "C1_workload_placement_matrix.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+
 def main():
     parser = argparse.ArgumentParser(description="Generate a comprehensive set of visualizations for SLO benchmarks.")
     parser.add_argument("results_dir", type=Path, help="Path to the multi-run results directory.")
@@ -250,26 +362,34 @@ def main():
     output_dir = results_dir / "_analysis_plots"
     output_dir.mkdir(exist_ok=True)
 
-    df = load_all_run_data(results_dir)
-    agg_csv_path = results_dir / "aggregated_full_data_for_analysis.csv"
-    df.to_csv(agg_csv_path, index=False)
-    print(f"\n✅ Fully aggregated raw data saved to {agg_csv_path}")
+    # --- Data Loading ---
+    df_slo = load_all_run_data(results_dir) # For SLO and performance plots
+    df_placement = load_placement_data(results_dir) # For placement plot
+
+    # --- Save Aggregated Data ---
+    df_slo.to_csv(results_dir / "aggregated_slo_data.csv", index=False)
+    df_placement.to_csv(results_dir / "aggregated_placement_data.csv", index=False)
+    print(f"\n✅ Aggregated data saved to CSV files in {results_dir}")
 
     sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
 
-    print("\n--- Generating High-Level Summary Plots ---")
-    plot_1_latency_comparison_bars(df, output_dir)
-    plot_2_job_duration_bars(df, output_dir)
-    plot_3_slo_pass_rate_heatmap(df, output_dir)
+    print("\n--- Generating High-Level Summary Plots (Group A) ---")
+    plot_1_latency_comparison_bars(df_slo, output_dir)
+    plot_2_job_duration_bars(df_slo, output_dir)
+    plot_3_slo_pass_rate_heatmap(df_slo, output_dir)
 
-    print("\n--- Generating Deep-Dive Statistical Plots ---")
-    plot_4_http_latency_full_distribution(df, output_dir)
-    plot_5_performance_interaction(df, output_dir)
-    plot_6_slo_failure_magnitude(df, output_dir)
-    plot_7_raw_data_variance(df, output_dir)
+    print("\n--- Generating Deep-Dive Statistical Plots (Group B) ---")
+    plot_4_http_latency_full_distribution(df_slo, output_dir)
+    plot_5_performance_interaction(df_slo, output_dir)
+    plot_6_slo_failure_magnitude(df_slo, output_dir)
+    plot_7_raw_data_variance(df_slo, output_dir)
+
+    print("\n--- Generating Scheduler Behavior Plots (Group C) ---")
+    plot_8_placement_analysis(df_placement, output_dir)
 
     print("\n✅ Visualization complete!")
     print(f"All graphs saved in: {output_dir}")
+
 
 if __name__ == "__main__":
     main()
