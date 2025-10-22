@@ -1,13 +1,10 @@
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any, List
 
 from kubernetes import client, config, utils, watch
 from kubernetes.client import ApiException, V1DeleteOptions
 from kubernetes.stream import stream
-
-import telemetry  # For getting job logs on failure
 from utils import log, read_yaml_multi
 
 CLIENT_WORKLOADS = {("Pod", "toolbox"), ("Job", "stream-data-generator")}
@@ -105,6 +102,25 @@ def wait_deployment_ready(apps_v1: client.AppsV1Api, ns: str, name: str, timeout
             return
     raise TimeoutError(f"Deployment {name} did not become ready within {timeout_sec}s")
 
+def get_job_logs(v1: client.CoreV1Api, ns: str, job_name: str) -> str:
+    """Gets logs from all pods created by a specific job."""
+    try:
+        pods = v1.list_namespaced_pod(namespace=ns, label_selector=f"job-name={job_name}")
+        logs = []
+        for pod in pods.items:
+            try:
+                pod_logs = v1.read_namespaced_pod_log(name=pod.metadata.name, namespace=ns)
+                logs.append(f"=== Pod {pod.metadata.name} ===\n{pod_logs}")
+            except ApiException as e:
+                logs.append(f"=== Pod {pod.metadata.name} === ERROR: {e}")
+        result = "\n".join(logs)
+        sys.stdout.write(result)
+        return result
+    except ApiException as e:
+        log(f"Error getting logs for job {job_name}: {e}")
+        return ""
+
+
 def wait_job_complete(batch_v1: client.BatchV1Api, ns: str, name: str, timeout_sec: int) -> float:
     """Waits for a job to complete and returns its execution duration."""
     log(f"Waiting for Job {ns}/{name} to complete (timeout {timeout_sec}s)...")
@@ -122,11 +138,11 @@ def wait_job_complete(batch_v1: client.BatchV1Api, ns: str, name: str, timeout_s
                 elif condition.type == "Failed" and condition.status == "True":
                     w.stop()
                     log(f"Job {ns}/{name} failed. Capturing logs.")
-                    telemetry.get_job_logs(client.CoreV1Api(), ns, name)
+                    get_job_logs(client.CoreV1Api(), ns, name)
                     raise RuntimeError(f"Job {name} failed")
 
     log(f"Job {ns}/{name} timed out. Capturing logs.")
-    telemetry.get_job_logs(client.CoreV1Api(), ns, name)
+    get_job_logs(client.CoreV1Api(), ns, name)
     raise TimeoutError(f"Job {name} did not complete within {timeout_sec}s")
 
 def toolbox_exec(v1: client.CoreV1Api, ns: str, cmd: str, check=False) -> str:
