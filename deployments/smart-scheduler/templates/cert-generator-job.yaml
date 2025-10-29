@@ -8,12 +8,29 @@ metadata:
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
+  backoffLimit: 3
   template:
     spec:
       serviceAccountName: {{ .Release.Name }}-cert-generator
+      restartPolicy: OnFailure
       containers:
         - name: cert-generator
           image: "{{ .Values.certGenerator.image.name }}:{{ .Values.certGenerator.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -28,13 +45,15 @@ spec:
               # --- Main Logic ---
               WORKDIR=$(mktemp -d)
               cd "$WORKDIR"
-              
-              echo "[INFO] Generating self-signed CA in $WORKDIR"
+
+              echo "[INFO] Generating self-signed CA"
               openssl genrsa -out ca.key 2048
-              openssl req -x509 -new -nodes -key ca.key -subj "/CN=${SERVICE_NAME}.${NAMESPACE}.svc-ca" -days 3650 -out ca.crt
-              
+              openssl req -x509 -new -nodes -key ca.key \
+                -subj "/CN=${SERVICE_NAME}.${NAMESPACE}.svc-ca" \
+                -days 3650 -out ca.crt
+
               echo "[INFO] Generating server certificate"
-              cat >server.conf <<EOF
+              cat > server.conf <<'EOF'
               [req]
               req_extensions = v3_req
               distinguished_name = req_distinguished_name
@@ -44,29 +63,47 @@ spec:
               extendedKeyUsage = serverAuth
               subjectAltName = @alt_names
               [alt_names]
-              DNS.1 = ${SERVICE_NAME}
-              DNS.2 = ${SERVICE_NAME}.${NAMESPACE}
-              DNS.3 = ${SERVICE_NAME}.${NAMESPACE}.svc
               EOF
-              openssl genrsa -out server.key 2048
-              openssl req -new -key server.key -subj "/CN=${SERVICE_NAME}.${NAMESPACE}.svc" -out server.csr -config server.conf
-              openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 365 -extensions v3_req -extfile server.conf
-              
-              echo "[INFO] Creating/Updating Secret ${SECRET_NAME} in ${NAMESPACE}"
-              # Delete secret first to ensure we don't have stale certs
-              kubectl delete secret ${SECRET_NAME} -n ${NAMESPACE} --ignore-not-found
-              kubectl create secret tls ${SECRET_NAME} \
-                --cert=server.crt \
-                --key=server.key \
-                -n ${NAMESPACE}
-              
-              CA_BUNDLE=$(base64 -w0 < ca.crt)
-              echo "[INFO] Patching MutatingWebhookConfiguration ${WEBHOOK_NAME} with CA bundle"
-              kubectl patch mutatingwebhookconfiguration ${WEBHOOK_NAME} \
-                --type='json' \
-                -p='[{"op": "replace", "path": "/webhooks/0/clientConfig/caBundle", "value":"'"${CA_BUNDLE}"'"}]'
-              
-              echo "[INFO] Certificate generation and webhook patching complete."
+              {
+                echo "DNS.1 = ${SERVICE_NAME}"
+                echo "DNS.2 = ${SERVICE_NAME}.${NAMESPACE}"
+                echo "DNS.3 = ${SERVICE_NAME}.${NAMESPACE}.svc"
+              } >> server.conf
 
-      restartPolicy: OnFailure
-  backoffLimit: 3
+              openssl genrsa -out server.key 2048
+              openssl req -new -key server.key \
+                -subj "/CN=${SERVICE_NAME}.${NAMESPACE}.svc" \
+                -out server.csr -config server.conf
+              openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
+                -CAcreateserial -out server.crt -days 365 \
+                -extensions v3_req -extfile server.conf
+
+              echo "[INFO] Creating/Updating Secret ${SECRET_NAME} in ${NAMESPACE}"
+              # Apply is idempotent and avoids delete/create races
+              kubectl apply -n "${NAMESPACE}" -f - <<EOF
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: ${SECRET_NAME}
+                namespace: ${NAMESPACE}
+              type: kubernetes.io/tls
+              data:
+                tls.crt: $(base64 < server.crt | tr -d '\n')
+                tls.key: $(base64 < server.key | tr -d '\n')
+              EOF
+
+              # Prepare CA bundle (portable base64)
+              CA_BUNDLE="$(base64 < ca.crt | tr -d '\n')"
+
+              echo "[INFO] Patching MutatingWebhookConfiguration ${WEBHOOK_NAME} with CA bundle"
+              # Ensure the webhook exists before patching
+              kubectl get mutatingwebhookconfiguration "${WEBHOOK_NAME}" 1>/dev/null
+
+              kubectl patch mutatingwebhookconfiguration "${WEBHOOK_NAME}" \
+                --type='json' \
+                -p="[ {\"op\":\"replace\", \"path\":\"/webhooks/0/clientConfig/caBundle\", \"value\":\"${CA_BUNDLE}\"} ]"
+
+              echo "[INFO] Triggering rollout restart of deployment/${SERVICE_NAME} in ${NAMESPACE}"
+              kubectl rollout restart -n "${NAMESPACE}" "deployment/${SERVICE_NAME}"
+
+              echo "[INFO] Certificate generation and webhook patching complete."
