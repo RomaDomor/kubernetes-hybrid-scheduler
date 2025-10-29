@@ -233,10 +233,10 @@ reset_scheduler_state() {
   kubectl delete workloadprofiles.scheduling.hybrid.io --all -n kube-system --kubeconfig "${kubeconfig_path}" --ignore-not-found
 
   echo "  - Restarting scheduler controller pod to clear in-memory cache..."
-  kubectl delete pod -n kube-system -l app=smart-scheduler-controller --kubeconfig "${kubeconfig_path}" --ignore-not-found
+  kubectl delete pod -n kube-system -l app.kubernetes.io/name=smart-scheduler --kubeconfig "${kubeconfig_path}" --ignore-not-found
 
   echo "  - Waiting for new scheduler pod to be ready..."
-  kubectl wait --for=condition=ready pod -n kube-system -l app=smart-scheduler-controller --timeout=120s --kubeconfig "${kubeconfig_path}"
+  kubectl wait --for=condition=ready pod -n kube-system -l app.kubernetes.io/name=smart-scheduler --timeout=120s --kubeconfig "${kubeconfig_path}"
 
   echo "✅ Scheduler state reset."
 }
