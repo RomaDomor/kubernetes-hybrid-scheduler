@@ -12,7 +12,7 @@ DEFAULT_PROFILES="clear,good,moderate,poor"
 DEFAULT_LOCAL_LOAD_PROFILES="none"
 DEFAULT_VENV_PATH="scripts/bench-suite/.venv"
 DEFAULT_PRE_CLEAN=false
-DEFAULT_RUNS=1
+DEFAULT_RUNS=3
 
 # Function to show usage
 usage() {

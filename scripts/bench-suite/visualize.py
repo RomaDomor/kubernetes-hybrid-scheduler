@@ -43,20 +43,20 @@ def setup_theme():
         'xtick.labelsize': 10,
         'ytick.labelsize': 10,
         'legend.fontsize': 10,
-        'lines.linewidth': 1.5,
+        'lines.linewidth': 1.8,
         'patch.linewidth': 0.5,
     })
 
 
 # --- Data Loading and Parsing Engine ---
 
-def load_all_run_data(base_dir: Path) -> pd.DataFrame:
-    """Load and aggregate all run data."""
+def load_all_run_data(base_dir: Path, warmup_runs: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load and aggregate all run data, returning both a full and a stable (post-warmup) dataframe."""
     all_rows = []
     print("Scanning for runs and parsing all raw data files...")
 
-    for profile_dir in base_dir.glob("wan-*_load-*"):
-        for run_dir in profile_dir.glob("run-*"):
+    for profile_dir in sorted(base_dir.glob("wan-*_load-*")):
+        for run_dir in sorted(profile_dir.glob("run-*")):
             try:
                 result_dir = next(d for d in run_dir.iterdir() if d.is_dir())
             except StopIteration:
@@ -64,13 +64,13 @@ def load_all_run_data(base_dir: Path) -> pd.DataFrame:
                 continue
 
             profile_dir_name = result_dir.parts[-3]
-            run_number = int(result_dir.parts[-2].replace("run-", ""))
             try:
+                run_number = int(result_dir.parts[-2].replace("run-", ""))
                 wan_part, load_part = profile_dir_name.split("_load-")
                 wan_profile = wan_part.replace("wan-", "")
                 load_profile = load_part
-            except ValueError:
-                print(f"Warning: Skipping malformed directory: {profile_dir_name}")
+            except (ValueError, IndexError):
+                print(f"Warning: Skipping malformed directory: {profile_dir_name}/{run_dir.name}")
                 continue
 
             # --- Parse run-level raw files once ---
@@ -95,15 +95,23 @@ def load_all_run_data(base_dir: Path) -> pd.DataFrame:
     if not all_rows:
         sys.exit("Error: No valid SLO summary data found.")
 
-    # Convert profile columns to Categorical type to enforce sorting in all plots
-    df = pd.DataFrame(all_rows)
-    df['wan_profile'] = pd.Categorical(
-        df['wan_profile'], categories=WAN_ORDER, ordered=True
-    )
-    df['local_load'] = pd.Categorical(
-        df['local_load'], categories=LOAD_ORDER, ordered=True
-    )
-    return df
+    df_all = pd.DataFrame(all_rows)
+    df_all['wan_profile'] = pd.Categorical(df_all['wan_profile'], categories=WAN_ORDER, ordered=True)
+    df_all['local_load'] = pd.Categorical(df_all['local_load'], categories=LOAD_ORDER, ordered=True)
+
+    print(f"\nLoaded {len(df_all)} total SLO records from all runs.")
+
+    # Create the stable DataFrame by filtering out warm-up runs
+    df_stable = df_all[df_all['run'] > warmup_runs].copy()
+
+    # Re-index the run number for stable plots to start from 1
+    if not df_stable.empty:
+        df_stable['run'] = df_stable['run'] - warmup_runs
+
+    print(f"  -> Discarding {warmup_runs} runs per profile for stable analysis.")
+    print(f"  -> Using {len(df_stable)} records for stable plots.")
+
+    return df_all, df_stable
 
 
 def parse_http_benchmark(path: Path) -> dict:
@@ -117,13 +125,13 @@ def parse_http_benchmark(path: Path) -> dict:
     return results
 
 
-def load_placement_data(base_dir: Path) -> pd.DataFrame:
-    """Load pod placement data."""
+def load_placement_data(base_dir: Path, warmup_runs: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load pod placement data, returning both full and stable dataframes."""
     all_placements = []
     print("\nScanning for pod placement data...")
 
-    for profile_dir in base_dir.glob("wan-*_load-*"):
-        for run_dir in profile_dir.glob("run-*"):
+    for profile_dir in sorted(base_dir.glob("wan-*_load-*")):
+        for run_dir in sorted(profile_dir.glob("run-*")):
             try:
                 result_dir = next(d for d in run_dir.iterdir() if d.is_dir())
             except StopIteration:
@@ -131,12 +139,12 @@ def load_placement_data(base_dir: Path) -> pd.DataFrame:
 
             # --- Extract metadata from the path ---
             profile_dir_name = result_dir.parts[-3]
-            run_number = int(result_dir.parts[-2].replace("run-", ""))
             try:
+                run_number = int(result_dir.parts[-2].replace("run-", ""))
                 wan_part, load_part = profile_dir_name.split("_load-")
                 wan_profile = wan_part.replace("wan-", "")
                 load_profile = load_part
-            except ValueError:
+            except (ValueError, IndexError):
                 continue
 
             # --- Parse the placement file ---
@@ -153,34 +161,29 @@ def load_placement_data(base_dir: Path) -> pd.DataFrame:
                     "pod_name": row['pod_name'],
                     "node_name": row['node_name'],
                     "workload": get_workload_from_pod_name(row['pod_name']),
-                    "node_type": (
-                        'cloud' if CLOUD_NODE_IDENTIFIER in row['node_name']
-                        else 'edge'
-                    )
+                    "node_type": ('cloud' if CLOUD_NODE_IDENTIFIER in row['node_name'] else 'edge')
                 })
 
     if not all_placements:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-    df = pd.DataFrame(all_placements)
-    df['wan_profile'] = pd.Categorical(
-        df['wan_profile'], categories=WAN_ORDER, ordered=True
-    )
-    df['local_load'] = pd.Categorical(
-        df['local_load'], categories=LOAD_ORDER, ordered=True
-    )
-    return df
+    df_all = pd.DataFrame(all_placements)
+    df_all['wan_profile'] = pd.Categorical(df_all['wan_profile'], categories=WAN_ORDER, ordered=True)
+    df_all['local_load'] = pd.Categorical(df_all['local_load'], categories=LOAD_ORDER, ordered=True)
+
+    # Create the stable DataFrame
+    df_stable = df_all[df_all['run'] > warmup_runs].copy()
+    if not df_stable.empty:
+        df_stable['run'] = df_stable['run'] - warmup_runs
+
+    return df_all, df_stable
 
 
 def get_workload_from_pod_name(pod_name: str) -> str:
     """Extract workload name from pod name."""
-    match = re.match(r'([a-z-]+)-[a-z0-9]{5}', pod_name)
-    if match:
-        return match.group(1)
-    match = re.match(r'([a-z-]+)-[a-z0-9]{9,10}-[a-z0-9]{5}', pod_name)
-    if match:
-        return match.group(1)
-    return pod_name
+    base_name = re.split(r'-(?=[a-z0-9]{5}$)', pod_name)[0]
+    base_name = re.split(r'-(?=[a-z0-9]{9,10}-[a-z0-9]{5}$)', base_name)[0]
+    return base_name
 
 
 # --- Plotting Library ---
@@ -309,10 +312,7 @@ def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
         observed=True
     )
 
-    # Drop columns (load/wan combinations) that have no data
-    heatmap_data = heatmap_data.dropna(axis=1, how='all')
-    # Drop rows (workloads) that have all NaN
-    heatmap_data = heatmap_data.dropna(axis=0, how='all')
+    heatmap_data = heatmap_data.dropna(axis=1, how='all').dropna(axis=0, how='all')
 
     if heatmap_data.empty:
         print("  Skipping: No SLO data to display.")
@@ -333,16 +333,12 @@ def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
         square=False,
     )
     ax.set_title(
-        "System Reliability: SLO Pass Rate Across All Conditions",
+        "System Reliability: SLO Pass Rate",
         fontsize=14,
         fontweight='bold',
         pad=20
     )
-    ax.set_xlabel(
-        "Load & WAN Profile",
-        fontsize=12,
-        fontweight='semibold'
-    )
+    ax.set_xlabel("Load & WAN Profile", fontsize=12, fontweight='semibold')
     ax.set_ylabel("Workload", fontsize=12, fontweight='semibold')
     plt.xticks(rotation=45, ha='right')
     plt.yticks(rotation=0)
@@ -694,6 +690,117 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
     plt.close()
     print(f"  Saved: {path}")
 
+def plot_9_learning_placement_over_runs(df: pd.DataFrame, output_dir: Path):
+    """(Graph 9) Show how pod placement changes across all runs."""
+    print("Generating: 9. Learning Curve: Placement Decisions Over Runs")
+    if df.empty or 'node_type' not in df.columns:
+        print("  Skipping: No placement data available.")
+        return
+
+    # Calculate the percentage of each node_type for each group
+    placement_pct = (
+        df.groupby(['wan_profile', 'local_load', 'run', 'workload'], observed=True)['node_type']
+        .value_counts(normalize=True)
+        .mul(100)
+        .rename('percentage')
+        .reset_index()
+    )
+
+    # We are interested in the 'edge' percentage
+    edge_pct = placement_pct[placement_pct['node_type'] == 'edge']
+
+    if edge_pct.empty:
+        print("  Skipping: No 'edge' placements found to plot.")
+        return
+
+    g = sns.relplot(
+        data=edge_pct,
+        x='run',
+        y='percentage',
+        hue='workload',
+        col='local_load',
+        row='wan_profile',
+        kind='line',
+        marker='o',
+        height=4,
+        aspect=1.5,
+        palette='tab10',
+        legend='full',
+        row_order=WAN_ORDER,
+        col_order=LOAD_ORDER,
+    )
+
+    g.set_axis_labels("Run Number", "Edge Placement (%)", fontweight='semibold')
+    g.set_titles(row_template="WAN: {row_name}", col_template="Load: {col_name}", fontweight='semibold')
+    g.figure.suptitle(
+        "Scheduler Learning: Placement Decision vs. Run Number",
+        fontsize=14,
+        fontweight='bold',
+        y=0.995
+    )
+    for ax in g.axes.flat:
+        ax.set_ylim(0, 105)
+        ax.axhline(50, ls='--', color='gray', alpha=0.7, lw=1)
+        sns.despine(ax=ax)
+
+    g.tight_layout()
+    path = output_dir / "D1_learning_curve_placement.png"
+    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path):
+    """(Graph 10) Show how performance of a key job changes across runs."""
+    print("Generating: 10. Learning Curve: Job Performance Over Runs")
+
+    workload_to_plot = 'cpu-batch'
+    plot_df = df[df['workload'] == workload_to_plot].copy()
+
+    if plot_df.empty:
+        print(f"  Skipping: No data found for workload '{workload_to_plot}'.")
+        return
+
+    plot_df['duration_s'] = plot_df['measured_ms'] / 1000.0
+
+    g = sns.relplot(
+        data=plot_df,
+        x='run',
+        y='duration_s',
+        col='local_load',
+        row='wan_profile',
+        kind='line',
+        marker='o',
+        errorbar='sd',
+        height=4,
+        aspect=1.5,
+        palette='viridis',
+        row_order=WAN_ORDER,
+        col_order=LOAD_ORDER,
+    )
+
+    g.set_axis_labels("Run Number", f"{workload_to_plot} Duration (s)", fontweight='semibold')
+    g.set_titles(row_template="WAN: {row_name}", col_template="Load: {col_name}", fontweight='semibold')
+    g.figure.suptitle(
+        f"Scheduler Learning: '{workload_to_plot}' Performance vs. Run Number",
+        fontsize=14,
+        fontweight='bold',
+        y=0.995
+    )
+
+    # Add SLO deadline as a horizontal line for context
+    slo_target_ms = plot_df['target_ms'].max()
+    if pd.notna(slo_target_ms):
+        for ax in g.axes.flat:
+            ax.axhline(slo_target_ms / 1000.0, ls='--', color='red', alpha=0.8, lw=1.5, label=f'SLO Deadline ({slo_target_ms/1000.0:.0f}s)')
+
+    g.tight_layout()
+    path = output_dir / "D2_learning_curve_performance.png"
+    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+    plt.close()
+    print(f"  Saved: {path}")
+
+# --- Main Execution Logic ---
 
 def main():
     parser = argparse.ArgumentParser(
@@ -704,41 +811,47 @@ def main():
         type=Path,
         help="Path to the multi-run results directory."
     )
+    parser.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=2,
+        help="Number of initial runs to discard from each profile for stable analysis."
+    )
     args = parser.parse_args()
 
     results_dir = args.results_dir
     output_dir = results_dir / "_analysis_plots"
     output_dir.mkdir(exist_ok=True)
 
-    # Setup professional styling
     setup_theme()
 
-    # Load data
-    df_slo = load_all_run_data(results_dir)
-    df_placement = load_placement_data(results_dir)
+    # Load data into two sets: one with all runs, one with only stable runs
+    df_all_slo, df_stable_slo = load_all_run_data(results_dir, args.warmup_runs)
+    df_all_placement, df_stable_placement = load_placement_data(results_dir, args.warmup_runs)
 
-    # Save aggregated data
-    df_slo.to_csv(results_dir / "aggregated_slo_data.csv", index=False)
-    df_placement.to_csv(
-        results_dir / "aggregated_placement_data.csv",
-        index=False
-    )
-    print(f"\n✅ Aggregated data saved")
+    # Save aggregated data for both sets for transparency and future analysis
+    df_all_slo.to_csv(results_dir / "aggregated_slo_data_ALL.csv", index=False)
+    df_stable_slo.to_csv(results_dir / "aggregated_slo_data_STABLE.csv", index=False)
+    df_all_placement.to_csv(results_dir / "aggregated_placement_data_ALL.csv", index=False)
+    df_stable_placement.to_csv(results_dir / "aggregated_placement_data_STABLE.csv", index=False)
+    print(f"\n✅ Aggregated data for ALL and STABLE runs saved.")
 
-    # Generate plots
-    print("\n--- Group A: High-Level Summary Plots ---")
-    plot_1_latency_comparison_bars(df_slo, output_dir)
-    plot_2_job_duration_bars(df_slo, output_dir)
-    plot_3_slo_pass_rate_heatmap(df_slo, output_dir)
+    # --- Generate plots for STABLE data ---
+    print("\n--- Group A/B/C: Stable-State Performance Analysis ---")
+    # Note: Pass the 'df_stable_...' dataframes to the original plotting functions
+    plot_1_latency_comparison_bars(df_stable_slo, output_dir)
+    plot_2_job_duration_bars(df_stable_slo, output_dir)
+    plot_3_slo_pass_rate_heatmap(df_stable_slo, output_dir)
+    plot_4_http_latency_full_distribution(df_stable_slo, output_dir)
+    plot_5_performance_interaction(df_stable_slo, output_dir)
+    plot_6_slo_failure_magnitude(df_stable_slo, output_dir)
+    plot_7_raw_data_variance(df_stable_slo, output_dir)
+    plot_8_placement_analysis(df_stable_placement, output_dir)
 
-    print("\n--- Group B: Deep-Dive Statistical Plots ---")
-    plot_4_http_latency_full_distribution(df_slo, output_dir)
-    plot_5_performance_interaction(df_slo, output_dir)
-    plot_6_slo_failure_magnitude(df_slo, output_dir)
-    plot_7_raw_data_variance(df_slo, output_dir)
-
-    print("\n--- Group C: Scheduler Behavior Plots ---")
-    plot_8_placement_analysis(df_placement, output_dir)
+    # --- Generate new plots for LEARNING analysis ---
+    print("\n--- Group D: Scheduler Learning Curve Analysis ---")
+    plot_9_learning_placement_over_runs(df_all_placement, output_dir)
+    plot_10_learning_performance_over_runs(df_all_slo, output_dir)
 
     print("\n✅ Visualization complete!")
     print(f"All graphs saved in: {output_dir}")
