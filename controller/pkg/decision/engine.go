@@ -142,12 +142,40 @@ func (e *Engine) Decide(
 	edgeHasCapacity := local.FreeCPU >= reqCPU && local.FreeMem >= reqMem
 
 	if !edgeHasCapacity || !edgeHasNode {
-		klog.Warningf("%s: Edge capacity insufficient: edgeHasCapacity=%v edgeHasNode=%v "+
-			"(need %dm/%dMi, have %dm/%dMi, bestNode=%s freeCPU=%dm freeMem=%dMi). Forcing cloud.",
-			podID, edgeHasCapacity, edgeHasNode,
-			reqCPU, reqMem, local.FreeCPU, local.FreeMem,
-			local.BestEdgeNode.Name, local.BestEdgeNode.FreeCPU, local.BestEdgeNode.FreeMem)
-		result := Result{constants.Cloud, "edge_no_capacity", cloudETA, wan.RTTMs}
+		// Compare edge queue drain time to cloud cost
+		queueDrainTime := e.estimateEdgeQueueDrainTime(local, slo.Class, edgeProfile)
+
+		cloudETA := e.predictETA(pod, constants.Cloud, cloudProfile, local, wan, slo)
+
+		klog.V(4).Infof(
+			"%s: Edge capacity insufficient. Queue drain time=%.0fms vs Cloud ETA=%.0fms",
+			podID, queueDrainTime, cloudETA,
+		)
+
+		// If waiting on edge queue is significantly faster than cloud offload,
+		// keep it queued on edge (return Edge decision, don't force cloud)
+		queueBenefit := cloudETA - queueDrainTime
+		if queueBenefit > 200 { // >200ms faster to wait on edge
+			klog.V(3).Infof(
+				"%s: Queuing on edge (benefit=%.0fms). Queue drain=%.0fms < Cloud ETA=%.0fms",
+				podID, queueBenefit, queueDrainTime, cloudETA,
+			)
+			result := Result{
+				constants.Edge,
+				"edge_queue_preferred",
+				queueDrainTime + edgeProfile.P95DurationMs,
+				wan.RTTMs,
+			}
+			recordDecision(result, slo.Class)
+			return result
+		}
+
+		// Otherwise, cloud is worth it despite the capacity issue
+		klog.Warningf(
+			"%s: Edge overloaded and cloud is faster. Forcing cloud (drain=%.0fms, cloud=%.0fms)",
+			podID, queueDrainTime, cloudETA,
+		)
+		result := Result{constants.Cloud, "edge_overloaded_cloud_faster", cloudETA, wan.RTTMs}
 		recordDecision(result, slo.Class)
 		return result
 	}
@@ -292,6 +320,49 @@ func (e *Engine) computeScore(
 	}
 
 	return score
+}
+
+// estimateEdgeQueueDrainTime estimates how long the current queue will take to clear
+func (e *Engine) estimateEdgeQueueDrainTime(
+	local *telemetry.LocalState,
+	podClass string,
+	profile *ProfileStats,
+) float64 {
+	// Get the number of pending pods in this class
+	pendingCount := local.PendingPodsPerClass[podClass]
+	if pendingCount == 0 {
+		// No queue, pod can start immediately (well, after current pods)
+		// Estimate as average pod duration to be conservative
+		return profile.MeanDurationMs
+	}
+
+	// Estimate parallelism: how many pods can run concurrently on edge?
+	// Conservative approach: assume 1-4 pods in parallel based on cluster size
+	avgPodCPU := int64(200) // Assume 200m per pod on average
+	parallelism := int64(1)
+
+	if local.TotalAllocatableCPU > 0 {
+		// Pods that can run in parallel
+		parallelism = local.TotalAllocatableCPU / avgPodCPU
+		if parallelism < 1 {
+			parallelism = 1
+		}
+		if parallelism > 8 {
+			parallelism = 8 // Cap at 8 to be conservative
+		}
+	}
+
+	// Rough queue drain time
+	// Assume each pending pod takes meanDuration to run
+	queueDrainSeconds := float64(pendingCount) * profile.MeanDurationMs / 1000.0 / float64(parallelism)
+	queueDrainMs := queueDrainSeconds * 1000
+
+	klog.V(5).Infof(
+		"Queue drain estimate: pending=%d pods × %.0fms / %d parallelism = %.0fms",
+		pendingCount, profile.MeanDurationMs, parallelism, queueDrainMs,
+	)
+
+	return queueDrainMs
 }
 
 func (e *Engine) canNodeFitWithHeadroom(node telemetry.BestNode, reqCPU, reqMem int64) bool {
