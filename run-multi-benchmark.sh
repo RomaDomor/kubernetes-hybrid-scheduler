@@ -12,7 +12,7 @@ DEFAULT_PROFILES="clear,good,moderate,poor"
 DEFAULT_LOCAL_LOAD_PROFILES="none"
 DEFAULT_VENV_PATH="scripts/bench-suite/.venv"
 DEFAULT_PRE_CLEAN=false
-DEFAULT_RUNS=1
+DEFAULT_RUNS=3
 
 # Function to show usage
 usage() {
@@ -225,6 +225,22 @@ cleanup_namespace() {
   wait_ns_empty "${ns}" "${kubeconfig_path}" "${wait_timeout}" 3 || true
 }
 
+reset_scheduler_state() {
+  local kubeconfig_path="$1"
+  echo "🧠 Resetting scheduler state..."
+
+  echo "  - Deleting WorkloadProfile CRDs from kube-system..."
+  kubectl delete workloadprofiles.scheduling.hybrid.io --all -n kube-system --kubeconfig "${kubeconfig_path}" --ignore-not-found
+
+  echo "  - Restarting scheduler controller pod to clear in-memory cache..."
+  kubectl delete pod -n kube-system -l app.kubernetes.io/name=smart-scheduler --kubeconfig "${kubeconfig_path}" --ignore-not-found
+
+  echo "  - Waiting for new scheduler pod to be ready..."
+  kubectl wait --for=condition=ready pod -n kube-system -l app.kubernetes.io/name=smart-scheduler --timeout=120s --kubeconfig "${kubeconfig_path}"
+
+  echo "✅ Scheduler state reset."
+}
+
 total_combinations=$(( ${#PROFILES[@]} * ${#LOCAL_LOAD_PROFILES[@]} ))
 current_combination=0
 
@@ -239,6 +255,22 @@ for wan_profile in "${PROFILES[@]}"; do
         echo "  Runs to perform:    ${RUNS}"
         echo "========================================="
 
+
+        # Reset profile store
+        if [[ "${DRY_RUN}" != "true" ]]; then
+            # Set the WAN/load conditions FIRST
+            echo "  - Applying WAN profile '${wan_profile}'..."
+            ssh "${WAN_ROUTER}" "sudo -n /usr/local/sbin/wan/apply_wan.sh '${wan_profile}'"
+
+            # Now, reset the scheduler so it starts fresh with the new conditions
+            reset_scheduler_state "${KUBECONFIG}"
+
+            # Give the system a moment to settle after the restart
+            echo "  - Sleeping 15s after scheduler reset..."
+            sleep 15
+        else
+            echo "Would apply WAN profile '${wan_profile}' and reset scheduler state."
+        fi
 
         # Inner loop for multiple runs
         for run_num in $(seq 1 "${RUNS}"); do
@@ -296,11 +328,15 @@ done
 echo "🎉 All benchmarks completed!"
 echo "📊 Generating aggregated summary report..."
 
+WARMUP_RUNS=2
+
 python3 - <<EOF
 import json
 import os
 import sys
 from pathlib import Path
+
+warmup_runs = ${WARMUP_RUNS}
 
 base_dir = Path("${BASE_RESULTS}")
 if not base_dir.exists():
@@ -310,7 +346,8 @@ summary = {
     "timestamp": "${TIMESTAMP}",
     "config": {
         "namespace": "${NAMESPACE}",
-        "runs_per_profile_combination": ${RUNS},
+        "total_runs_per_profile": ${RUNS},
+        "warmup_runs_discarded": warmup_runs,
     },
     "runs": []
 }
@@ -323,7 +360,15 @@ for profile_dir in sorted(base_dir.glob("wan-*_load-*")):
 
     # Find all runs for this profile
     for run_dir in sorted(profile_dir.glob("run-*")):
-        run_num = int(run_dir.name.replace("run-", ""))
+        try:
+            run_num = int(run_dir.name.replace("run-", ""))
+        except ValueError:
+            continue # Skip directories that aren't named correctly
+
+        # If the run number is within the warm-up period, skip it.
+        if run_num <= warmup_runs:
+            print(f"  -> Discarding warm-up run: {profile_dir.name}/{run_dir.name}")
+            continue
 
         # The python script creates a timestamped subdir, find it
         result_subdirs = list(run_dir.glob("*"))
