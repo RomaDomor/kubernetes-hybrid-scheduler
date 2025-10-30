@@ -161,7 +161,7 @@ def load_placement_data(base_dir: Path, warmup_runs: int) -> tuple[pd.DataFrame,
                     "pod_name": row['pod_name'],
                     "node_name": row['node_name'],
                     "workload": get_workload_from_pod_name(row['pod_name']),
-                    "node_type": ('cloud' if CLOUD_NODE_IDENTIFIER in row['node_name'] else 'edge')
+                    "node_type": ('cloud' if CLOUD_NODE_IDENTIFIER == row['node_name'] else 'edge')
                 })
 
     if not all_placements:
