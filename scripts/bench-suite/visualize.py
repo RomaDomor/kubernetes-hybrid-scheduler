@@ -691,111 +691,140 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
     print(f"  Saved: {path}")
 
 def plot_9_learning_placement_over_runs(df: pd.DataFrame, output_dir: Path):
-    """(Graph 9) Show how pod placement changes across all runs."""
-    print("Generating: 9. Learning Curve: Placement Decisions Over Runs")
+    """(Graph 9) Stacked area of edge vs cloud share over runs, per workload."""
+    print("Generating 9. Edge vs Cloud Share Over Runs (Stacked Area)")
     if df.empty or 'node_type' not in df.columns:
         print("  Skipping: No placement data available.")
         return
 
-    # Keep multiple pods; only drop exact duplicate samples of the same pod record
+    # Clean duplicates but keep multiple pods
     dedup_cols = [
-        'wan_profile', 'local_load', 'run', 'workload', 'pod_name', 'node_name', 'node_type'
+        'wan_profile', 'local_load', 'run', 'workload', 'pod_name',
+        'node_name', 'node_type'
     ]
     present_cols = [c for c in dedup_cols if c in df.columns]
     df_clean = df.drop_duplicates(subset=present_cols).copy()
 
-    # Ensure categories are consistent
-    df_clean['wan_profile'] = pd.Categorical(
-        df_clean['wan_profile'], categories=WAN_ORDER, ordered=True
-    )
-    df_clean['local_load'] = pd.Categorical(
-        df_clean['local_load'], categories=LOAD_ORDER, ordered=True
-    )
+    # Ensure ordered categories, drop unused
+    for col, order in [('wan_profile', WAN_ORDER), ('local_load', LOAD_ORDER)]:
+        if col in df_clean.columns:
+            df_clean[col] = pd.Categorical(df_clean[col], categories=order, ordered=True)
+            df_clean[col] = df_clean[col].cat.remove_unused_categories()
 
     group_cols = ['wan_profile', 'local_load', 'run', 'workload']
 
-    # Count pods per node_type within each group
     counts = (
         df_clean.groupby(group_cols + ['node_type'], observed=True)
         .size()
         .reset_index(name='count')
     )
 
-    # Pivot to get edge/cloud counts, fill missing with 0 (means none observed)
+    # Pivot to edge/cloud counts
     pivot = (
         counts.pivot_table(
-            index=group_cols,
-            columns='node_type',
-            values='count',
-            aggfunc='sum',
-            fill_value=0,
-            observed=True,
+            index=group_cols, columns='node_type', values='count',
+            aggfunc='sum', fill_value=0, observed=True
         )
         .reset_index()
     )
-
-    # Guarantee both columns exist
     for col in ['edge', 'cloud']:
         if col not in pivot.columns:
             pivot[col] = 0
-
     pivot['total'] = pivot['edge'] + pivot['cloud']
-    pivot = pivot[pivot['total'] > 0].copy()  # avoid div-by-zero
+    pivot = pivot[pivot['total'] > 0].copy()
     pivot['edge_pct'] = pivot['edge'] / pivot['total'] * 100
+    pivot['cloud_pct'] = pivot['cloud'] / pivot['total'] * 100
 
-    edge_pct = pivot[group_cols + ['edge_pct']].copy()
-    if edge_pct.empty:
+    if pivot.empty:
         print("  Skipping: No placement counts found to plot.")
         return
 
-    # Drop unused categories to avoid empty facets
-    edge_pct['wan_profile'] = edge_pct['wan_profile'].cat.remove_unused_categories()
-    edge_pct['local_load'] = edge_pct['local_load'].cat.remove_unused_categories()
+    # Build facets by WAN x Load, one small stacked area per workload
+    # We’ll plot multiple workloads in each facet as separate stacked areas
+    # arranged by workload as small multiples (rows).
+    # For simplicity and readability, we do one workload per small subplot
+    # using FacetGrid with col=local_load, row=wan_profile, and loop workloads inside.
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    sns.set_style("whitegrid")
 
-    # Plot with clearer lines; many workloads may overlap
-    g = sns.relplot(
-        data=edge_pct,
-        x='run',
-        y='edge_pct',
-        hue='workload',
-        col='local_load',
-        row='wan_profile',
-        kind='line',
-        marker='o',
-        markersize=5,
-        linewidth=2,
-        height=4,
-        aspect=1.5,
-        palette='tab10',
-        legend='full',
-        row_order=[c for c in WAN_ORDER if c in edge_pct['wan_profile'].cat.categories],
-        col_order=[c for c in LOAD_ORDER if c in edge_pct['local_load'].cat.categories],
-    )
+    # Determine unique facets and workloads
+    wans = list(pivot['wan_profile'].cat.categories) if hasattr(pivot['wan_profile'], 'cat') else sorted(pivot['wan_profile'].unique())
+    loads = list(pivot['local_load'].cat.categories) if hasattr(pivot['local_load'], 'cat') else sorted(pivot['local_load'].unique())
+    # Only keep facets that exist
+    wans = [w for w in wans if w in pivot['wan_profile'].unique()]
+    loads = [l for l in loads if l in pivot['local_load'].unique()]
+    workloads = sorted(pivot['workload'].unique())
 
-    g.set_axis_labels("Run Number", "Edge Placement (%)", fontweight='semibold')
-    g.set_titles(
-        row_template="WAN: {row_name}",
-        col_template="Load: {col_name}",
-        fontweight='semibold'
-    )
+    # Limit to top N workloads by total pods if too many
+    MAX_WORKLOADS = 8
+    if len(workloads) > MAX_WORKLOADS:
+        totals = (pivot.groupby('workload')['total'].sum().sort_values(ascending=False))
+        workloads = list(totals.head(MAX_WORKLOADS).index)
 
-    for ax in g.axes.flat:
-        ax.set_ylim(0, 105)
-        ax.axhline(50, ls='--', color='gray', alpha=0.6, lw=1)
-        sns.despine(ax=ax)
+    # Prepare figure grid: rows=wan*workload, cols=load
+    # To keep it compact, we’ll facet by WAN x Load and inside each facet draw multiple workloads as separate small stacked areas vertically.
+    # Simpler and more recognizable: facet by WAN (rows) and Load (cols) and use hue=node_type with 100% stacked bars per run per workload averaged.
+    # Final choice for readability: 100% stacked bars per run aggregated across all workloads (Option B) AND a separate figure per workload (Option A lite).
 
-    g.figure.suptitle(
-        "Scheduler Learning: Placement Decision vs. Run Number",
-        fontsize=14,
-        fontweight='bold',
-        y=0.995
-    )
-    g.tight_layout()
+    # Option A lite: one figure per workload to keep it very readable
+    colors = {'edge': '#4A90E2', 'cloud': '#F5A623'}
+    for wl in workloads:
+        sub = pivot[pivot['workload'] == wl].copy()
+        if sub.empty:
+            continue
 
-    path = output_dir / "D1_learning_curve_placement.png"
-    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
-    plt.close()
-    print(f"  Saved: {path}")
+        g = sns.FacetGrid(
+            sub,
+            row='wan_profile',
+            col='local_load',
+            margin_titles=True,
+            sharey=True,
+            sharex=True,
+            despine=True,
+            height=3.0,
+            aspect=1.4
+        )
+
+        def _area(data, color=None, label=None, **kwargs):
+            ax = plt.gca()
+            data = data.sort_values('run')
+            x = data['run'].values
+            y_edge = data['edge_pct'].values
+            y_cloud = data['cloud_pct'].values
+            ax.stackplot(
+                x,
+                [y_edge, y_cloud],
+                colors=[colors['edge'], colors['cloud']],
+                labels=['edge', 'cloud'],
+                alpha=0.9
+            )
+            ax.set_ylim(0, 100)
+            ax.set_xlim(min(x), max(x))
+            ax.set_title("")
+            ax.grid(True, axis='y', alpha=0.3)
+
+        g.map_dataframe(_area)
+
+        # Titles and labels
+        g.set_axis_labels("Run", "Share (%)")
+        g.set_titles(row_template="WAN: {row_name}", col_template="Load: {col_name}")
+        g.figure.subplots_adjust(top=0.88)
+        g.figure.suptitle(f"Placement Share Over Runs (Stacked) — {wl}", fontsize=12, fontweight='bold')
+
+        # Single legend at top
+        handles = [
+            plt.Rectangle((0, 0), 1, 1, fc=colors['edge']),
+            plt.Rectangle((0, 0), 1, 1, fc=colors['cloud'])
+        ]
+        g.figure.legend(handles, ['edge', 'cloud'], loc='upper center', ncol=2)
+
+        path = output_dir / f"D1_placement_share_stacked_{wl}.png"
+        g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+        plt.close(g.figure)
+        print(f"  Saved: {path}")
+
+    print("  Note: Generated one figure per workload to maximize readability.")
 
 
 def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path):
