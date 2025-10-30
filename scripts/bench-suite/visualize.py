@@ -8,6 +8,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+from matplotlib.ticker import MaxNLocator, FuncFormatter
 
 # --- Global Configuration for Consistency ---
 
@@ -185,6 +186,22 @@ def get_workload_from_pod_name(pod_name: str) -> str:
     base_name = re.split(r'-(?=[a-z0-9]{9,10}-[a-z0-9]{5}$)', base_name)[0]
     return base_name
 
+# --- Plotting Helpers ---
+def _set_integer_run_ticks(grid, dataframe_with_run):
+    # For seaborn FacetGrid/RelFacet
+    for ax in grid.axes.flat:
+        # Identify the facet’s x-limits and compute integer ticks within
+        xmin, xmax = ax.get_xlim()
+        # Build a sorted list of integer run values that appear in the original data
+        runs = sorted(dataframe_with_run['run'].unique())
+        # Filter to those within current limits (avoid ticks outside)
+        ticks = [r for r in runs if xmin <= r <= xmax]
+        if ticks:
+            ax.set_xticks(ticks)
+        # Force integer tick locator as a fallback
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        # Force integer labeling (no 1.0)
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{int(x)}"))
 
 # --- Plotting Library ---
 
@@ -815,6 +832,8 @@ def plot_9_learning_placement_over_runs(df: pd.DataFrame, output_dir: Path):
         g.figure.subplots_adjust(top=0.88)
         g.figure.suptitle(f"Placement Share Over Runs (Stacked) — {wl}", fontsize=12, fontweight='bold')
 
+        _set_integer_run_ticks(g, sub)
+
         # Single legend at top
         handles = [
             plt.Rectangle((0, 0), 1, 1, fc=colors['edge']),
@@ -895,6 +914,8 @@ def plot_9b_overview_placement_trends(df: pd.DataFrame, output_dir: Path):
     g.set_axis_labels("Run Number", "Edge Placement (%)", fontweight='semibold')
     g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
 
+    _set_integer_run_ticks(g, pivot)
+
     for ax in g.axes.flat:
         ax.set_ylim(-5, 105)
         ax.axhline(50, ls='--', color='gray', alpha=0.6, lw=1)
@@ -953,6 +974,8 @@ def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path):
         y=0.995
     )
 
+    _set_integer_run_ticks(g, plot_df)
+
     # Add SLO deadline as a horizontal line for context
     slo_target_ms = plot_df['target_ms'].max()
     if pd.notna(slo_target_ms):
@@ -998,6 +1021,8 @@ def plot_11_slo_improvement_over_runs(df: pd.DataFrame, output_dir: Path):
 
     g.set_axis_labels("Run Number", "SLO Pass Rate (%)", fontweight='semibold')
     g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
+
+    _set_integer_run_ticks(g, pass_by_run)
 
     for ax in g.axes.flat:
         ax.set_ylim(-5, 105)
@@ -1209,6 +1234,7 @@ def plot_14_placement_stability(df: pd.DataFrame, output_dir: Path):
     majority['prev_node_type'] = majority.groupby(['wan_profile', 'local_load', 'workload'], observed=True)[
         'node_type'].shift(1)
     majority['switched'] = (majority['node_type'] != majority['prev_node_type']) & majority['prev_node_type'].notna()
+    majority['switched'] = majority['switched'].astype(int)
 
     # Count switches per condition
     switches = (
