@@ -690,6 +690,7 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
     plt.close()
     print(f"  Saved: {path}")
 
+
 def plot_9_learning_placement_over_runs(df: pd.DataFrame, output_dir: Path):
     """(Graph 9) Stacked area of edge vs cloud share over runs, per workload."""
     print("Generating 9. Edge vs Cloud Share Over Runs (Stacked Area)")
@@ -749,8 +750,10 @@ def plot_9_learning_placement_over_runs(df: pd.DataFrame, output_dir: Path):
     sns.set_style("whitegrid")
 
     # Determine unique facets and workloads
-    wans = list(pivot['wan_profile'].cat.categories) if hasattr(pivot['wan_profile'], 'cat') else sorted(pivot['wan_profile'].unique())
-    loads = list(pivot['local_load'].cat.categories) if hasattr(pivot['local_load'], 'cat') else sorted(pivot['local_load'].unique())
+    wans = list(pivot['wan_profile'].cat.categories) if hasattr(pivot['wan_profile'], 'cat') else sorted(
+        pivot['wan_profile'].unique())
+    loads = list(pivot['local_load'].cat.categories) if hasattr(pivot['local_load'], 'cat') else sorted(
+        pivot['local_load'].unique())
     # Only keep facets that exist
     wans = [w for w in wans if w in pivot['wan_profile'].unique()]
     loads = [l for l in loads if l in pivot['local_load'].unique()]
@@ -827,6 +830,91 @@ def plot_9_learning_placement_over_runs(df: pd.DataFrame, output_dir: Path):
     print("  Note: Generated one figure per workload to maximize readability.")
 
 
+def plot_9b_overview_placement_trends(df: pd.DataFrame, output_dir: Path):
+    """(Graph 9B) Aggregated edge placement % over runs across all workloads."""
+    print("Generating: 9B. System-Wide Placement Trends (Overview)")
+    if df.empty or 'node_type' not in df.columns:
+        print("  Skipping: No placement data available.")
+        return
+
+    # Deduplicate
+    dedup_cols = ['wan_profile', 'local_load', 'run', 'workload', 'pod_name', 'node_name', 'node_type']
+    present_cols = [c for c in dedup_cols if c in df.columns]
+    df_clean = df.drop_duplicates(subset=present_cols).copy()
+
+    # Ensure ordered categories
+    for col, order in [('wan_profile', WAN_ORDER), ('local_load', LOAD_ORDER)]:
+        if col in df_clean.columns:
+            df_clean[col] = pd.Categorical(df_clean[col], categories=order, ordered=True)
+            df_clean[col] = df_clean[col].cat.remove_unused_categories()
+
+    # Aggregate across all workloads: count edge vs cloud per (wan, load, run)
+    group_cols = ['wan_profile', 'local_load', 'run']
+    counts = (
+        df_clean.groupby(group_cols + ['node_type'], observed=True)
+        .size()
+        .reset_index(name='count')
+    )
+
+    pivot = (
+        counts.pivot_table(
+            index=group_cols, columns='node_type', values='count',
+            aggfunc='sum', fill_value=0, observed=True
+        )
+        .reset_index()
+    )
+    for col in ['edge', 'cloud']:
+        if col not in pivot.columns:
+            pivot[col] = 0
+    pivot['total'] = pivot['edge'] + pivot['cloud']
+    pivot = pivot[pivot['total'] > 0].copy()
+    pivot['edge_pct'] = pivot['edge'] / pivot['total'] * 100
+
+    if pivot.empty:
+        print("  Skipping: No placement counts found.")
+        return
+
+    # Plot as line chart
+    g = sns.relplot(
+        data=pivot,
+        x='run',
+        y='edge_pct',
+        hue='wan_profile',
+        col='local_load',
+        kind='line',
+        marker='o',
+        markersize=6,
+        linewidth=2.5,
+        height=4.5,
+        aspect=1.4,
+        palette='Set2',
+        legend='full',
+        col_order=[c for c in LOAD_ORDER if c in pivot['local_load'].cat.categories],
+    )
+
+    g.set_axis_labels("Run Number", "Edge Placement (%)", fontweight='semibold')
+    g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
+
+    for ax in g.axes.flat:
+        ax.set_ylim(-5, 105)
+        ax.axhline(50, ls='--', color='gray', alpha=0.6, lw=1)
+        ax.fill_between(ax.get_xlim(), 0, 100, alpha=0.05, color='blue')
+        sns.despine(ax=ax)
+
+    g.figure.suptitle(
+        "System-Wide Edge Placement Trend (All Workloads Aggregated)",
+        fontsize=14,
+        fontweight='bold',
+        y=0.995
+    )
+    g.tight_layout()
+
+    path = output_dir / "D1_overview_placement_trend.png"
+    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+    plt.close()
+    print(f"  Saved: {path}")
+
+
 def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path):
     """(Graph 10) Show how performance of a key job changes across runs."""
     print("Generating: 10. Learning Curve: Job Performance Over Runs")
@@ -869,13 +957,301 @@ def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path):
     slo_target_ms = plot_df['target_ms'].max()
     if pd.notna(slo_target_ms):
         for ax in g.axes.flat:
-            ax.axhline(slo_target_ms / 1000.0, ls='--', color='red', alpha=0.8, lw=1.5, label=f'SLO Deadline ({slo_target_ms/1000.0:.0f}s)')
+            ax.axhline(slo_target_ms / 1000.0, ls='--', color='red', alpha=0.8, lw=1.5,
+                       label=f'SLO Deadline ({slo_target_ms / 1000.0:.0f}s)')
 
     g.tight_layout()
     path = output_dir / "D2_learning_curve_performance.png"
     g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
     plt.close()
     print(f"  Saved: {path}")
+
+
+def plot_11_slo_improvement_over_runs(df: pd.DataFrame, output_dir: Path):
+    """(Graph 11) SLO pass rate evolution showing learning effect."""
+    print("Generating: 11. SLO Pass Rate Evolution Over Runs")
+    if df.empty:
+        return
+
+    # Calculate pass rate per run per condition
+    pass_by_run = (
+        df.groupby(['wan_profile', 'local_load', 'run'], observed=True)['pass']
+        .apply(lambda x: (x == True).sum() / len(x) * 100)
+        .reset_index(name='pass_rate')
+    )
+
+    g = sns.relplot(
+        data=pass_by_run,
+        x='run',
+        y='pass_rate',
+        hue='wan_profile',
+        col='local_load',
+        kind='line',
+        marker='o',
+        markersize=6,
+        linewidth=2,
+        height=4.5,
+        aspect=1.4,
+        palette='RdYlGn',
+        col_order=[c for c in LOAD_ORDER if c in pass_by_run['local_load'].unique()],
+    )
+
+    g.set_axis_labels("Run Number", "SLO Pass Rate (%)", fontweight='semibold')
+    g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
+
+    for ax in g.axes.flat:
+        ax.set_ylim(-5, 105)
+        ax.axhline(90, ls='--', color='green', alpha=0.6, lw=1, label='90% target')
+        sns.despine(ax=ax)
+
+    g.figure.suptitle(
+        "System Reliability Improvement Over Runs",
+        fontsize=14,
+        fontweight='bold',
+        y=0.995
+    )
+    g.tight_layout()
+
+    path = output_dir / "D3_slo_improvement_over_runs.png"
+    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def plot_12_placement_performance_correlation(df_slo: pd.DataFrame, df_placement: pd.DataFrame, output_dir: Path):
+    """(Graph 12) Correlation between edge placement and SLO success."""
+    print("Generating: 12. Placement-Performance Correlation")
+    if df_slo.empty or df_placement.empty:
+        return
+
+    # Merge SLO data with placement data
+    # Compute edge% per (wan, load, run, workload)
+    dedup_cols = ['wan_profile', 'local_load', 'run', 'workload', 'pod_name', 'node_name', 'node_type']
+    present_cols = [c for c in dedup_cols if c in df_placement.columns]
+    df_p = df_placement.drop_duplicates(subset=present_cols).copy()
+
+    placement_summary = (
+        df_p.groupby(['wan_profile', 'local_load', 'run', 'workload', 'node_type'], observed=True)
+        .size()
+        .reset_index(name='count')
+    )
+
+    pivot = placement_summary.pivot_table(
+        index=['wan_profile', 'local_load', 'run', 'workload'],
+        columns='node_type',
+        values='count',
+        fill_value=0,
+        observed=True
+    ).reset_index()
+
+    for col in ['edge', 'cloud']:
+        if col not in pivot.columns:
+            pivot[col] = 0
+    pivot['total'] = pivot['edge'] + pivot['cloud']
+    pivot = pivot[pivot['total'] > 0].copy()
+    pivot['edge_pct'] = pivot['edge'] / pivot['total'] * 100
+
+    # Merge with SLO pass data
+    slo_summary = (
+        df_slo.groupby(['wan_profile', 'local_load', 'run', 'workload'], observed=True)['pass']
+        .apply(lambda x: (x == True).sum() / len(x) * 100)
+        .reset_index(name='slo_pass_rate')
+    )
+
+    merged = pd.merge(
+        pivot[['wan_profile', 'local_load', 'run', 'workload', 'edge_pct']],
+        slo_summary,
+        on=['wan_profile', 'local_load', 'run', 'workload'],
+        how='inner'
+    )
+
+    if merged.empty:
+        print("  Skipping: No merged data.")
+        return
+
+    # Plot scatter with regression
+    g = sns.lmplot(
+        data=merged,
+        x='edge_pct',
+        y='slo_pass_rate',
+        hue='wan_profile',
+        col='local_load',
+        height=5,
+        aspect=1.3,
+        scatter_kws={'alpha': 0.6, 's': 50},
+        line_kws={'linewidth': 2},
+        palette='Set2',
+        col_order=[c for c in LOAD_ORDER if c in merged['local_load'].unique()],
+    )
+
+    g.set_axis_labels("Edge Placement (%)", "SLO Pass Rate (%)", fontweight='semibold')
+    g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
+
+    for ax in g.axes.flat:
+        ax.axhline(90, ls='--', color='green', alpha=0.4, lw=1)
+        ax.axvline(50, ls='--', color='gray', alpha=0.4, lw=1)
+        sns.despine(ax=ax)
+
+    g.figure.suptitle(
+        "Does Edge Placement Improve SLO Achievement?",
+        fontsize=14,
+        fontweight='bold',
+        y=1.02
+    )
+
+    path = output_dir / "E1_placement_performance_correlation.png"
+    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def plot_13_workload_preference_heatmap(df: pd.DataFrame, output_dir: Path):
+    """(Graph 13) Workload preference for edge vs cloud by condition."""
+    print("Generating: 13. Workload Preference Heatmap")
+    if df.empty:
+        return
+
+    # Deduplicate
+    dedup_cols = ['wan_profile', 'local_load', 'run', 'workload', 'pod_name', 'node_name', 'node_type']
+    present_cols = [c for c in dedup_cols if c in df.columns]
+    df_clean = df.drop_duplicates(subset=present_cols).copy()
+
+    # Compute average edge% per workload per (wan, load) across all runs
+    counts = (
+        df_clean.groupby(['wan_profile', 'local_load', 'workload', 'node_type'], observed=True)
+        .size()
+        .reset_index(name='count')
+    )
+
+    pivot = counts.pivot_table(
+        index=['wan_profile', 'local_load', 'workload'],
+        columns='node_type',
+        values='count',
+        fill_value=0,
+        observed=True
+    ).reset_index()
+
+    for col in ['edge', 'cloud']:
+        if col not in pivot.columns:
+            pivot[col] = 0
+    pivot['total'] = pivot['edge'] + pivot['cloud']
+    pivot = pivot[pivot['total'] > 0].copy()
+    pivot['edge_pct'] = pivot['edge'] / pivot['total'] * 100
+
+    # Create composite condition label
+    pivot['condition'] = pivot['wan_profile'].astype(str) + ' / ' + pivot['local_load'].astype(str)
+
+    heatmap_data = pivot.pivot_table(
+        index='workload',
+        columns='condition',
+        values='edge_pct',
+        observed=True
+    )
+
+    if heatmap_data.empty:
+        print("  Skipping: No data.")
+        return
+
+    fig, ax = plt.subplots(figsize=(16, 8))
+    sns.heatmap(
+        heatmap_data,
+        annot=True,
+        fmt=".0f",
+        cmap="RdYlBu_r",
+        center=50,
+        linewidths=1,
+        linecolor='white',
+        cbar_kws={'label': 'Edge Placement (%)'},
+        vmin=0,
+        vmax=100,
+        ax=ax,
+    )
+    ax.set_title(
+        "Workload Preference: Edge Placement % by Condition",
+        fontsize=14,
+        fontweight='bold',
+        pad=20
+    )
+    ax.set_xlabel("WAN / Load Profile", fontsize=12, fontweight='semibold')
+    ax.set_ylabel("Workload", fontsize=12, fontweight='semibold')
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+
+    path = output_dir / "E2_workload_preference_heatmap.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def plot_14_placement_stability(df: pd.DataFrame, output_dir: Path):
+    """(Graph 14) Placement decision stability over runs."""
+    print("Generating: 14. Placement Decision Stability")
+    if df.empty:
+        return
+
+    # For each workload, count how many times it switches node_type between consecutive runs
+    dedup_cols = ['wan_profile', 'local_load', 'run', 'workload', 'pod_name', 'node_name', 'node_type']
+    present_cols = [c for c in dedup_cols if c in df.columns]
+    df_clean = df.drop_duplicates(subset=present_cols).copy()
+
+    # Determine majority node_type per workload per run
+    majority_placement = (
+        df_clean.groupby(['wan_profile', 'local_load', 'run', 'workload', 'node_type'], observed=True)
+        .size()
+        .reset_index(name='count')
+    )
+
+    idx = majority_placement.groupby(['wan_profile', 'local_load', 'run', 'workload'], observed=True)['count'].idxmax()
+    majority = majority_placement.loc[idx, ['wan_profile', 'local_load', 'run', 'workload', 'node_type']].copy()
+    majority = majority.sort_values(['wan_profile', 'local_load', 'workload', 'run'])
+
+    # Calculate switches
+    majority['prev_node_type'] = majority.groupby(['wan_profile', 'local_load', 'workload'], observed=True)[
+        'node_type'].shift(1)
+    majority['switched'] = (majority['node_type'] != majority['prev_node_type']) & majority['prev_node_type'].notna()
+
+    # Count switches per condition
+    switches = (
+        majority.groupby(['wan_profile', 'local_load'], observed=True)['switched']
+        .sum()
+        .reset_index(name='total_switches')
+    )
+
+    # Plot as heatmap
+    heatmap_data = switches.pivot_table(
+        index='wan_profile',
+        columns='local_load',
+        values='total_switches',
+        observed=True
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.heatmap(
+        heatmap_data,
+        annot=True,
+        fmt=".0f",
+        cmap="YlOrRd",
+        linewidths=1,
+        linecolor='white',
+        cbar_kws={'label': 'Total Placement Switches'},
+        ax=ax,
+    )
+    ax.set_title(
+        "Placement Decision Stability (Lower = More Stable)",
+        fontsize=14,
+        fontweight='bold',
+        pad=20
+    )
+    ax.set_xlabel("Load Profile", fontsize=12, fontweight='semibold')
+    ax.set_ylabel("WAN Profile", fontsize=12, fontweight='semibold')
+    plt.xticks(rotation=0)
+    plt.yticks(rotation=0)
+
+    path = output_dir / "E3_placement_stability.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+    plt.close()
+    print(f"  Saved: {path}")
+
 
 # --- Main Execution Logic ---
 
@@ -925,10 +1301,18 @@ def main():
     plot_7_raw_data_variance(df_stable_slo, output_dir)
     plot_8_placement_analysis(df_stable_placement, output_dir)
 
-    # --- Generate new plots for LEARNING analysis ---
+    # --- Group D: Learning Curves ---
     print("\n--- Group D: Scheduler Learning Curve Analysis ---")
     plot_9_learning_placement_over_runs(df_all_placement, output_dir)
+    plot_9b_overview_placement_trends(df_all_placement, output_dir)
     plot_10_learning_performance_over_runs(df_all_slo, output_dir)
+    plot_11_slo_improvement_over_runs(df_all_slo, output_dir)
+
+    # --- Group E: Advanced Analytics ---
+    print("\n--- Group E: Placement-Performance Analysis ---")
+    plot_12_placement_performance_correlation(df_all_slo, df_all_placement, output_dir)
+    plot_13_workload_preference_heatmap(df_stable_placement, output_dir)
+    plot_14_placement_stability(df_all_placement, output_dir)
 
     print("\n✅ Visualization complete!")
     print(f"All graphs saved in: {output_dir}")
