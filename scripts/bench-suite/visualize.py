@@ -697,53 +697,101 @@ def plot_9_learning_placement_over_runs(df: pd.DataFrame, output_dir: Path):
         print("  Skipping: No placement data available.")
         return
 
-    # Calculate the percentage of each node_type for each group
-    placement_pct = (
-        df.groupby(['wan_profile', 'local_load', 'run', 'workload'], observed=True)['node_type']
-        .value_counts(normalize=True)
-        .mul(100)
-        .rename('percentage')
+    # Keep multiple pods; only drop exact duplicate samples of the same pod record
+    dedup_cols = [
+        'wan_profile', 'local_load', 'run', 'workload', 'pod_name', 'node_name', 'node_type'
+    ]
+    present_cols = [c for c in dedup_cols if c in df.columns]
+    df_clean = df.drop_duplicates(subset=present_cols).copy()
+
+    # Ensure categories are consistent
+    df_clean['wan_profile'] = pd.Categorical(
+        df_clean['wan_profile'], categories=WAN_ORDER, ordered=True
+    )
+    df_clean['local_load'] = pd.Categorical(
+        df_clean['local_load'], categories=LOAD_ORDER, ordered=True
+    )
+
+    group_cols = ['wan_profile', 'local_load', 'run', 'workload']
+
+    # Count pods per node_type within each group
+    counts = (
+        df_clean.groupby(group_cols + ['node_type'], observed=True)
+        .size()
+        .reset_index(name='count')
+    )
+
+    # Pivot to get edge/cloud counts, fill missing with 0 (means none observed)
+    pivot = (
+        counts.pivot_table(
+            index=group_cols,
+            columns='node_type',
+            values='count',
+            aggfunc='sum',
+            fill_value=0,
+            observed=True,
+        )
         .reset_index()
     )
 
-    # We are interested in the 'edge' percentage
-    edge_pct = placement_pct[placement_pct['node_type'] == 'edge']
+    # Guarantee both columns exist
+    for col in ['edge', 'cloud']:
+        if col not in pivot.columns:
+            pivot[col] = 0
 
+    pivot['total'] = pivot['edge'] + pivot['cloud']
+    pivot = pivot[pivot['total'] > 0].copy()  # avoid div-by-zero
+    pivot['edge_pct'] = pivot['edge'] / pivot['total'] * 100
+
+    edge_pct = pivot[group_cols + ['edge_pct']].copy()
     if edge_pct.empty:
-        print("  Skipping: No 'edge' placements found to plot.")
+        print("  Skipping: No placement counts found to plot.")
         return
 
+    # Drop unused categories to avoid empty facets
+    edge_pct['wan_profile'] = edge_pct['wan_profile'].cat.remove_unused_categories()
+    edge_pct['local_load'] = edge_pct['local_load'].cat.remove_unused_categories()
+
+    # Plot with clearer lines; many workloads may overlap
     g = sns.relplot(
         data=edge_pct,
         x='run',
-        y='percentage',
+        y='edge_pct',
         hue='workload',
         col='local_load',
         row='wan_profile',
         kind='line',
         marker='o',
+        markersize=5,
+        linewidth=2,
         height=4,
         aspect=1.5,
         palette='tab10',
         legend='full',
-        row_order=WAN_ORDER,
-        col_order=LOAD_ORDER,
+        row_order=[c for c in WAN_ORDER if c in edge_pct['wan_profile'].cat.categories],
+        col_order=[c for c in LOAD_ORDER if c in edge_pct['local_load'].cat.categories],
     )
 
     g.set_axis_labels("Run Number", "Edge Placement (%)", fontweight='semibold')
-    g.set_titles(row_template="WAN: {row_name}", col_template="Load: {col_name}", fontweight='semibold')
+    g.set_titles(
+        row_template="WAN: {row_name}",
+        col_template="Load: {col_name}",
+        fontweight='semibold'
+    )
+
+    for ax in g.axes.flat:
+        ax.set_ylim(0, 105)
+        ax.axhline(50, ls='--', color='gray', alpha=0.6, lw=1)
+        sns.despine(ax=ax)
+
     g.figure.suptitle(
         "Scheduler Learning: Placement Decision vs. Run Number",
         fontsize=14,
         fontweight='bold',
         y=0.995
     )
-    for ax in g.axes.flat:
-        ax.set_ylim(0, 105)
-        ax.axhline(50, ls='--', color='gray', alpha=0.7, lw=1)
-        sns.despine(ax=ax)
-
     g.tight_layout()
+
     path = output_dir / "D1_learning_curve_placement.png"
     g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
     plt.close()
