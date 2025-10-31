@@ -3,6 +3,8 @@ kind: Job
 metadata:
   name: {{ .Release.Name }}-cert-generator
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "smart-scheduler.labels" . | nindent 4 }}
   annotations:
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "0"
@@ -13,10 +15,16 @@ spec:
     spec:
       serviceAccountName: {{ .Release.Name }}-cert-generator
       restartPolicy: OnFailure
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: cert-generator
           image: "{{ .Values.certGenerator.image.name }}:{{ .Values.certGenerator.image.tag }}"
           imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -35,13 +43,15 @@ spec:
           args:
             - |
               set -euo pipefail
-              
+
               # --- Configuration ---
               NAMESPACE={{ .Release.Namespace }}
-              SERVICE_NAME=smart-scheduler-webhook
+              FULLNAME={{ include "smart-scheduler.fullname" . }}
+              DEPLOYMENT_NAME=${FULLNAME}-controller
+              SERVICE_NAME=${FULLNAME}-webhook
               SECRET_NAME={{ .Values.webhookSecretName }}
-              WEBHOOK_NAME=smart-scheduler-webhook
-              
+              WEBHOOK_NAME=${FULLNAME}-webhook
+
               # --- Main Logic ---
               WORKDIR=$(mktemp -d)
               cd "$WORKDIR"
@@ -103,7 +113,7 @@ spec:
                 --type='json' \
                 -p="[ {\"op\":\"replace\", \"path\":\"/webhooks/0/clientConfig/caBundle\", \"value\":\"${CA_BUNDLE}\"} ]"
 
-              echo "[INFO] Triggering rollout restart of deployment/${SERVICE_NAME} in ${NAMESPACE}"
-              kubectl rollout restart -n "${NAMESPACE}" "deployment/${SERVICE_NAME}"
+              echo "[INFO] Triggering rollout restart of deployment/${DEPLOYMENT_NAME} in ${NAMESPACE}"
+              kubectl rollout restart -n "${NAMESPACE}" "deployment/${DEPLOYMENT_NAME}"
 
               echo "[INFO] Certificate generation and webhook patching complete."
