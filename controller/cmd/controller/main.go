@@ -197,8 +197,13 @@ func main() {
 		}
 	}()
 
+	// Initialize EDF simulator with pod tracking
+	simulator := decision.NewScheduleSimulator(profileStore, podInformer)
+	klog.Info("EDF simulator initialized with pod tracking")
+
 	// Create decision engine
 	config.ProfileStore = profileStore
+	config.Simulator = simulator
 	decisionEngine := decision.NewEngine(config)
 
 	// Plain HTTP admin server for metrics and health
@@ -309,7 +314,7 @@ func refreshTelemetryLoop(tel telemetry.Collector, stopCh <-chan struct{}) {
 	}
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
