@@ -116,3 +116,69 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 		t.Fatalf("want EDGE wan_circuit_breaker, got %v %s", res2.Location, res2.Reason)
 	}
 }
+
+func TestDecide_OtherClassesBlockCapacity(t *testing.T) {
+	e := newEngine()
+	p := podWith("latency", 200, 128)
+	s := sloMust("latency", 5000, true, 5)
+
+	local := &telemetry.LocalState{
+		FreeCPU:             0,
+		FreeMem:             0,
+		PendingPodsPerClass: map[string]int{"latency": 5},
+		TotalDemand: map[string]telemetry.DemandByClass{
+			"latency": {CPU: 100, Mem: 100},
+			"batch":   {CPU: 900, Mem: 900}, // Batch consumes 90% of capacity!
+		},
+		TotalAllocatableCPU: 1000,
+		TotalAllocatableMem: 1000,
+		BestEdgeNode:        telemetry.BestNode{},
+	}
+
+	wan := &telemetry.WANState{RTTMs: 100, LossPct: 1}
+
+	res := e.Decide(p, s, local, wan)
+
+	// Batch pods consume 900m, leaving only 100m
+	// Pod needs 200m, so it will NEVER fit
+	// Even after latency queue drains, batch still occupies resources
+
+	if res.Location != constants.Cloud {
+		t.Fatalf("want CLOUD (batch blocks), got %v (reason=%s)", res.Location, res.Reason)
+	}
+	if res.Reason != "other_classes_block_capacity" {
+		t.Fatalf("want other_classes_block_capacity, got %s", res.Reason)
+	}
+}
+
+func TestDecide_QueueDrainConsidersOtherClasses(t *testing.T) {
+	e := newEngine()
+	p := podWith("latency", 200, 128)
+	s := sloMust("latency", 10000, true, 5) // Generous deadline
+
+	local := &telemetry.LocalState{
+		FreeCPU:             0,
+		FreeMem:             0,
+		PendingPodsPerClass: map[string]int{"latency": 5},
+		TotalDemand: map[string]telemetry.DemandByClass{
+			"latency": {CPU: 100, Mem: 100},
+			"batch":   {CPU: 300, Mem: 300}, // Batch uses some capacity
+		},
+		TotalAllocatableCPU: 1000,
+		TotalAllocatableMem: 1000,
+		BestEdgeNode:        telemetry.BestNode{},
+	}
+
+	wan := &telemetry.WANState{RTTMs: 50, LossPct: 1}
+
+	res := e.Decide(p, s, local, wan)
+
+	// Available after batch: 1000m - 300m = 700m
+	// Parallelism: 700m / 200m = 3 pods
+	// Queue drain: 5 / 3 * 100ms * slowdown = reasonable
+	// Should be feasible to queue
+
+	if res.Location != constants.Edge {
+		t.Fatalf("want EDGE (queue feasible), got %v (reason=%s)", res.Location, res.Reason)
+	}
+}

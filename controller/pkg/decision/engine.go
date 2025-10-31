@@ -142,40 +142,92 @@ func (e *Engine) Decide(
 	edgeHasCapacity := local.FreeCPU >= reqCPU && local.FreeMem >= reqMem
 
 	if !edgeHasCapacity || !edgeHasNode {
-		// Compare edge queue drain time to cloud cost
-		queueDrainTime := e.estimateEdgeQueueDrainTime(local, slo.Class, edgeProfile)
+		klog.V(4).Infof("%s: Edge has no capacity/node. Checking if pod can queue...", podID)
 
-		cloudETA := e.predictETA(pod, constants.Cloud, cloudProfile, local, wan, slo)
-
-		klog.V(4).Infof(
-			"%s: Edge capacity insufficient. Queue drain time=%.0fms vs Cloud ETA=%.0fms",
-			podID, queueDrainTime, cloudETA,
+		// Check if pod will fit AFTER queue drains considering other classes
+		projFeasible, queueDrainMs, projReason := e.projectedEdgeFeasibility(
+			pod, local, slo, reqCPU, reqMem,
 		)
 
-		// If waiting on edge queue is significantly faster than cloud offload,
-		// keep it queued on edge (return Edge decision, don't force cloud)
-		queueBenefit := cloudETA - queueDrainTime
-		if queueBenefit > 200 { // >200ms faster to wait on edge
+		klog.V(3).Infof(
+			"%s: Overload check: projFeasible=%v (%s), queueDrain=%.0fms, cloudETA=%.0fms",
+			podID, projFeasible, projReason, queueDrainMs, cloudETA,
+		)
+
+		// Case 1: Pod will NEVER fit on edge (other classes permanently block)
+		if !projFeasible && projReason == "permanently_no_capacity_due_to_other_classes" {
+			utilizationPct := 0.0
+			if local.TotalAllocatableCPU > 0 {
+				utilizationPct = float64(local.TotalAllocatableCPU-local.FreeCPU) / float64(local.TotalAllocatableCPU) * 100
+			}
+
+			klog.Warningf(
+				"%s: Other SLO classes consume %.1f%% of capacity. Pod will never fit (need=%dm, available<). Forcing cloud.",
+				podID, utilizationPct, reqCPU,
+			)
+			result := Result{constants.Cloud, "other_classes_block_capacity", cloudETA, wan.RTTMs}
+			recordDecision(result, slo.Class)
+			return result
+		}
+
+		// Case 2: Pod misses SLO even after queue drains
+		if !projFeasible && projReason == "queue_miss_slo" {
+			klog.Warningf(
+				"%s: Pod will miss SLO waiting in queue (queueDrain=%.0fms alone exceeds deadline=%dms). Forcing cloud.",
+				podID, queueDrainMs, slo.DeadlineMs,
+			)
+			result := Result{constants.Cloud, "edge_queue_miss_slo", cloudETA, wan.RTTMs}
+			recordDecision(result, slo.Class)
+			return result
+		}
+
+		// Case 3: Pod CAN fit after queue drains - compare to cloud
+		if projFeasible {
+			// Calculate total time if we queue on edge
+			edgeQueueAndExecMs := queueDrainMs + edgeProfile.P95DurationMs
+			queueBenefit := cloudETA - edgeQueueAndExecMs
+
+			klog.V(4).Infof(
+				"%s: Pod CAN queue on edge. Edge total=%.0fms (queue=%.0fms + exec=%.0fms) vs Cloud=%.0fms (benefit=%.0fms)",
+				podID, edgeQueueAndExecMs, queueDrainMs, edgeProfile.P95DurationMs, cloudETA, queueBenefit,
+			)
+
+			if queueBenefit > 200 { // >200ms faster to wait on edge
+				klog.V(3).Infof(
+					"%s: Queuing on edge is better (saves %.0fms vs cloud). Queue drain will be %.0fms.",
+					podID, queueBenefit, queueDrainMs,
+				)
+				result := Result{
+					constants.Edge,
+					"edge_queue_preferred",
+					edgeQueueAndExecMs,
+					wan.RTTMs,
+				}
+				recordDecision(result, slo.Class)
+				return result
+			}
+
+			// Cloud is only marginally faster, but not enough to override
 			klog.V(3).Infof(
-				"%s: Queuing on edge (benefit=%.0fms). Queue drain=%.0fms < Cloud ETA=%.0fms",
-				podID, queueBenefit, queueDrainTime, cloudETA,
+				"%s: Cloud is only marginally faster (%.0fms). But edge can queue, so queuing.",
+				podID, queueBenefit,
 			)
 			result := Result{
 				constants.Edge,
-				"edge_queue_preferred",
-				queueDrainTime + edgeProfile.P95DurationMs,
+				"edge_queue_marginal",
+				edgeQueueAndExecMs,
 				wan.RTTMs,
 			}
 			recordDecision(result, slo.Class)
 			return result
 		}
 
-		// Otherwise, cloud is worth it despite the capacity issue
+		// Should not reach here, but just in case
 		klog.Warningf(
-			"%s: Edge overloaded and cloud is faster. Forcing cloud (drain=%.0fms, cloud=%.0fms)",
-			podID, queueDrainTime, cloudETA,
+			"%s: Unexpected state in overload logic. Defaulting to cloud.",
+			podID,
 		)
-		result := Result{constants.Cloud, "edge_overloaded_cloud_faster", cloudETA, wan.RTTMs}
+		result := Result{constants.Cloud, "edge_overloaded_default_cloud", cloudETA, wan.RTTMs}
 		recordDecision(result, slo.Class)
 		return result
 	}
@@ -363,6 +415,159 @@ func (e *Engine) estimateEdgeQueueDrainTime(
 	)
 
 	return queueDrainMs
+}
+
+// projectedEdgeFeasibility checks if pod will fit AFTER queue drains,
+// considering other SLO classes that will keep running
+func (e *Engine) projectedEdgeFeasibility(
+	pod *corev1.Pod,
+	local *telemetry.LocalState,
+	slo *slo.SLO,
+	reqCPU int64,
+	reqMem int64,
+) (feasible bool, queueDrainMs float64, reason string) {
+	podClass := slo.Class
+	pendingCount := local.PendingPodsPerClass[podClass]
+
+	// Step 1: Calculate demand from OTHER classes (higher or equal priority)
+	// These will keep consuming resources while we wait
+	podTier := constants.GetTierForClass(podClass)
+
+	klog.V(5).Infof(
+		"projectedEdgeFeasibility: class=%s tier=%d, pendingInQueue=%d",
+		podClass, podTier, pendingCount,
+	)
+
+	// STEP 1: Calculate demand from ALL OTHER CLASSES (for permanent capacity check)
+	// All running pods occupy resources, regardless of priority tier
+	var allOtherDemandCPU, allOtherDemandMem int64
+
+	for class, demand := range local.TotalDemand {
+		if class == podClass {
+			continue // Skip our own class
+		}
+		// Include ALL other classes - they all consume resources now
+		allOtherDemandCPU += demand.CPU
+		allOtherDemandMem += demand.Mem
+	}
+
+	klog.V(5).Infof(
+		"All other classes demand: CPU=%dm MEM=%dMi",
+		allOtherDemandCPU, allOtherDemandMem,
+	)
+
+	// STEP 2: Check if pod will EVER fit after queue drains
+	// (regardless of whether we wait for queue to drain)
+	if local.TotalAllocatableCPU == 0 {
+		klog.V(4).Infof("No allocatable CPU on edge, pod cannot fit")
+		return false, 0, "permanently_no_capacity_due_to_other_classes"
+	}
+
+	availableCPUAfterOthers := local.TotalAllocatableCPU - allOtherDemandCPU
+	availableMemAfterOthers := local.TotalAllocatableMem - allOtherDemandMem
+
+	klog.V(5).Infof(
+		"Capacity check: available after all others: CPU=%dm (need=%dm), MEM=%dMi (need=%dMi)",
+		availableCPUAfterOthers, reqCPU, availableMemAfterOthers, reqMem,
+	)
+
+	if availableCPUAfterOthers < reqCPU || availableMemAfterOthers < reqMem {
+		// Other classes consume so much that pod will NEVER fit
+		klog.V(4).Infof(
+			"Pod will NEVER fit: need %dm/%dMi but only %dm/%dMi available (others take %dm/%dMi of %dm/%dMi total)",
+			reqCPU, reqMem, availableCPUAfterOthers, availableMemAfterOthers,
+			allOtherDemandCPU, allOtherDemandMem, local.TotalAllocatableCPU, local.TotalAllocatableMem,
+		)
+		return false, 0, "permanently_no_capacity_due_to_other_classes"
+	}
+
+	// STEP 3: If queue is empty, pod fits immediately
+	if pendingCount == 0 {
+		klog.V(5).Infof("No queue for class=%s, pod fits immediately", podClass)
+		return true, 0, "no_queue"
+	}
+
+	// STEP 4: Estimate queue drain time with contention from SAME/HIGHER priority classes
+	// Calculate demand from classes that will contend WITH us in the queue
+	// (higher or equal priority only)
+	var contentingDemandCPU int64
+
+	for class, demand := range local.TotalDemand {
+		if class == podClass {
+			continue
+		}
+
+		classTier := constants.GetTierForClass(class)
+
+		// Only higher/equal priority classes will slow us down in queue
+		if classTier <= podTier {
+			contentingDemandCPU += demand.CPU
+			klog.V(5).Infof(
+				"Class %s (tier=%d) contends with us (tier=%d): CPU=%dm",
+				class, classTier, podTier, demand.CPU,
+			)
+		}
+	}
+
+	edgeKey := GetProfileKey(pod, constants.Edge)
+	profile := e.config.ProfileStore.GetOrDefault(edgeKey)
+
+	// Parallelism: how many pods of our class can run concurrently?
+	parallelismAvailable := int64(1)
+	avgPodCPU := int64(200)
+
+	if availableCPUAfterOthers > avgPodCPU {
+		parallelismAvailable = availableCPUAfterOthers / avgPodCPU
+		if parallelismAvailable > 8 {
+			parallelismAvailable = 8
+		}
+	}
+
+	klog.V(5).Infof(
+		"Parallelism for class=%s: available=%dm, avgPod=%dm => %d concurrent pods",
+		podClass, availableCPUAfterOthers, avgPodCPU, parallelismAvailable,
+	)
+
+	// Slowdown from contending classes (same/higher priority)
+	rhoEff := float64(contentingDemandCPU) / float64(local.TotalAllocatableCPU)
+	if rhoEff > 0.99 {
+		rhoEff = 0.99
+	}
+
+	slowdownFactor := 1.0
+	if rhoEff > 0.01 {
+		slowdownFactor = 1.0 / (1.0 - rhoEff)
+	}
+
+	klog.V(5).Infof(
+		"Slowdown from contending classes: rho=%.3f => slowdown=%.2fx",
+		rhoEff, slowdownFactor,
+	)
+
+	// Queue drain time
+	queueDrainMs = float64(pendingCount) * profile.MeanDurationMs * slowdownFactor / float64(parallelismAvailable)
+
+	klog.V(5).Infof(
+		"Queue drain: %d pending × %.0fms × %.2f / %d = %.0fms",
+		pendingCount, profile.MeanDurationMs, slowdownFactor, parallelismAvailable, queueDrainMs,
+	)
+
+	// STEP 5: Check if pod will miss SLO even after queue drains
+	totalTimeMs := queueDrainMs + (profile.P95DurationMs * slowdownFactor)
+	deadlineMs := float64(slo.DeadlineMs)
+
+	klog.V(4).Infof(
+		"SLO check: queue=%.0fms + exec=%.0fms = %.0fms vs deadline=%.0fms",
+		queueDrainMs, profile.P95DurationMs*slowdownFactor, totalTimeMs, deadlineMs,
+	)
+
+	if totalTimeMs > deadlineMs {
+		klog.V(4).Infof("Pod will miss SLO waiting in queue: %.0fms > %.0fms", totalTimeMs, deadlineMs)
+		return false, queueDrainMs, "queue_miss_slo"
+	}
+
+	klog.V(4).Infof("Pod CAN fit after queue drain and will meet SLO")
+	return true, queueDrainMs, "queue_feasible"
 }
 
 func (e *Engine) canNodeFitWithHeadroom(node telemetry.BestNode, reqCPU, reqMem int64) bool {
