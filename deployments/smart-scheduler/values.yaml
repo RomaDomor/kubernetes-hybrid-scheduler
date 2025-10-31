@@ -49,6 +49,85 @@ probes:
 # -- This secret can be created by cert-manager or a Helm hook Job.
 webhookSecretName: smart-scheduler-certs
 
+# -- Security configuration
+securityContext:
+  pod:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 3000
+    fsGroup: 2000
+    seccompProfile:
+      type: RuntimeDefault
+  container:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    capabilities:
+      drop:
+        - ALL
+
+# -- Pod disruption budget for high availability
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# -- Priority class for the controller pod
+priorityClassName: ""
+
+# -- Affinity rules for pod scheduling
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - smart-scheduler
+          topologyKey: kubernetes.io/hostname
+
+# -- Topology spread constraints for pod distribution
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+
+# -- Termination grace period in seconds
+terminationGracePeriodSeconds: 30
+
+# -- Network policy configuration
+networkPolicy:
+  enabled: false
+  # -- Ingress rules for the webhook
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8443
+  # -- Egress rules (allow DNS, metrics scraping, etc)
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+
+# -- Pod Security Policy or Pod Security Standards
+podSecurityPolicy:
+  enabled: false
+  name: restricted
+
+# -- Enable AppArmor profile (requires AppArmor support on nodes)
+enableAppArmor: false
+
 # -- Configuration data for the smart-scheduler ConfigMap.
 # -- These values will populate the environment variables of the controller.
 config:
@@ -86,3 +165,19 @@ certGenerator:
   image:
     name: bitnami/kubectl
     tag: latest
+  # -- Security context for the cert-generator job
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  # -- Resource requests and limits for cert-generator job
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

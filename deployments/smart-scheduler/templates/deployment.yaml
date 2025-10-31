@@ -16,9 +16,13 @@ spec:
         {{- include "smart-scheduler.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ .Values.serviceAccountName }}
+      automountServiceAccountToken: true
+      securityContext:
+        {{- toYaml .Values.securityContext.pod | nindent 8 }}
       initContainers:
         - name: wait-for-certs
           image: busybox:1.36
+          imagePullPolicy: IfNotPresent
           command: ['sh', '-c']
           args:
             - |
@@ -31,10 +35,37 @@ spec:
             - name: certs
               mountPath: /certs
               readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+            {{- if .Values.enableAppArmor }}
+            appArmorProfile:
+              type: RuntimeDefault
+            {{- end }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
       containers:
         - name: controller
-          image: "{{ .Values.image.name }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.image.name }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext.container | nindent 12 }}
+            {{- if .Values.enableAppArmor }}
+            appArmorProfile:
+              type: RuntimeDefault
+            {{- end }}
           ports:
             - containerPort: {{ .Values.service.targetPorts.https }}
               name: webhook
@@ -66,10 +97,21 @@ spec:
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+              scheme: HTTP
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 30
           volumeMounts:
             - name: certs
               mountPath: /certs
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           env:
             {{- range $key, $val := .Values.config }}
             - name: {{ $key | snakecase | upper }}
@@ -84,3 +126,27 @@ spec:
         - name: certs
           secret:
             secretName: {{ .Values.webhookSecretName }}
+            defaultMode: 0400
+        - name: tmp
+          emptyDir: {}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range .Values.topologySpreadConstraints }}
+        - maxSkew: {{ .maxSkew }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "smart-scheduler.selectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
