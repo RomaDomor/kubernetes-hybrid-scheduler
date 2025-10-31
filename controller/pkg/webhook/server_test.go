@@ -25,13 +25,27 @@ import (
 type fakeTel struct{}
 
 func (f *fakeTel) GetLocalState(_ context.Context) (*telemetry.LocalState, error) {
-	return &telemetry.LocalState{PendingPodsPerClass: map[string]int{}}, nil
+	return &telemetry.LocalState{
+		PendingPodsPerClass: map[string]int{},
+		TotalDemand:         map[string]telemetry.DemandByClass{},
+		TotalAllocatableCPU: 1000,
+		TotalAllocatableMem: 1000,
+		FreeCPU:             1000,
+		FreeMem:             1000,
+	}, nil
 }
 func (f *fakeTel) GetWANState(_ context.Context) (*telemetry.WANState, error) {
 	return &telemetry.WANState{RTTMs: 10}, nil
 }
 func (f *fakeTel) GetCachedLocalState() *telemetry.LocalState {
-	return &telemetry.LocalState{PendingPodsPerClass: map[string]int{}}
+	return &telemetry.LocalState{
+		PendingPodsPerClass: map[string]int{},
+		TotalDemand:         map[string]telemetry.DemandByClass{},
+		TotalAllocatableCPU: 1000,
+		TotalAllocatableMem: 1000,
+		FreeCPU:             1000,
+		FreeMem:             1000,
+	}
 }
 func (f *fakeTel) GetCachedWANState() *telemetry.WANState { return &telemetry.WANState{RTTMs: 10} }
 func (f *fakeTel) UpdateMetrics()                         {}
@@ -42,6 +56,9 @@ type fakeEngine struct{ res decision.Result }
 
 func (f *fakeEngine) Decide(_ *corev1.Pod, _ *slo.SLO, _ *telemetry.LocalState, _ *telemetry.WANState) decision.Result {
 	return f.res
+}
+func (f *fakeEngine) GetLyapunovScheduler() *decision.LyapunovScheduler {
+	return decision.NewLyapunovScheduler(1.0)
 }
 
 func TestWebhook_ManagedPodPatched(t *testing.T) {

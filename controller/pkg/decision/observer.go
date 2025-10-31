@@ -24,17 +24,20 @@ type PodObserver struct {
 	kubeClient  kubernetes.Interface
 	store       *ProfileStore
 	podInformer cache.SharedIndexInformer
+	lyapunov    *LyapunovScheduler
 }
 
 func NewPodObserver(
 	kubeClient kubernetes.Interface,
 	profileStore *ProfileStore,
 	podInf coreinformers.PodInformer,
+	lyapunov *LyapunovScheduler,
 ) *PodObserver {
 	return &PodObserver{
 		kubeClient:  kubeClient,
 		store:       profileStore,
 		podInformer: podInf.Informer(),
+		lyapunov:    lyapunov,
 	}
 }
 
@@ -84,7 +87,6 @@ func (o *PodObserver) recordStart(pod *corev1.Pod) {
 
 	queueWait := startTime.Sub(decisionTime).Milliseconds()
 
-	// Use constants
 	o.annotate(pod, constants.AnnotationActualStart, startTime.Format(time.RFC3339))
 	o.annotate(pod, constants.AnnotationQueueWait, fmt.Sprintf("%d", queueWait))
 
@@ -117,6 +119,13 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 		sloMet = totalTime <= deadlineMs
 	}
 
+	// Get SLO class
+	class := pod.Annotations[constants.AnnotationSLOClass]
+	if class == "" {
+		class = constants.DefaultSLOClass
+	}
+
+	// Update profile store
 	key := GetProfileKey(pod, decision)
 	o.store.Update(key, ProfileUpdate{
 		ObservedDurationMs: float64(actualDuration),
@@ -127,8 +136,18 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	predErr := math.Abs(float64(actualDuration) - predictedETA)
 	recordPredictionError(key, predErr)
 
-	klog.V(3).Infof("%s: Observed pod completion: actual=%dms predicted=%.0fms slo=%v",
-		podID, actualDuration, predictedETA, sloMet)
+	// Update Lyapunov virtual queue
+	if o.lyapunov != nil && deadlineMs > 0 {
+		o.lyapunov.UpdateVirtualQueue(
+			class,
+			deadlineMs,
+			totalTime,
+			decision,
+		)
+	}
+
+	klog.V(3).Infof("%s: Observed pod completion: actual=%dms predicted=%.0fms slo=%v class=%s",
+		podID, actualDuration, predictedETA, sloMet, class)
 }
 
 func (o *PodObserver) annotate(pod *corev1.Pod, key, value string) {

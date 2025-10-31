@@ -69,6 +69,14 @@ config:
   # -- Edge pending pods resource pessimism
   edgePendingPessimismPct: "10"
 
+  # -- Lyapunov optimization parameters
+  # -- Cost-performance tradeoff (0.5-2.0 recommended)
+  lyapunovBeta: "1.0"
+  # --  Relative cost of cloud scheduling
+  cloudCostFactor: "1.0"
+  # -- Relative cost of edge scheduling (0 = prefer edge)
+  edgeCostFactor: "0.0"
+
   # -- Histogram configuration
   histBoundsMode: "explicit"
   histBounds: "50,100,200,500,1000,2000,5000,10000,20000,30000,60000,120000,180000,300000,450000,600000,900000,1200000,1500000,1800000"

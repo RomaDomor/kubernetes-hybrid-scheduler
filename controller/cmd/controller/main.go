@@ -34,6 +34,11 @@ var (
 	config        decision.EngineConfig
 	hcfg          decision.HistogramConfig
 
+	// Lyapunov configuration
+	lyapunovBeta    float64
+	cloudCostFactor float64
+	edgeCostFactor  float64
+
 	// Helper for histogram bounds mode
 	histBoundsModeStr string
 	histBoundsCSV     string
@@ -70,6 +75,14 @@ func main() {
 		util.GetEnvFloat("EDGE_HEADROOM_OVERRIDE_PCT", 0.1), "Edge headroom override % (0-1)")
 	flag.IntVar(&config.EdgePendingPessimismPct, "edge-pending-pessimism-pct",
 		util.GetEnvInt("EDGE_PENDING_PESSIMISM_PCT", 10), "Edge pending pod pessimism factor % (0-100)")
+
+	// Lyapunov configuration
+	flag.Float64Var(&lyapunovBeta, "lyapunov-beta",
+		util.GetEnvFloat("LYAPUNOV_BETA", 1.0), "Lyapunov cost-performance tradeoff (0.5-2.0)")
+	flag.Float64Var(&cloudCostFactor, "cloud-cost-factor",
+		util.GetEnvFloat("CLOUD_COST_FACTOR", 1.0), "Relative cost of cloud scheduling")
+	flag.Float64Var(&edgeCostFactor, "edge-cost-factor",
+		util.GetEnvFloat("EDGE_COST_FACTOR", 0.0), "Relative cost of edge scheduling")
 
 	// Histogram config - parse directly into hcfg
 	flag.StringVar(&histBoundsModeStr, "hist-bounds-mode",
@@ -130,6 +143,9 @@ func main() {
 	klog.Infof("Histogram config: mode=%s includeInf=%v ingestCap=%.0fms minSamples=%d decay=%s",
 		hcfg.Mode, hcfg.IncludeInf, hcfg.IngestCapMs, hcfg.MinSampleCount, hcfg.DecayInterval)
 
+	klog.Infof("Lyapunov config: beta=%.2f cloudCost=%.2f edgeCost=%.2f",
+		lyapunovBeta, cloudCostFactor, edgeCostFactor)
+
 	stopCh := signals.SetupSignalHandler()
 
 	// Initialize Kubernetes clients
@@ -175,8 +191,32 @@ func main() {
 		klog.Warningf("Failed to load profiles from CRD (using defaults): %v", err)
 	}
 
-	// PodObserver runs as separate goroutine with its own rate limiting
-	podObserver := decision.NewPodObserver(kubeClient, profileStore, podInformer)
+	// Initialize Lyapunov scheduler
+	lyapunovScheduler := decision.NewLyapunovScheduler(lyapunovBeta)
+
+	// Set target violation rates per class
+	lyapunovScheduler.SetTargetViolationRate("latency", 0.05)
+	lyapunovScheduler.SetTargetViolationRate("interactive", 0.05)
+	lyapunovScheduler.SetTargetViolationRate("throughput", 0.10)
+	lyapunovScheduler.SetTargetViolationRate("streaming", 0.10)
+	lyapunovScheduler.SetTargetViolationRate("batch", 0.20)
+
+	klog.Info("Lyapunov scheduler initialized with target violation rates")
+
+	// Create decision engine with Lyapunov
+	config.ProfileStore = profileStore
+	config.LyapunovScheduler = lyapunovScheduler
+	config.CloudCostFactor = cloudCostFactor
+	config.EdgeCostFactor = edgeCostFactor
+	decisionEngine := decision.NewEngine(config)
+
+	// PodObserver
+	podObserver := decision.NewPodObserver(
+		kubeClient,
+		profileStore,
+		podInformer,
+		lyapunovScheduler,
+	)
 	go podObserver.Watch(stopCh)
 
 	// Auto-save profiles periodically
@@ -191,15 +231,12 @@ func main() {
 			case <-ticker.C:
 				profileStore.UpdateMetrics()
 				telemetryCollector.UpdateMetrics()
+				decision.UpdateLyapunovMetrics(lyapunovScheduler)
 			case <-stopCh:
 				return
 			}
 		}
 	}()
-
-	// Create decision engine
-	config.ProfileStore = profileStore
-	decisionEngine := decision.NewEngine(config)
 
 	// Plain HTTP admin server for metrics and health
 	adminMux := http.NewServeMux()
@@ -211,6 +248,7 @@ func main() {
 	))
 	adminMux.HandleFunc("/debug/telemetry", debugTelemetryHandler(telemetryCollector))
 	adminMux.HandleFunc("/debug/profiles", debugProfilesHandler(profileStore))
+	adminMux.HandleFunc("/debug/lyapunov", debugLyapunovHandler(lyapunovScheduler))
 
 	adminSrv := &http.Server{
 		Addr:         ":8080",
@@ -219,7 +257,7 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 	}
 	go func() {
-		klog.Info("Starting admin server on :8080 (HTTP) for /metrics, /healthz, /readyz")
+		klog.Info("Starting admin server on :8080 (HTTP) for /metrics, /healthz, /readyz, /debug/*")
 		if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			klog.Fatalf("Admin server failed: %v", err)
 		}
@@ -352,5 +390,16 @@ func debugProfilesHandler(ps *decision.ProfileStore) http.HandlerFunc {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(profiles)
+	}
+}
+
+func debugLyapunovHandler(lyap *decision.LyapunovScheduler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		state := lyap.ExportState()
+
+		w.Header().Set("Content-Type", "application/json")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(state)
 	}
 }

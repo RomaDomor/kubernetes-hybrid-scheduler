@@ -56,6 +56,32 @@ var (
 		},
 		[]string{"class", "tier", "location"},
 	)
+
+	// Lyapunov metrics
+	lyapunovVirtualQueue = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scheduler_lyapunov_virtual_queue",
+			Help: "Current Lyapunov virtual queue length per class",
+		},
+		[]string{"class"},
+	)
+
+	lyapunovViolations = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scheduler_lyapunov_violations_total",
+			Help: "Total SLO violations per class and location",
+		},
+		[]string{"class", "location"},
+	)
+
+	lyapunovDecisionWeight = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "scheduler_lyapunov_decision_weight",
+			Help:    "Lyapunov drift-plus-penalty weight for decisions",
+			Buckets: []float64{0, 10, 50, 100, 250, 500, 1000, 2500, 5000},
+		},
+		[]string{"class", "location"},
+	)
 )
 
 func recordDecision(result Result, class string) {
@@ -64,6 +90,11 @@ func recordDecision(result Result, class string) {
 		result.Reason,
 		class,
 	).Inc()
+
+	lyapunovDecisionWeight.WithLabelValues(
+		class,
+		string(result.Location),
+	).Observe(result.LyapunovWeight)
 }
 
 func (ps *ProfileStore) UpdateMetrics() {
@@ -88,6 +119,22 @@ func (ps *ProfileStore) UpdateMetrics() {
 		profileCount.With(labels).Set(float64(profile.Count))
 		profileConfidence.With(labels).Set(profile.ConfidenceScore)
 		sloComplianceRate.With(labels).Set(profile.SLOComplianceRate)
+	}
+}
+
+// Update Lyapunov metrics
+func UpdateLyapunovMetrics(lyapunov *LyapunovScheduler) {
+	state := lyapunov.ExportState()
+
+	queues := state["virtual_queues"].(map[string]float64)
+	for class, qLen := range queues {
+		lyapunovVirtualQueue.WithLabelValues(class).Set(qLen)
+	}
+
+	stats := state["stats"].(map[string]*LyapunovStats)
+	for class, st := range stats {
+		lyapunovViolations.WithLabelValues(class, "edge").Add(float64(st.ViolationsEdge))
+		lyapunovViolations.WithLabelValues(class, "cloud").Add(float64(st.ViolationsCloud))
 	}
 }
 
