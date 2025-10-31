@@ -43,6 +43,13 @@ func (s *Server) buildPatchResponse(
 		})
 	}
 
+	if pod.Spec.Priority != nil {
+		patches = append(patches, map[string]interface{}{
+			"op":   "remove",
+			"path": "/spec/priority",
+		})
+	}
+
 	if res.Location == constants.Edge {
 		patches = append(patches, map[string]interface{}{
 			"op":    "add",
