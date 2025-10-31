@@ -1,0 +1,31 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: queued-edge-workload
+value: 1000
+globalDefault: false
+description: "Pods waiting in edge queue - protected from eviction"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: edge-preferred
+value: 800
+globalDefault: false
+description: "Pods scheduled to edge with immediate capacity"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: cloud-workload
+value: 100
+globalDefault: false
+description: "Pods running on cloud"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: edge-best-effort
+value: 50
+globalDefault: false
+description: "Best-effort edge scheduling"

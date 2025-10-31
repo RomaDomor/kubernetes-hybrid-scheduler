@@ -438,15 +438,13 @@ func (e *Engine) projectedEdgeFeasibility(
 		podClass, podTier, pendingCount,
 	)
 
-	// STEP 1: Calculate demand from ALL OTHER CLASSES (for permanent capacity check)
-	// All running pods occupy resources, regardless of priority tier
+	// STEP 1: Calculate demand from ALL OTHER CLASSES
 	var allOtherDemandCPU, allOtherDemandMem int64
 
 	for class, demand := range local.TotalDemand {
 		if class == podClass {
-			continue // Skip our own class
+			continue
 		}
-		// Include ALL other classes - they all consume resources now
 		allOtherDemandCPU += demand.CPU
 		allOtherDemandMem += demand.Mem
 	}
@@ -456,27 +454,39 @@ func (e *Engine) projectedEdgeFeasibility(
 		allOtherDemandCPU, allOtherDemandMem,
 	)
 
-	// STEP 2: Check if pod will EVER fit after queue drains
-	// (regardless of whether we wait for queue to drain)
+	// STEP 2: Check permanent capacity with HEADROOM for new arrivals
+	// Conservative: assume new pods will arrive and claim 15% of current free space
+	// This prevents race conditions where new pods fragment the space
 	if local.TotalAllocatableCPU == 0 {
 		klog.V(4).Infof("No allocatable CPU on edge, pod cannot fit")
 		return false, 0, "permanently_no_capacity_due_to_other_classes"
 	}
 
-	availableCPUAfterOthers := local.TotalAllocatableCPU - allOtherDemandCPU
-	availableMemAfterOthers := local.TotalAllocatableMem - allOtherDemandMem
+	// Apply headroom factor: new pods might arrive and consume resources
+	headroomFactor := 0.15 // Reserve 15% for incoming pods
+	conservativeAllocationCPU := int64(float64(allOtherDemandCPU) * (1.0 + headroomFactor))
+	conservativeAllocationMem := int64(float64(allOtherDemandMem) * (1.0 + headroomFactor))
+
+	// Cap at total allocatable
+	if conservativeAllocationCPU > local.TotalAllocatableCPU {
+		conservativeAllocationCPU = local.TotalAllocatableCPU
+	}
+	if conservativeAllocationMem > local.TotalAllocatableMem {
+		conservativeAllocationMem = local.TotalAllocatableMem
+	}
+
+	availableCPUWithHeadroom := local.TotalAllocatableCPU - conservativeAllocationCPU
+	availableMemWithHeadroom := local.TotalAllocatableMem - conservativeAllocationMem
 
 	klog.V(5).Infof(
-		"Capacity check: available after all others: CPU=%dm (need=%dm), MEM=%dMi (need=%dMi)",
-		availableCPUAfterOthers, reqCPU, availableMemAfterOthers, reqMem,
+		"Capacity with headroom (%.0f%% reserve): available CPU=%dm (need=%dm), MEM=%dMi (need=%dMi)",
+		headroomFactor*100, availableCPUWithHeadroom, reqCPU, availableMemWithHeadroom, reqMem,
 	)
 
-	if availableCPUAfterOthers < reqCPU || availableMemAfterOthers < reqMem {
-		// Other classes consume so much that pod will NEVER fit
+	if availableCPUWithHeadroom < reqCPU || availableMemWithHeadroom < reqMem {
 		klog.V(4).Infof(
-			"Pod will NEVER fit: need %dm/%dMi but only %dm/%dMi available (others take %dm/%dMi of %dm/%dMi total)",
-			reqCPU, reqMem, availableCPUAfterOthers, availableMemAfterOthers,
-			allOtherDemandCPU, allOtherDemandMem, local.TotalAllocatableCPU, local.TotalAllocatableMem,
+			"Pod will not fit (with headroom): need %dm/%dMi but only %dm/%dMi available",
+			reqCPU, reqMem, availableCPUWithHeadroom, availableMemWithHeadroom,
 		)
 		return false, 0, "permanently_no_capacity_due_to_other_classes"
 	}
@@ -487,9 +497,7 @@ func (e *Engine) projectedEdgeFeasibility(
 		return true, 0, "no_queue"
 	}
 
-	// STEP 4: Estimate queue drain time with contention from SAME/HIGHER priority classes
-	// Calculate demand from classes that will contend WITH us in the queue
-	// (higher or equal priority only)
+	// STEP 4: Estimate queue drain time
 	var contentingDemandCPU int64
 
 	for class, demand := range local.TotalDemand {
@@ -502,22 +510,18 @@ func (e *Engine) projectedEdgeFeasibility(
 		// Only higher/equal priority classes will slow us down in queue
 		if classTier <= podTier {
 			contentingDemandCPU += demand.CPU
-			klog.V(5).Infof(
-				"Class %s (tier=%d) contends with us (tier=%d): CPU=%dm",
-				class, classTier, podTier, demand.CPU,
-			)
 		}
 	}
 
 	edgeKey := GetProfileKey(pod, constants.Edge)
 	profile := e.config.ProfileStore.GetOrDefault(edgeKey)
 
-	// Parallelism: how many pods of our class can run concurrently?
+	// Parallelism calculation with headroom
 	parallelismAvailable := int64(1)
 	avgPodCPU := int64(200)
 
-	if availableCPUAfterOthers > avgPodCPU {
-		parallelismAvailable = availableCPUAfterOthers / avgPodCPU
+	if availableCPUWithHeadroom > avgPodCPU {
+		parallelismAvailable = availableCPUWithHeadroom / avgPodCPU
 		if parallelismAvailable > 8 {
 			parallelismAvailable = 8
 		}
@@ -525,10 +529,10 @@ func (e *Engine) projectedEdgeFeasibility(
 
 	klog.V(5).Infof(
 		"Parallelism for class=%s: available=%dm, avgPod=%dm => %d concurrent pods",
-		podClass, availableCPUAfterOthers, avgPodCPU, parallelismAvailable,
+		podClass, availableCPUWithHeadroom, avgPodCPU, parallelismAvailable,
 	)
 
-	// Slowdown from contending classes (same/higher priority)
+	// Slowdown calculation
 	rhoEff := float64(contentingDemandCPU) / float64(local.TotalAllocatableCPU)
 	if rhoEff > 0.99 {
 		rhoEff = 0.99
@@ -539,11 +543,6 @@ func (e *Engine) projectedEdgeFeasibility(
 		slowdownFactor = 1.0 / (1.0 - rhoEff)
 	}
 
-	klog.V(5).Infof(
-		"Slowdown from contending classes: rho=%.3f => slowdown=%.2fx",
-		rhoEff, slowdownFactor,
-	)
-
 	// Queue drain time
 	queueDrainMs = float64(pendingCount) * profile.MeanDurationMs * slowdownFactor / float64(parallelismAvailable)
 
@@ -552,7 +551,7 @@ func (e *Engine) projectedEdgeFeasibility(
 		pendingCount, profile.MeanDurationMs, slowdownFactor, parallelismAvailable, queueDrainMs,
 	)
 
-	// STEP 5: Check if pod will miss SLO even after queue drains
+	// STEP 5: Check SLO feasibility
 	totalTimeMs := queueDrainMs + (profile.P95DurationMs * slowdownFactor)
 	deadlineMs := float64(slo.DeadlineMs)
 
@@ -566,7 +565,7 @@ func (e *Engine) projectedEdgeFeasibility(
 		return false, queueDrainMs, "queue_miss_slo"
 	}
 
-	klog.V(4).Infof("Pod CAN fit after queue drain and will meet SLO")
+	klog.V(4).Infof("Pod CAN fit after queue drain (with headroom buffer)")
 	return true, queueDrainMs, "queue_feasible"
 }
 

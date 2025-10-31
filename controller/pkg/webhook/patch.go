@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	admissionv1 "k8s.io/api/admission/v1"
-	corev1 "k8s.io/api/core/v1"
-
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/util"
+
+	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func (s *Server) buildPatchResponse(
@@ -49,6 +49,16 @@ func (s *Server) buildPatchResponse(
 			"path":  "/spec/nodeSelector/" + util.EscapeJSONPointer(constants.NodeRoleLabelEdge),
 			"value": constants.LabelValueTrue,
 		})
+
+		// Assign appropriate PriorityClass based on decision reason
+		priorityClass := s.getPriorityClassForReason(res.Reason)
+		if priorityClass != "" {
+			patches = append(patches, map[string]interface{}{
+				"op":    "add",
+				"path":  "/spec/priorityClassName",
+				"value": priorityClass,
+			})
+		}
 	} else {
 		patches = append(patches,
 			map[string]interface{}{
@@ -58,7 +68,12 @@ func (s *Server) buildPatchResponse(
 			},
 		)
 
-		//patches = append(patches, s.addCloudTolerationSafe(pod))
+		// Cloud workloads get lower priority
+		patches = append(patches, map[string]interface{}{
+			"op":    "add",
+			"path":  "/spec/priorityClassName",
+			"value": "cloud-workload",
+		})
 	}
 
 	patchBytes, _ := json.Marshal(patches)
@@ -71,6 +86,27 @@ func (s *Server) buildPatchResponse(
 	}
 }
 
+// getPriorityClassForReason maps scheduling decision reasons to PriorityClasses
+func (s *Server) getPriorityClassForReason(reason string) string {
+	switch reason {
+	// High priority: queued pods protecting reserved space
+	case "edge_queue_preferred", "edge_queue_marginal":
+		return "queued-edge-workload"
+
+	// Medium priority: immediate edge scheduling
+	case "edge_feasible_only", "edge_preferred":
+		return "edge-preferred"
+
+	// Low priority: best effort
+	case "best_effort_edge":
+		return "edge-best-effort"
+
+	// No priority assignment for other reasons
+	default:
+		return ""
+	}
+}
+
 func addAnnotation(key, val string) map[string]interface{} {
 	return map[string]interface{}{
 		"op":    "add",
@@ -79,54 +115,6 @@ func addAnnotation(key, val string) map[string]interface{} {
 	}
 }
 
-//func (s *Server) addCloudTolerationSafe(pod *corev1.Pod) map[string]interface{} {
-//	targetTol := corev1.Toleration{
-//		Key:      "virtual-node.liqo.io/not-allowed",
-//		Operator: corev1.TolerationOpEqual,
-//		Value:    "true",
-//		Effect:   corev1.TaintEffectNoExecute,
-//	}
-//
-//	// Check if toleration already exists
-//	for _, tol := range pod.Spec.Tolerations {
-//		if tol.Key == targetTol.Key &&
-//			tol.Operator == targetTol.Operator &&
-//			tol.Value == targetTol.Value &&
-//			tol.Effect == targetTol.Effect {
-//			// Already exists, return no-op
-//			return map[string]interface{}{
-//				"op":   "test",
-//				"path": "/spec/tolerations",
-//			}
-//		}
-//	}
-//
-//	// Convert to map for JSON patch
-//	tolMap := map[string]string{
-//		"key":      targetTol.Key,
-//		"operator": string(targetTol.Operator),
-//		"value":    targetTol.Value,
-//		"effect":   string(targetTol.Effect),
-//	}
-//
-//	if len(pod.Spec.Tolerations) == 0 {
-//		// First toleration: replace entire array
-//		return map[string]interface{}{
-//			"op":    "add",
-//			"path":  "/spec/tolerations",
-//			"value": []map[string]string{tolMap},
-//		}
-//	}
-//
-//	// Append to existing
-//	return map[string]interface{}{
-//		"op":    "add",
-//		"path":  "/spec/tolerations/-",
-//		"value": tolMap,
-//	}
-//}
-
-// Test Helpers
 func (s *Server) BuildPatchResponseForTest(pod *corev1.Pod, res decision.Result) *admissionv1.AdmissionResponse {
 	return s.buildPatchResponse(pod, res)
 }
