@@ -59,8 +59,6 @@ def main():
     # --- Step 4: Capture Initial State & Run Interactive Benchmarks ---
     log("Capturing initial cluster state...")
     telemetry.get_nodes_info(v1, results_dir / "nodes.txt")
-    http_svc_url = f"http://http-latency.{ns_offloaded}/"
-    http_meas = telemetry.measure_http(v1, ns_local, results_dir, args, http_svc_url)
 
     # --- Step 5: Wait for Batch Jobs ---
     orchestration.wait_for_all_jobs(batch_v1, v1, ns_offloaded, ns_local, results_dir, args)
@@ -70,10 +68,8 @@ def main():
     telemetry.get_pod_node_map(v1, ns_offloaded, results_dir / "pod_node_map.csv")
     telemetry.get_events(v1, ns_offloaded, results_dir / "events.json")
     job_meas = telemetry.measure_jobs_via_api(batch_v1, ns_offloaded,
-                                              ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job"])
-    job_meas_local = telemetry.measure_jobs_via_api(batch_v1, ns_local, ["stream-data-generator"])
-    stream_meas = telemetry.measure_stream(apps_v1, ns_offloaded, results_dir)
-    measures = {**http_meas, **stream_meas, **job_meas, **job_meas_local}
+                                              ["http-latency-job", "stream-batch-job", "cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job"])
+    measures = {**job_meas}
     (results_dir / "measures.json").write_text(json.dumps(measures, indent=2))
 
     # --- Step 7: Evaluate SLOs ---

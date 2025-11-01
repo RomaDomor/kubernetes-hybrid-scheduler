@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: http-latency-job
+  labels:
+    app: http-latency-job
+  annotations:
+    # This is a throughput-oriented task with a tight deadline
+    slo.hybrid.io/class: "throughput"
+    slo.hybrid.io/deadlineMs: "45000" # 45 seconds to complete the whole test
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: http-latency-job
+        scheduling.hybrid.io/managed: "true"
+      annotations:
+        slo.hybrid.io/class: "throughput"
+        slo.hybrid.io/deadlineMs: "45000"
+    spec:
+      restartPolicy: Never
+      containers:
+        # 1. A simple web server to generate load against
+        - name: webserver
+          image: python:3.11-slim
+          ports:
+            - containerPort: 8080
+          command: ["python", "-m", "http.server", "8080"]
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+        # 2. The load generator that defines the job's execution time
+        - name: load-generator
+          image: williamyeh/hey:latest # The same image from your toolbox
+          # This command runs a 30-second load test. The job completes when hey finishes.
+          command:
+            - "/hey"
+            - "-z"
+            - "30s" # Duration of the test
+            - "-q"
+            - "50"  # QPS
+            - "-c"
+            - "25"  # Concurrency
+            - "http://localhost:8080"
+          resources:
+            requests:
+              cpu: "400m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "256Mi"
