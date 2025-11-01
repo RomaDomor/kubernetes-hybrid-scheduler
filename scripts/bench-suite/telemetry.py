@@ -9,46 +9,58 @@ from kubernetes.client import ApiException
 from utils import log
 
 
-def collect_controller_metrics(v1: client.CoreV1Api, results_dir: Path, controller_ns: str, service_name: str,
-                               metrics_port: str, pod_label: str):
+def collect_controller_metrics(
+        v1: client.CoreV1Api,
+        results_dir: Path,
+        controller_ns: str,
+        service_name: str,
+        metrics_port: str,
+        pod_label: str,
+):
     """
-    Finds the controller service and scrapes its /metrics endpoint via the K8s API proxy.
+    Finds the controller service and scrapes its /metrics endpoint via
+    the K8s API proxy.
     Also checks if the backing pod is running as a sanity check.
     """
-    log(f"Attempting to collect metrics from service '{service_name}' in namespace '{controller_ns}'...")
+    log(f"Attempting to collect metrics from service '{service_name}' "
+        f"in namespace '{controller_ns}'...")
     try:
-        # Sanity Check: First, verify that a pod backing the service is actually running.
-        pods = v1.list_namespaced_pod(namespace=controller_ns, label_selector=pod_label).items
+        # Verify pod is running
+        pods = v1.list_namespaced_pod(
+            namespace=controller_ns, label_selector=pod_label
+        ).items
         running_pods = [p for p in pods if p.status.phase == "Running"]
 
         if not running_pods:
-            msg = f"Warning: No running controller pod found with label '{pod_label}' in namespace '{controller_ns}'. Cannot collect metrics."
+            msg = (f"Warning: No running controller pod found with label "
+                   f"'{pod_label}' in namespace '{controller_ns}'. "
+                   f"Cannot collect metrics.")
             log(msg)
             (results_dir / "controller_metrics.txt").write_text(f"ERROR: {msg}")
             return
 
-        log(f"Found {len(running_pods)} running pod(s) backing the service. Proceeding to scrape service.")
+        log(f"Found {len(running_pods)} running pod(s) backing the service.")
 
-        # Use the API proxy to connect to the SERVICE, not the pod.
-        # The API server will handle routing to a healthy pod.
+        # Connect to service proxy with port specification in the path
+        # Format: ":<port>/path" or just "/path" for default port
         metrics_text = v1.connect_get_namespaced_service_proxy_with_path(
             name=service_name,
             namespace=controller_ns,
-            path="metrics",
-            port=metrics_port  # The service port name or number
+            path=f":{metrics_port}/metrics"
         )
 
-        # Save the output to a file
         out_path = results_dir / "controller_metrics.txt"
         out_path.write_text(metrics_text)
         log(f"Successfully saved controller metrics to {out_path}")
 
     except ApiException as e:
-        error_msg = f"ERROR: Failed to connect to controller service '{service_name}': {e.reason} (Status: {e.status})"
+        error_msg = (f"ERROR: Failed to connect to controller service "
+                     f"'{service_name}': {e.reason} (Status: {e.status})")
         log(error_msg)
         (results_dir / "controller_metrics.txt").write_text(error_msg)
     except Exception as e:
-        error_msg = f"ERROR: An unexpected error occurred while collecting controller metrics: {e}"
+        error_msg = (f"ERROR: An unexpected error occurred while "
+                     f"collecting controller metrics: {e}")
         log(error_msg)
         (results_dir / "controller_metrics.txt").write_text(error_msg)
 
