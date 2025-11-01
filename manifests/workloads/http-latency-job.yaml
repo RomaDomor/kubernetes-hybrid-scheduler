@@ -9,6 +9,7 @@ metadata:
     slo.hybrid.io/class: "throughput"
     slo.hybrid.io/deadlineMs: "45000" # 45 seconds to complete the whole test
 spec:
+  activeDeadlineSeconds: 120
   backoffLimit: 0
   template:
     metadata:
@@ -20,32 +21,54 @@ spec:
         slo.hybrid.io/deadlineMs: "45000"
     spec:
       restartPolicy: Never
+      # 1. Define the shared volume for communication
+      volumes:
+        - name: lifecycle
+          emptyDir: {}
       containers:
-        # 1. A simple web server to generate load against
         - name: webserver
           image: python:3.11-slim
           ports:
             - containerPort: 8080
-          command: ["python", "-m", "http.server", "8080"]
+          # 2. Add a script to start the server and poll for the 'done' file
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              # Start the server in the background
+              python -m http.server 8080 &
+              SERVER_PID=$!
+              echo "Server started with PID $SERVER_PID"
+              
+              # Poll the shared volume until the 'done' file appears
+              while [ ! -f /lifecycle/done ]; do
+                sleep 1
+              done
+
+              echo "'done' file found. Shutting down server."
+              kill $SERVER_PID
+              wait $SERVER_PID 2>/dev/null || true
           resources:
             requests: { cpu: "50m", memory: "64Mi" }
-        # 2. The load generator that defines the job's execution time
+          # 3. Mount the shared volume
+          volumeMounts:
+            - name: lifecycle
+              mountPath: /lifecycle
+
         - name: load-generator
-          image: williamyeh/hey:latest # The same image from your toolbox
-          # This command runs a 30-second load test. The job completes when hey finishes.
-          command:
-            - "/hey"
-            - "-z"
-            - "30s" # Duration of the test
-            - "-q"
-            - "50"  # QPS
-            - "-c"
-            - "25"  # Concurrency
-            - "http://localhost:8080"
+          image: williamyeh/hey:latest
+          command: ["/bin/sh", "-c"]
+          # 4. The command now also creates the 'done' file upon completion
+          args:
+            - |
+              # Wait for the server to be available
+              sleep 2
+              /hey -z 30s -q 50 -c 25 http://localhost:8080
+              # Signal completion by creating the file
+              touch /lifecycle/done
           resources:
-            requests:
-              cpu: "400m"
-              memory: "128Mi"
-            limits:
-              cpu: "1"
-              memory: "256Mi"
+            requests: { cpu: "400m", memory: "128Mi" }
+          # 5. Mount the shared volume
+          volumeMounts:
+            - name: lifecycle
+              mountPath: /lifecycle
