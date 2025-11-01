@@ -16,14 +16,6 @@ var (
 		[]string{"location", "reason", "class"},
 	)
 
-	decisionLatency = promauto.NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "scheduler_decision_duration_seconds",
-			Help:    "Time spent making scheduling decisions",
-			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5},
-		},
-	)
-
 	profileCount = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "scheduler_profile_samples_total",
@@ -57,30 +49,49 @@ var (
 		[]string{"class", "tier", "location"},
 	)
 
-	// Lyapunov metrics
+	// Lyapunov metrics - magnitude queue
 	lyapunovVirtualQueue = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "scheduler_lyapunov_virtual_queue",
-			Help: "Current Lyapunov virtual queue length per class",
+			Name: "scheduler_virtual_queue",
+			Help: "Current Lyapunov magnitude virtual queue length per class",
 		},
 		[]string{"class"},
 	)
 
-	lyapunovViolations = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "scheduler_lyapunov_violations_total",
-			Help: "Total SLO violations per class and location",
+	// Lyapunov metrics - probability queue
+	lyapunovProbQueue = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scheduler_prob_queue",
+			Help: "Current Lyapunov probability virtual queue length per class",
 		},
-		[]string{"class", "location"},
+		[]string{"class"},
+	)
+
+	// Track violations by class and location for observability
+	lyapunovViolationRate = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scheduler_violation_rate",
+			Help: "Observed SLO violation rate per class (0-1)",
+		},
+		[]string{"class"},
 	)
 
 	lyapunovDecisionWeight = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "scheduler_lyapunov_decision_weight",
+			Name:    "scheduler_decision_weight",
 			Help:    "Lyapunov drift-plus-penalty weight for decisions",
 			Buckets: []float64{0, 10, 50, 100, 250, 500, 1000, 2500, 5000},
 		},
 		[]string{"class", "location"},
+	)
+
+	// Actual violation rate tracking
+	lyapunovActualViolationRate = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scheduler_actual_violation_rate",
+			Help: "Actual observed SLO violation rate per class (0-1)",
+		},
+		[]string{"class"},
 	)
 )
 
@@ -122,19 +133,27 @@ func (ps *ProfileStore) UpdateMetrics() {
 	}
 }
 
-// Update Lyapunov metrics
+// UpdateLyapunovMetrics updates Lyapunov-specific metrics
 func UpdateLyapunovMetrics(lyapunov *LyapunovScheduler) {
 	state := lyapunov.ExportState()
 
+	// Magnitude queues
 	queues := state["virtual_queues"].(map[string]float64)
 	for class, qLen := range queues {
 		lyapunovVirtualQueue.WithLabelValues(class).Set(qLen)
 	}
 
+	// Probability queues
+	probQueues := state["virtual_prob_queues"].(map[string]float64)
+	for class, qLen := range probQueues {
+		lyapunovProbQueue.WithLabelValues(class).Set(qLen)
+	}
+
+	// Stats including actual violation rates
 	stats := state["stats"].(map[string]*LyapunovStats)
 	for class, st := range stats {
-		lyapunovViolations.WithLabelValues(class, "edge").Add(float64(st.ViolationsEdge))
-		lyapunovViolations.WithLabelValues(class, "cloud").Add(float64(st.ViolationsCloud))
+		lyapunovActualViolationRate.WithLabelValues(class).Set(st.ActualViolationPct)
+		lyapunovViolationRate.WithLabelValues(class).Set(st.ActualViolationPct)
 	}
 }
 

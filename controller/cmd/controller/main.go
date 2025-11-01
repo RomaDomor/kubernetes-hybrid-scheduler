@@ -192,16 +192,55 @@ func main() {
 	}
 
 	// Initialize Lyapunov scheduler
-	lyapunovScheduler := decision.NewLyapunovScheduler(lyapunovBeta)
+	lyapunovScheduler := decision.NewLyapunovScheduler()
 
-	// Set target violation rates per class
-	lyapunovScheduler.SetTargetViolationRate("latency", 0.05)
-	lyapunovScheduler.SetTargetViolationRate("interactive", 0.05)
-	lyapunovScheduler.SetTargetViolationRate("throughput", 0.10)
-	lyapunovScheduler.SetTargetViolationRate("streaming", 0.10)
-	lyapunovScheduler.SetTargetViolationRate("batch", 0.20)
+	// Set per-class Lyapunov configuration
+	lyapunovScheduler.SetClassConfig("latency", &decision.ClassConfig{
+		Beta:                lyapunovBeta,
+		TargetViolationPct:  0.05, // 5% average slack
+		TargetViolationProb: 0.05, // 5% violation probability
+		DecayFactor:         0.95,
+		DecayInterval:       time.Hour,
+		ProbabilityWeight:   1.0,
+	})
 
-	klog.Info("Lyapunov scheduler initialized with target violation rates")
+	lyapunovScheduler.SetClassConfig("interactive", &decision.ClassConfig{
+		Beta:                lyapunovBeta,
+		TargetViolationPct:  0.05,
+		TargetViolationProb: 0.05,
+		DecayFactor:         0.95,
+		DecayInterval:       time.Hour,
+		ProbabilityWeight:   1.0,
+	})
+
+	lyapunovScheduler.SetClassConfig("throughput", &decision.ClassConfig{
+		Beta:                lyapunovBeta,
+		TargetViolationPct:  0.10,
+		TargetViolationProb: 0.10,
+		DecayFactor:         0.95,
+		DecayInterval:       time.Hour,
+		ProbabilityWeight:   0.8, // Slightly less sensitive to probability
+	})
+
+	lyapunovScheduler.SetClassConfig("streaming", &decision.ClassConfig{
+		Beta:                lyapunovBeta,
+		TargetViolationPct:  0.10,
+		TargetViolationProb: 0.10,
+		DecayFactor:         0.95,
+		DecayInterval:       time.Hour,
+		ProbabilityWeight:   0.8,
+	})
+
+	lyapunovScheduler.SetClassConfig("batch", &decision.ClassConfig{
+		Beta:                lyapunovBeta * 0.5, // More cost-sensitive for batch
+		TargetViolationPct:  0.20,
+		TargetViolationProb: 0.20,
+		DecayFactor:         0.90, // More aggressive decay
+		DecayInterval:       2 * time.Hour,
+		ProbabilityWeight:   0.5, // Less sensitive to probability
+	})
+
+	klog.Info("Lyapunov scheduler initialized with per-class configuration")
 
 	// Create decision engine with Lyapunov
 	config.ProfileStore = profileStore
@@ -347,7 +386,7 @@ func refreshTelemetryLoop(tel telemetry.Collector, stopCh <-chan struct{}) {
 	}
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }

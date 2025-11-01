@@ -31,7 +31,7 @@ func newEngine() *decision.Engine {
 	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
 
 	// Initialize Lyapunov scheduler
-	lyap := decision.NewLyapunovScheduler(1.0)
+	lyap := decision.NewLyapunovScheduler()
 	lyap.SetTargetViolationRate("latency", 0.05)
 	lyap.SetTargetViolationRate("interactive", 0.05)
 	lyap.SetTargetViolationRate("throughput", 0.10)

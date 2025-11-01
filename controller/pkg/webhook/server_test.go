@@ -58,7 +58,7 @@ func (f *fakeEngine) Decide(_ *corev1.Pod, _ *slo.SLO, _ *telemetry.LocalState, 
 	return f.res
 }
 func (f *fakeEngine) GetLyapunovScheduler() *decision.LyapunovScheduler {
-	return decision.NewLyapunovScheduler(1.0)
+	return decision.NewLyapunovScheduler()
 }
 
 func TestWebhook_ManagedPodPatched(t *testing.T) {

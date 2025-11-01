@@ -108,11 +108,12 @@ func (e *Engine) Decide(
 
 	klog.V(4).Infof(
 		"%s: Deciding (Lyapunov): req={cpu=%dm mem=%dMi} class=%s prio=%d deadline=%d offload=%v "+
-			"wan={rtt=%dms loss=%.1f%%} edge={free=%dm/%dMi alloc=%dm} Z=%.2f",
+			"wan={rtt=%dms loss=%.1f%%} edge={free=%dm/%dMi alloc=%dm} Z=%.2f Zp=%.2f",
 		podID, reqCPU, reqMem, slo.Class, slo.Priority, slo.DeadlineMs, slo.OffloadAllowed,
 		wan.RTTMs, wan.LossPct,
 		local.FreeCPU, local.FreeMem, local.TotalAllocatableCPU,
 		e.lyapunov.GetVirtualQueue(slo.Class),
+		e.lyapunov.GetVirtualProbQueue(slo.Class),
 	)
 
 	// Hard constraints
@@ -141,7 +142,7 @@ func (e *Engine) Decide(
 		cloudKey.String(), fmtProfile(cloudProfile))
 
 	// Predict completion times
-	edgeETA := e.predictEdgeETA(pod, edgeProfile, local, slo)
+	edgeETA := e.predictEdgeETA(edgeProfile, local, slo)
 	cloudETA := e.predictCloudETA(cloudProfile, wan)
 
 	klog.V(4).Infof("%s: Predicted ETA edge=%.0fms cloud=%.0fms (deadline=%dms)",
@@ -158,12 +159,14 @@ func (e *Engine) Decide(
 	localCost := e.config.EdgeCostFactor
 	cloudCost := e.config.CloudCostFactor
 
-	// Lyapunov decision
+	// Lyapunov decision with profiles for probability estimation
 	location, weight := e.lyapunov.Decide(
 		slo.Class,
 		deadline,
 		edgeETA,
 		cloudETA,
+		edgeProfile,
+		cloudProfile,
 		edgeFeasible,
 		cloudFeasible,
 		localCost,
@@ -186,20 +189,15 @@ func (e *Engine) Decide(
 	}
 
 	recordDecision(result, slo.Class)
-	klog.V(3).Infof("%s: Decision: %s (reason=%s, eta=%.0fms, weight=%.2f, Z=%.2f)",
+	klog.V(3).Infof("%s: Decision: %s (reason=%s, eta=%.0fms, weight=%.2f, Z=%.2f, Zp=%.2f)",
 		podID, result.Location, result.Reason, result.PredictedETAMs,
-		weight, e.lyapunov.GetVirtualQueue(slo.Class))
+		weight, e.lyapunov.GetVirtualQueue(slo.Class), e.lyapunov.GetVirtualProbQueue(slo.Class))
 
 	return result
 }
 
 // predictEdgeETA predicts completion time on edge using M/G/1 queueing model
-func (e *Engine) predictEdgeETA(
-	pod *corev1.Pod,
-	profile *ProfileStats,
-	local *telemetry.LocalState,
-	slo *slo.SLO,
-) float64 {
+func (e *Engine) predictEdgeETA(profile *ProfileStats, local *telemetry.LocalState, slo *slo.SLO) float64 {
 	// Base execution time (P95 for conservative estimate)
 	execTime := profile.P95DurationMs
 
@@ -311,11 +309,11 @@ func (e *Engine) determineReason(location constants.Location, edgeFeasible bool,
 		}
 		if edgeFeasible && cloudFeasible {
 			if edgeETA <= cloudETA {
-				return "lyapunov_edge_preferred"
+				return "edge_preferred"
 			}
-			return "lyapunov_edge_violation_control"
+			return "edge_violation_control"
 		}
-		return "lyapunov_edge_best_effort"
+		return "edge_best_effort"
 	}
 
 	// Cloud
@@ -324,16 +322,21 @@ func (e *Engine) determineReason(location constants.Location, edgeFeasible bool,
 	}
 	if cloudFeasible && edgeFeasible {
 		if cloudETA < edgeETA {
-			return "lyapunov_cloud_faster"
+			return "cloud_faster"
 		}
-		return "lyapunov_cloud_violation_control"
+		return "cloud_violation_control"
 	}
-	return "lyapunov_cloud_best_effort"
+	return "cloud_best_effort"
 }
 
 // GetLyapunovScheduler exposes the Lyapunov scheduler for observer updates
 func (e *Engine) GetLyapunovScheduler() *LyapunovScheduler {
 	return e.lyapunov
+}
+
+// GetProfileStore exposes the profile store for testing
+func (e *Engine) GetProfileStore() *ProfileStore {
+	return e.config.ProfileStore
 }
 
 func fmtProfile(p *ProfileStats) string {
