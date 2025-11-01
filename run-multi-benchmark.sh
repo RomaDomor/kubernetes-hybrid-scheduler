@@ -35,6 +35,7 @@ OPTIONS:
     -s, --sleep SECONDS             Sleep time between runs in seconds (default: 30)
     -t, --timeout SECONDS           Job timeout in seconds (default: 900)
     --pre-clean                     Run kubectl cleanup on namespaces before each combination
+    --no-controller-metrics         Disable collection of metrics from the scheduler controller.
     --dry-run                       Show what would be run without executing
     -h, --help                      Show this help message
 
@@ -62,6 +63,7 @@ JOB_TIMEOUT=900
 PRE_CLEAN="${DEFAULT_PRE_CLEAN}"
 DRY_RUN=false
 RUNS="${DEFAULT_RUNS}"
+COLLECT_CONTROLLER_METRICS=true
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -80,6 +82,7 @@ while [[ $# -gt 0 ]]; do
         -t|--timeout) JOB_TIMEOUT="$2"; shift 2 ;;
         --pre-clean) PRE_CLEAN=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --no-controller-metrics) COLLECT_CONTROLLER_METRICS=false; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option $1"; usage; exit 1 ;;
     esac
@@ -130,6 +133,7 @@ echo "Runs per combination:  ${RUNS}"
 echo "Sleep Between:         ${SLEEP_BETWEEN}s"
 echo "Job Timeout:           ${JOB_TIMEOUT}s"
 echo "Pre-Clean (pre-run):   ${PRE_CLEAN}"
+echo "Collect Ctrl Metrics:  ${COLLECT_CONTROLLER_METRICS}"
 echo "Dry Run:               ${DRY_RUN}"
 echo "========================================="
 
@@ -304,6 +308,10 @@ for wan_profile in "${PROFILES[@]}"; do
                 --local-load-profile "${local_load}"
                 --timeout-job-sec "${JOB_TIMEOUT}"
             )
+
+            if [[ "${COLLECT_CONTROLLER_METRICS}" == "false" ]]; then
+                cmd+=(--no-controller-metrics)
+            fi
 
             if [[ "${DRY_RUN}" == "true" ]]; then
                 echo "Would run: ${cmd[*]}"
