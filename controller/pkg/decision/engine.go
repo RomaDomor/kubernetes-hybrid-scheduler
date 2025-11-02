@@ -104,6 +104,13 @@ func (e *Engine) Decide(
 		threshold = 30 * time.Second
 	}
 
+	if wan.StaleDuration > 10*time.Minute {
+		klog.Errorf("%s: WAN telemetry stale >10min, disabling cloud", podID)
+		result := Result{constants.Edge, "wan_circuit_breaker", 0, 999, 0}
+		recordDecision(result, slo.Class)
+		return result
+	}
+
 	if local.StaleDuration > threshold {
 		klog.Errorf("%s: Local telemetry stale >%v for class %s, forcing cloud",
 			podID, threshold, slo.Class)
@@ -118,13 +125,6 @@ func (e *Engine) Decide(
 		klog.Warningf("%s: Low measurement confidence (%.2f), using conservative decision",
 			podID, local.MeasurementConfidence)
 		result := Result{constants.Cloud, "low_measurement_confidence", 0, wan.RTTMs, 0}
-		recordDecision(result, slo.Class)
-		return result
-	}
-
-	if wan.StaleDuration > 10*time.Minute {
-		klog.Errorf("%s: WAN telemetry stale >10min, disabling cloud", podID)
-		result := Result{constants.Edge, "wan_circuit_breaker", 0, 999, 0}
 		recordDecision(result, slo.Class)
 		return result
 	}
