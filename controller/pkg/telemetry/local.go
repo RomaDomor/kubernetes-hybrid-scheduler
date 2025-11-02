@@ -8,7 +8,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -31,6 +30,15 @@ var (
 		Name: "scheduler_local_stale_seconds",
 		Help: "Seconds since last successful local telemetry refresh",
 	})
+	localComputeDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "scheduler_local_compute_duration_seconds",
+		Help:    "Time to compute local state",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0},
+	})
+	localIncompleteSnapshots = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "scheduler_local_incomplete_snapshots_total",
+		Help: "Number of incomplete local state snapshots due to timeout",
+	})
 )
 
 type LocalCollector struct {
@@ -41,11 +49,19 @@ type LocalCollector struct {
 	nodeLister       corelisters.NodeLister
 	podIndexer       cache.Indexer
 	pessimismPctEdge int64
+	decisionMu       sync.Mutex
 
-	decisionMu sync.Mutex
+	nodeCache      map[string]*nodeSnapshot
+	nodeCacheMu    sync.RWMutex
+	lastFullUpdate time.Time
 }
 
-// DemandByClass tracks resource demand per SLO class
+type nodeSnapshot struct {
+	allocatableCPU int64
+	allocatableMem int64
+	lastSeen       time.Time
+}
+
 type DemandByClass struct {
 	CPU int64
 	Mem int64
@@ -79,54 +95,145 @@ func NewLocalCollector(
 		return nil
 	}
 
-	return &LocalCollector{
+	lc := &LocalCollector{
 		kubeClient:       kube,
 		cache:            &LocalState{PendingPodsPerClass: make(map[string]int), TotalDemand: make(map[string]DemandByClass)},
 		podLister:        podInformer.Lister(),
 		nodeLister:       nodeInformer.Lister(),
 		podIndexer:       podInformer.Informer().GetIndexer(),
 		pessimismPctEdge: pessimismPctEdge,
+		nodeCache:        make(map[string]*nodeSnapshot),
+		lastFullUpdate:   time.Now(),
+	}
+
+	// Register event handlers for incremental updates
+	_, err = podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { lc.triggerIncremental() },
+		UpdateFunc: func(old, new interface{}) { lc.triggerIncremental() },
+		DeleteFunc: func(obj interface{}) { lc.triggerIncremental() },
+	})
+	if err != nil {
+		klog.Errorf("Failed to add event handler for podInformer: %v", err)
+		return nil
+	}
+
+	_, err = nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { lc.updateNodeCache(obj.(*corev1.Node)) },
+		UpdateFunc: func(old, new interface{}) { lc.updateNodeCache(new.(*corev1.Node)) },
+		DeleteFunc: func(obj interface{}) { lc.removeNodeCache(obj.(*corev1.Node).Name) },
+	})
+	if err != nil {
+		klog.Errorf("Failed to add event handler for nodeInformer: %v", err)
+		return nil
+	}
+
+	return lc
+}
+
+func (l *LocalCollector) triggerIncremental() {
+	// Debounced: actual update happens in background loop
+}
+
+func (l *LocalCollector) updateNodeCache(node *corev1.Node) {
+	if node.Labels[constants.NodeRoleLabelEdge] != constants.LabelValueTrue {
+		return
+	}
+
+	l.nodeCacheMu.Lock()
+	defer l.nodeCacheMu.Unlock()
+
+	l.nodeCache[node.Name] = &nodeSnapshot{
+		allocatableCPU: node.Status.Allocatable.Cpu().MilliValue(),
+		allocatableMem: node.Status.Allocatable.Memory().Value() / (1024 * 1024),
+		lastSeen:       time.Now(),
 	}
 }
 
+func (l *LocalCollector) removeNodeCache(nodeName string) {
+	l.nodeCacheMu.Lock()
+	defer l.nodeCacheMu.Unlock()
+	delete(l.nodeCache, nodeName)
+}
+
+// GetLocalState computes state with timeout awareness
 func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error) {
-	edgeSelector := labels.SelectorFromSet(labels.Set{constants.NodeRoleLabelEdge: constants.LabelValueTrue})
-	nodes, err := l.nodeLister.List(edgeSelector)
-	if err != nil {
-		return l.cache, err
+	start := time.Now()
+	defer func() {
+		localComputeDuration.Observe(time.Since(start).Seconds())
+	}()
+
+	// Fast path: use node cache
+	l.nodeCacheMu.RLock()
+	nodeSnapshots := make(map[string]*nodeSnapshot, len(l.nodeCache))
+	for k, v := range l.nodeCache {
+		nodeSnapshots[k] = v
 	}
-	if len(nodes) == 0 {
-		// No edge nodes: return a pessimistic snapshot
+	l.nodeCacheMu.RUnlock()
+
+	if len(nodeSnapshots) == 0 {
 		st := &LocalState{
-			FreeCPU:             0,
-			FreeMem:             0,
-			PendingPodsPerClass: make(map[string]int),
-			TotalDemand:         make(map[string]DemandByClass),
-			TotalAllocatableCPU: 0,
-			TotalAllocatableMem: 0,
-			Timestamp:           time.Now(),
-			BestEdgeNode:        BestNode{},
+			FreeCPU:               0,
+			FreeMem:               0,
+			PendingPodsPerClass:   make(map[string]int),
+			TotalDemand:           make(map[string]DemandByClass),
+			TotalAllocatableCPU:   0,
+			TotalAllocatableMem:   0,
+			Timestamp:             time.Now(),
+			BestEdgeNode:          BestNode{},
+			IsCompleteSnapshot:    true,
+			MeasurementConfidence: 1.0,
 		}
 		l.setCache(st)
 		return st, nil
 	}
 
-	edgeNodes := make(map[string]*corev1.Node, len(nodes))
+	// Compute with context deadline awareness
+	resultCh := make(chan *LocalState, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		state, err := l.computeState(nodeSnapshots)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- state
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Timeout: return stale cache with low confidence
+		klog.V(3).Infof("GetLocalState timed out, returning stale cache")
+		localIncompleteSnapshots.Inc()
+
+		cached := l.GetCachedLocalState()
+		cached.IsCompleteSnapshot = false
+		cached.MeasurementConfidence = 0.3 // Low confidence
+		return cached, nil
+
+	case err := <-errCh:
+		return l.cache, err
+
+	case state := <-resultCh:
+		state.IsCompleteSnapshot = true
+		state.MeasurementConfidence = 1.0
+		l.setCache(state)
+		return state, nil
+	}
+}
+
+func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*LocalState, error) {
 	var totalAllocCPU, totalAllocMem int64
-	for _, n := range nodes {
-		edgeNodes[n.Name] = n
-		totalAllocCPU += n.Status.Allocatable.Cpu().MilliValue()
-		totalAllocMem += n.Status.Allocatable.Memory().Value() / (1024 * 1024)
+	edgeNodes := make(map[string]bool, len(nodeSnapshots))
+
+	for nodeName, snap := range nodeSnapshots {
+		edgeNodes[nodeName] = true
+		totalAllocCPU += snap.allocatableCPU
+		totalAllocMem += snap.allocatableMem
 	}
 
-	edgeManagedObjs, err := l.podIndexer.ByIndex("edgeManaged", constants.LabelValueTrue)
-	if err != nil {
-		klog.V(4).Infof("Index lookup failed, falling back to full list: %v", err)
-		edgeManagedObjs = []interface{}{}
-	}
-
-	// Also get all pods bound to edge nodes (may not be in edgeManaged index)
-	allEdgeBoundPods := make([]*corev1.Pod, 0, len(edgeManagedObjs)+100)
+	// Fast pod lookup by index
+	allEdgeBoundPods := make([]*corev1.Pod, 0, 100)
 	for nodeName := range edgeNodes {
 		nodePodsObjs, err := l.podIndexer.ByIndex("nodeName", nodeName)
 		if err != nil {
@@ -141,7 +248,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		}
 	}
 
-	// Merge edgeManaged pods (for pending pressure calculation)
+	edgeManagedObjs, _ := l.podIndexer.ByIndex("edgeManaged", constants.LabelValueTrue)
 	edgeManagedPods := make([]*corev1.Pod, 0, len(edgeManagedObjs))
 	for _, obj := range edgeManagedObjs {
 		pod := obj.(*corev1.Pod)
@@ -150,7 +257,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		}
 	}
 
-	// Combine for processing (deduplicate by UID)
+	// Deduplicate
 	podsMap := make(map[string]*corev1.Pod, len(allEdgeBoundPods)+len(edgeManagedPods))
 	for _, p := range allEdgeBoundPods {
 		podsMap[string(p.UID)] = p
@@ -159,19 +266,17 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		podsMap[string(p.UID)] = p
 	}
 
-	// Convert back to slice for compatibility with existing logic
 	pods := make([]*corev1.Pod, 0, len(podsMap))
 	for _, p := range podsMap {
 		pods = append(pods, p)
 	}
 
-	// Index pods by node and precompute per-pod requests
+	// Precompute pod requests
 	type podReq struct{ cpuM, memMi int64 }
 	podReqCache := make(map[*corev1.Pod]podReq, len(pods))
 	podsByNode := make(map[string][]*corev1.Pod, len(edgeNodes))
 
 	for _, p := range pods {
-		// Precompute aggregate requests
 		var cpuM, memMi int64
 		for _, c := range p.Spec.Containers {
 			req := c.Resources.Requests
@@ -180,22 +285,17 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		}
 		podReqCache[p] = podReq{cpuM: cpuM, memMi: memMi}
 
-		// Index only edge-resident pods by node
-		if _, isEdge := edgeNodes[p.Spec.NodeName]; isEdge {
+		if edgeNodes[p.Spec.NodeName] {
 			podsByNode[p.Spec.NodeName] = append(podsByNode[p.Spec.NodeName], p)
 		}
 	}
 
-	// Compute best edge node free (per-node requests-based accounting)
-	// and simultaneously accumulate cluster-wide free as sum of per-node free.
+	// Compute per-node free resources
 	var bestName string
 	var bestFreeCPU, bestFreeMemMi int64
 	var sumFreeCPU, sumFreeMemMi int64
 
-	for nodeName, nodeObj := range edgeNodes {
-		allocCPU := nodeObj.Status.Allocatable.Cpu().MilliValue()
-		allocMemMi := nodeObj.Status.Allocatable.Memory().Value() / (1024 * 1024)
-
+	for nodeName, snap := range nodeSnapshots {
 		var resCPU, resMemMi int64
 		for _, p := range podsByNode[nodeName] {
 			pr := podReqCache[p]
@@ -203,13 +303,12 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 			resMemMi += pr.memMi
 		}
 
-		freeCPU := allocCPU - resCPU
-		freeMemMi := allocMemMi - resMemMi
+		freeCPU := snap.allocatableCPU - resCPU
+		freeMemMi := snap.allocatableMem - resMemMi
 
 		sumFreeCPU += freeCPU
 		sumFreeMemMi += freeMemMi
 
-		// Track the most-free node by CPU (primary), mem as tie-breaker
 		if freeCPU > bestFreeCPU || (freeCPU == bestFreeCPU && freeMemMi > bestFreeMemMi) {
 			bestFreeCPU = freeCPU
 			bestFreeMemMi = freeMemMi
@@ -217,15 +316,12 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		}
 	}
 
-	// Pending pressure and managed per-class counts
+	// Pending pressure
 	var pendingCPU, pendingMemMi int64
 	pendingPerClass := make(map[string]int, 8)
-
-	// Track total demand per class (running + pending)
 	totalDemand := make(map[string]DemandByClass, 8)
 
 	for _, p := range pods {
-		// Per-class count (for queue model)
 		if p.Labels[constants.LabelManaged] == constants.LabelValueTrue &&
 			p.Status.Phase == corev1.PodPending && p.Spec.NodeName == "" {
 			if class := p.Annotations[constants.AnnotationSLOClass]; class != "" {
@@ -233,8 +329,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 			}
 		}
 
-		// Track total demand (running + pending + bound-but-not-ready)
-		boundToEdge := p.Spec.NodeName != "" && edgeNodes[p.Spec.NodeName] != nil
+		boundToEdge := p.Spec.NodeName != "" && edgeNodes[p.Spec.NodeName]
 		unboundEdgeIntended := p.Spec.NodeName == "" && wantsEdge(p)
 
 		if boundToEdge || unboundEdgeIntended {
@@ -249,10 +344,8 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 			demand.Mem += pr.memMi
 			totalDemand[class] = demand
 
-			// Pending pressure calculation (same as before)
 			consume := p.Status.Phase != corev1.PodRunning
 			if !consume {
-				// Running: consume if any container not ready
 				allReady := true
 				for _, cs := range p.Status.ContainerStatuses {
 					if !cs.Ready {
@@ -269,7 +362,6 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 			cpuM := pr.cpuM
 			memMi := pr.memMi
 			if unboundEdgeIntended && l.pessimismPctEdge > 0 {
-				// add small pessimism for unbound edge-intended pods
 				cpuM += (cpuM * l.pessimismPctEdge) / 100
 				memMi += (memMi * l.pessimismPctEdge) / 100
 			}
@@ -278,7 +370,6 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		}
 	}
 
-	// Cluster free as sum of per-node free, then subtract pending pressure once.
 	freeCPU := sumFreeCPU - pendingCPU
 	if freeCPU < 0 {
 		freeCPU = 0
@@ -288,7 +379,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		freeMemMi = 0
 	}
 
-	st := &LocalState{
+	return &LocalState{
 		FreeCPU:             freeCPU,
 		FreeMem:             freeMemMi,
 		PendingPodsPerClass: pendingPerClass,
@@ -299,10 +390,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		BestEdgeNode:        BestNode{Name: bestName, FreeCPU: bestFreeCPU, FreeMem: bestFreeMemMi},
 		IsStale:             false,
 		StaleDuration:       0,
-	}
-
-	l.setCache(st)
-	return st, nil
+	}, nil
 }
 
 func (l *LocalCollector) GetCachedLocalState() *LocalState {
@@ -310,15 +398,30 @@ func (l *LocalCollector) GetCachedLocalState() *LocalState {
 	defer l.cacheMu.RUnlock()
 
 	if l.cache == nil {
-		return &LocalState{PendingPodsPerClass: make(map[string]int), TotalDemand: make(map[string]DemandByClass), IsStale: true}
+		return &LocalState{
+			PendingPodsPerClass:   make(map[string]int),
+			TotalDemand:           make(map[string]DemandByClass),
+			IsStale:               true,
+			IsCompleteSnapshot:    false,
+			MeasurementConfidence: 0.0,
+		}
 	}
 
 	staleDuration := time.Since(l.cache.Timestamp)
 	isStale := staleDuration > 20*time.Second
 
+	// Compute confidence based on age
+	confidence := l.cache.MeasurementConfidence
+	if staleDuration > 30*time.Second {
+		confidence = 0.0
+	} else if staleDuration > 10*time.Second {
+		confidence *= 1.0 - staleDuration.Seconds()/30.0
+	}
+
 	state := *l.cache
 	state.IsStale = isStale
 	state.StaleDuration = staleDuration
+	state.MeasurementConfidence = confidence
 
 	return &state
 }
@@ -336,8 +439,6 @@ func (l *LocalCollector) setCache(state *LocalState) {
 	l.cacheMu.Unlock()
 }
 
-// wantsEdge returns true if the pod explicitly targets edge via
-// nodeSelector node.role/edge=true or required nodeAffinity.
 func wantsEdge(pod *corev1.Pod) bool {
 	if pod.Spec.NodeSelector != nil {
 		if v, ok := pod.Spec.NodeSelector[constants.NodeRoleLabelEdge]; ok && v == constants.LabelValueTrue {
@@ -370,13 +471,8 @@ func wantsEdge(pod *corev1.Pod) bool {
 	return false
 }
 
-func (l *LocalCollector) LockForDecision() {
-	l.decisionMu.Lock()
-}
-
-func (l *LocalCollector) UnlockForDecision() {
-	l.decisionMu.Unlock()
-}
+func (l *LocalCollector) LockForDecision()   { l.decisionMu.Lock() }
+func (l *LocalCollector) UnlockForDecision() { l.decisionMu.Unlock() }
 
 type LocalCollectorForTest struct {
 	Cache *LocalState

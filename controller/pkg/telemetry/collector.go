@@ -17,16 +17,18 @@ type Collector interface {
 }
 
 type LocalState struct {
-	FreeCPU             int64
-	FreeMem             int64
-	PendingPodsPerClass map[string]int
-	TotalDemand         map[string]DemandByClass
-	TotalAllocatableCPU int64
-	TotalAllocatableMem int64
-	Timestamp           time.Time
-	BestEdgeNode        BestNode
-	IsStale             bool
-	StaleDuration       time.Duration
+	FreeCPU               int64
+	FreeMem               int64
+	PendingPodsPerClass   map[string]int
+	TotalDemand           map[string]DemandByClass
+	TotalAllocatableCPU   int64
+	TotalAllocatableMem   int64
+	Timestamp             time.Time
+	BestEdgeNode          BestNode
+	IsStale               bool
+	StaleDuration         time.Duration
+	IsCompleteSnapshot    bool
+	MeasurementConfidence float64
 }
 
 type BestNode struct {

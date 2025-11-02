@@ -128,17 +128,31 @@ func (s *Server) processScheduling(
 		return allow()
 	}
 
-	// CRITICAL SECTION START: Lock before reading telemetry
+	// Lock before reading telemetry
 	s.tel.LockForDecision()
 	defer s.tel.UnlockForDecision()
 
-	// Try a quick refresh (non-blocking if it fails)
-	ctx2, cancel2 := context.WithTimeout(ctx, 300*time.Millisecond)
-	_, _ = s.tel.GetLocalState(ctx2)
+	// Try a quick refresh with explicit timeout
+	ctx2, cancel2 := context.WithTimeout(ctx, 500*time.Millisecond)
+	freshLocal, err := s.tel.GetLocalState(ctx2)
 	cancel2()
 
-	local := s.tel.GetCachedLocalState()
+	if err != nil {
+		klog.Warningf("%s: Failed to refresh local state: %v, using cache",
+			util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
+	}
+
+	local := freshLocal
+	if local == nil {
+		local = s.tel.GetCachedLocalState()
+	}
+
 	wan := s.tel.GetCachedWANState()
+
+	// Log measurement quality
+	klog.V(4).Infof("%s: Telemetry quality: complete=%v confidence=%.2f age=%v",
+		util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
+		local.IsCompleteSnapshot, local.MeasurementConfidence, local.StaleDuration)
 
 	// Decide
 	result := s.dec.Decide(pod, sloData, local, wan)
@@ -156,8 +170,8 @@ func (s *Server) processScheduling(
 			UID:       pod.UID,
 		},
 		Reason: "SchedulingDecision",
-		Message: fmt.Sprintf("Scheduled to %s: %s (ETA: %.0fms, WAN RTT: %dms)",
-			result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs),
+		Message: fmt.Sprintf("Scheduled to %s: %s (ETA: %.0fms, conf: %.2f, WAN RTT: %dms)",
+			result.Location, result.Reason, result.PredictedETAMs, local.MeasurementConfidence, result.WanRttMs),
 		Type:           corev1.EventTypeNormal,
 		FirstTimestamp: metav1.NewTime(time.Now()),
 		LastTimestamp:  metav1.NewTime(time.Now()),
@@ -167,9 +181,10 @@ func (s *Server) processScheduling(
 		klog.Warningf("%s: Failed to create event", util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 	}
 
-	klog.Infof("%s: Decision: %s (reason=%s, predicted_eta=%.0fms, wan_rtt=%dms)",
+	klog.Infof("%s: Decision: %s (reason=%s, predicted_eta=%.0fms, wan_rtt=%dms, conf=%.2f)",
 		util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
-		result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs)
+		result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs,
+		local.MeasurementConfidence)
 
 	return s.buildPatchResponse(pod, result)
 }

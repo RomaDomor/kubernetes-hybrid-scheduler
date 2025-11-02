@@ -26,12 +26,14 @@ type fakeTel struct{}
 
 func (f *fakeTel) GetLocalState(_ context.Context) (*telemetry.LocalState, error) {
 	return &telemetry.LocalState{
-		PendingPodsPerClass: map[string]int{},
-		TotalDemand:         map[string]telemetry.DemandByClass{},
-		TotalAllocatableCPU: 1000,
-		TotalAllocatableMem: 1000,
-		FreeCPU:             1000,
-		FreeMem:             1000,
+		PendingPodsPerClass:   map[string]int{},
+		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalAllocatableCPU:   1000,
+		TotalAllocatableMem:   1000,
+		FreeCPU:               1000,
+		FreeMem:               1000,
+		IsCompleteSnapshot:    true, // Add this
+		MeasurementConfidence: 1.0,  // Add this
 	}, nil
 }
 func (f *fakeTel) GetWANState(_ context.Context) (*telemetry.WANState, error) {
@@ -39,12 +41,14 @@ func (f *fakeTel) GetWANState(_ context.Context) (*telemetry.WANState, error) {
 }
 func (f *fakeTel) GetCachedLocalState() *telemetry.LocalState {
 	return &telemetry.LocalState{
-		PendingPodsPerClass: map[string]int{},
-		TotalDemand:         map[string]telemetry.DemandByClass{},
-		TotalAllocatableCPU: 1000,
-		TotalAllocatableMem: 1000,
-		FreeCPU:             1000,
-		FreeMem:             1000,
+		PendingPodsPerClass:   map[string]int{},
+		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalAllocatableCPU:   1000,
+		TotalAllocatableMem:   1000,
+		FreeCPU:               1000,
+		FreeMem:               1000,
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
 	}
 }
 func (f *fakeTel) GetCachedWANState() *telemetry.WANState { return &telemetry.WANState{RTTMs: 10} }

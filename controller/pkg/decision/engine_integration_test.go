@@ -26,14 +26,16 @@ func TestEngine_ProbabilityBasedDecision(t *testing.T) {
 	s := sloMust("latency", 1000, true, 5)
 
 	local := &telemetry.LocalState{
-		FreeCPU:             1000,
-		FreeMem:             1000,
-		PendingPodsPerClass: map[string]int{"latency": 0},
-		TotalDemand:         map[string]telemetry.DemandByClass{},
-		TotalAllocatableCPU: 1000,
-		TotalAllocatableMem: 1000,
-		BestEdgeNode:        telemetry.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
-		Timestamp:           time.Now(),
+		FreeCPU:               1000,
+		FreeMem:               1000,
+		PendingPodsPerClass:   map[string]int{"latency": 0},
+		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalAllocatableCPU:   1000,
+		TotalAllocatableMem:   1000,
+		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
+		Timestamp:             time.Now(),
+		IsCompleteSnapshot:    true, // Add this
+		MeasurementConfidence: 1.0,  // Add this
 	}
 	wan := &telemetry.WANState{RTTMs: 20, LossPct: 0.5}
 
@@ -84,14 +86,16 @@ func TestEngine_ProfilesInfluenceDecision(t *testing.T) {
 	s := sloMust("latency", 1000, true, 5)
 
 	local := &telemetry.LocalState{
-		FreeCPU:             1000,
-		FreeMem:             1000,
-		PendingPodsPerClass: map[string]int{"latency": 0},
-		TotalDemand:         map[string]telemetry.DemandByClass{},
-		TotalAllocatableCPU: 1000,
-		TotalAllocatableMem: 1000,
-		BestEdgeNode:        telemetry.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
-		Timestamp:           time.Now(),
+		FreeCPU:               1000,
+		FreeMem:               1000,
+		PendingPodsPerClass:   map[string]int{"latency": 0},
+		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalAllocatableCPU:   1000,
+		TotalAllocatableMem:   1000,
+		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
+		Timestamp:             time.Now(),
+		IsCompleteSnapshot:    true, // Add this
+		MeasurementConfidence: 1.0,  // Add this
 	}
 	wan := &telemetry.WANState{RTTMs: 30, LossPct: 0.5}
 
