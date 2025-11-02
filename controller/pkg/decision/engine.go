@@ -2,6 +2,7 @@ package decision
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -292,45 +293,152 @@ func (e *Engine) isEdgeFeasibleWithConfidence(
 	return true
 }
 
-// predictEdgeETA predicts completion time on edge using M/G/1 queueing model
+// predictEdgeETA predicts completion time on edge using proper queueing analysis.
+//
+// MODEL: Multi-class G/G/c queue with resource constraints
+//
+// COMPONENTS:
+//  1. Queuing delay: time waiting for resources to become available
+//  2. Execution time: P95 duration from profile (conservative)
+//  3. Variance penalty: buffer for high utilization (Kingman's formula)
+//  4. Confidence adjustment: degrade prediction when measurement uncertain
+//
+// INPUTS:
+//   - profile: historical execution statistics
+//   - local: current cluster state (free resources, pending pods)
+//   - slo: workload SLO class
+//
+// OUTPUT: Predicted end-to-end completion time in milliseconds
 func (e *Engine) predictEdgeETA(profile *ProfileStats, local *telemetry.LocalState, slo *slo.SLO) float64 {
 	// Base execution time (P95 for conservative estimate)
 	execTime := profile.P95DurationMs
 
-	// Estimate queue wait using M/G/1 Pollaczek-Khinchine formula
+	// If no pending pressure, return execution time only
 	pendingCount := local.PendingPodsPerClass[slo.Class]
 	if pendingCount == 0 {
-		// No queue, just execution time
 		return execTime
 	}
 
-	// Rough parallelism estimate
-	avgPodCPU := int64(200) // Assume 200m average
-	parallelism := int64(1)
-	if local.FreeCPU > 0 {
-		parallelism = local.FreeCPU / avgPodCPU
-		if parallelism < 1 {
-			parallelism = 1
-		}
-		if parallelism > 8 {
-			parallelism = 8
-		}
+	// Get actual resource demand from pending pods in this class
+	classDemand := local.TotalDemand[slo.Class]
+	if classDemand.CPU == 0 {
+		// Fallback: no demand recorded, assume no queue
+		return execTime
 	}
 
-	// Simple queue drain estimate
-	queueWait := float64(pendingCount) * profile.MeanDurationMs / float64(parallelism)
+	// Compute effective parallelism based on ACTUAL resource constraints
+	// parallelism = min(
+	//   floor(FreeCPU / AvgPodCPU),
+	//   floor(FreeMem / AvgPodMem),
+	//   physical_node_count * cores_per_node  // approximate upper bound
+	// )
+	avgPodCPU := classDemand.CPU / int64(pendingCount)
+	avgPodMem := classDemand.Mem / int64(pendingCount)
 
-	// Add variance buffer for high utilization
+	if avgPodCPU == 0 {
+		avgPodCPU = 100 // 100m minimum to avoid div-by-zero
+	}
+	if avgPodMem == 0 {
+		avgPodMem = 64 // 64Mi minimum
+	}
+
+	// Compute parallelism limited by CPU
+	cpuParallelism := local.FreeCPU / avgPodCPU
+	if cpuParallelism < 1 {
+		cpuParallelism = 1
+	}
+
+	// Compute parallelism limited by memory
+	memParallelism := local.FreeMem / avgPodMem
+	if memParallelism < 1 {
+		memParallelism = 1
+	}
+
+	// Effective parallelism is the bottleneck resource
+	parallelism := cpuParallelism
+	if memParallelism < cpuParallelism {
+		parallelism = memParallelism
+	}
+
+	// Cap at realistic physical parallelism (assume ~8 cores per node, multiple nodes)
+	// Use allocatable CPU as proxy for total cluster capacity
+	physicalParallelism := local.TotalAllocatableCPU / 1000 // rough cores estimate
+	if physicalParallelism < 1 {
+		physicalParallelism = 1
+	}
+	if physicalParallelism > 64 {
+		physicalParallelism = 64 // cap at reasonable upper bound
+	}
+	if parallelism > physicalParallelism {
+		parallelism = physicalParallelism
+	}
+
+	klog.V(5).Infof("Queue model for %s: pending=%d avgCPU=%dm avgMem=%dMi freeCPU=%dm freeMem=%dMi → parallelism=%d",
+		slo.Class, pendingCount, avgPodCPU, avgPodMem, local.FreeCPU, local.FreeMem, parallelism)
+
+	// G/G/c queue delay estimation using Kingman-Whitt approximation
+	//
+	// For G/G/c queue:
+	//   W_q ≈ (C² + 1) / 2 * ρ^(√2(c+1)) / (c * (1-ρ)) * E[S]
+	//
+	// Where:
+	//   C² = coefficient of variation = (σ / μ)²
+	//   ρ = utilization = λ * E[S] / c
+	//   E[S] = mean service time
+	//   c = number of servers (parallelism)
+	//
+	// Simplified for production: use deterministic queue drain + variance buffer
+
+	// Deterministic queue drain time
+	queueDrainTime := float64(pendingCount) * profile.MeanDurationMs / float64(parallelism)
+
+	// Compute utilization for variance adjustment
+	utilization := 0.0
 	if local.TotalAllocatableCPU > 0 {
-		utilization := float64(local.TotalAllocatableCPU-local.FreeCPU) / float64(local.TotalAllocatableCPU)
-		if utilization > 0.7 {
-			// Add buffer: higher utilization → higher variance
-			buffer := profile.StdDevDurationMs * (utilization - 0.7) * 10
-			queueWait += buffer
-		}
+		utilization = float64(local.TotalAllocatableCPU-local.FreeCPU) / float64(local.TotalAllocatableCPU)
 	}
 
-	return queueWait + execTime
+	// Kingman's approximation for variance penalty
+	// VarPenalty = (C² / 2) * (ρ / (1-ρ)) * E[S]
+	// Where C² ≈ (σ/μ)² is squared coefficient of variation
+	varianceBuffer := 0.0
+	if utilization < 0.95 && profile.MeanDurationMs > 0 {
+		cv2 := (profile.StdDevDurationMs / profile.MeanDurationMs) *
+			(profile.StdDevDurationMs / profile.MeanDurationMs)
+		rho := utilization
+		varianceBuffer = (cv2 / 2.0) * (rho / (1.0 - rho)) * profile.MeanDurationMs
+
+		// Scale by sqrt(c) for multi-server effect (variance reduction)
+		if parallelism > 1 {
+			varianceBuffer /= math.Sqrt(float64(parallelism))
+		}
+
+		klog.V(5).Infof("Variance buffer: cv²=%.2f ρ=%.2f buffer=%.0fms",
+			cv2, rho, varianceBuffer)
+	} else if utilization >= 0.95 {
+		// High utilization: use worst-case buffer (system near saturation)
+		varianceBuffer = profile.StdDevDurationMs * 2.0
+		klog.V(5).Infof("High utilization (%.2f), using worst-case buffer: %.0fms",
+			utilization, varianceBuffer)
+	}
+
+	queueWait := queueDrainTime + varianceBuffer
+
+	// Confidence adjustment: degrade prediction when measurement quality is low
+	// Lower confidence → increase predicted wait (conservative)
+	if local.MeasurementConfidence < 1.0 {
+		uncertaintyPenalty := queueWait * (1.0 - local.MeasurementConfidence) * 0.5
+		klog.V(5).Infof("Confidence adjustment: conf=%.2f penalty=%.0fms",
+			local.MeasurementConfidence, uncertaintyPenalty)
+		queueWait += uncertaintyPenalty
+	}
+
+	totalETA := queueWait + execTime
+
+	klog.V(4).Infof("Edge ETA prediction: exec=%.0fms queue=%.0fms (drain=%.0fms variance=%.0fms) total=%.0fms",
+		execTime, queueWait, queueDrainTime, varianceBuffer, totalETA)
+
+	return totalETA
 }
 
 // predictCloudETA predicts completion time on cloud
