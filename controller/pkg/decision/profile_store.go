@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -18,8 +17,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
 
 var workloadProfileGVR = schema.GroupVersionResource{
@@ -28,72 +27,17 @@ var workloadProfileGVR = schema.GroupVersionResource{
 	Resource: "workloadprofiles",
 }
 
-type ProfileKey struct {
-	Class    string
-	CPUTier  string
-	Location constants.Location
-}
-
-func (pk ProfileKey) String() string {
-	return fmt.Sprintf("%s-%s-%s", pk.Class, pk.CPUTier, pk.Location)
-}
-
-// Histogram-based P95 tracking
-type ProfileStats struct {
-	Count             int       `json:"count"`
-	MeanDurationMs    float64   `json:"mean_duration_ms"`
-	StdDevDurationMs  float64   `json:"stddev_duration_ms"`
-	P95DurationMs     float64   `json:"p95_duration_ms"`
-	MeanQueueWaitMs   float64   `json:"mean_queue_wait_ms"`
-	SLOComplianceRate float64   `json:"slo_compliance_rate"`
-	ConfidenceScore   float64   `json:"confidence_score"`
-	LastUpdated       time.Time `json:"last_updated"`
-
-	DurationHistogram []HistogramBucket `json:"duration_histogram"`
-}
-
-type HistogramBucket struct {
-	UpperBoundValue float64   `json:"upper_bound_value"`
-	UpperBoundStr   string    `json:"upper_bound_str"`
-	Count           int       `json:"count"`
-	LastDecay       time.Time `json:"last_decay"`
-}
-
-func (hb *HistogramBucket) UpperBound() float64 {
-	if hb.UpperBoundStr == "Inf" {
-		return math.Inf(1)
-	}
-	return hb.UpperBoundValue
-}
-
-func (hb *HistogramBucket) SetUpperBound(val float64) {
-	if math.IsInf(val, +1) {
-		hb.UpperBoundStr = "Inf"
-		hb.UpperBoundValue = 0
-	} else {
-		hb.UpperBoundStr = ""
-		hb.UpperBoundValue = val
-	}
-}
-
-type ProfileUpdate struct {
-	ObservedDurationMs float64
-	QueueWaitMs        float64
-	SLOMet             bool
-}
-
-// LRU eviction for bounded growth
 type lruEntry struct {
 	key   string
-	stats *ProfileStats
+	stats *apis.ProfileStats
 }
 
 type ProfileStore struct {
-	profiles   map[string]*ProfileStats
+	profiles   map[string]*apis.ProfileStats
 	lru        *list.List
 	lruMap     map[string]*list.Element
 	mu         sync.RWMutex
-	defaults   map[string]*ProfileStats
+	defaults   map[string]*apis.ProfileStats
 	maxEntries int
 	kubeClient kubernetes.Interface
 	hcfg       HistogramConfig
@@ -101,15 +45,14 @@ type ProfileStore struct {
 
 func NewProfileStore(kubeClient kubernetes.Interface, maxEntries int, hcfg HistogramConfig) *ProfileStore {
 	ps := &ProfileStore{
-		profiles:   make(map[string]*ProfileStats),
+		profiles:   make(map[string]*apis.ProfileStats),
 		lru:        list.New(),
 		lruMap:     make(map[string]*list.Element),
-		defaults:   make(map[string]*ProfileStats),
+		defaults:   make(map[string]*apis.ProfileStats),
 		maxEntries: maxEntries,
 		kubeClient: kubeClient,
 		hcfg:       hcfg,
 	}
-	// build defaults with histogram
 	for k, v := range defaultProfilesStatic() {
 		cp := *v
 		cp.DurationHistogram = ps.initHistogram()
@@ -118,43 +61,7 @@ func NewProfileStore(kubeClient kubernetes.Interface, maxEntries int, hcfg Histo
 	return ps
 }
 
-func GetProfileKey(pod *corev1.Pod, loc constants.Location) ProfileKey {
-	cpuMillis := util.GetCPURequest(pod)
-
-	tier := "medium"
-	if cpuMillis < 500 {
-		tier = "small"
-	} else if cpuMillis > 2000 {
-		tier = "large"
-	}
-
-	class := pod.Annotations[constants.AnnotationSLOClass]
-	if class == "" {
-		class = "batch"
-	}
-
-	// Normalize class to prevent explosion
-	class = normalizeClass(class)
-
-	return ProfileKey{
-		Class:    class,
-		CPUTier:  tier,
-		Location: loc,
-	}
-}
-
-// Whitelist of allowed classes
-func normalizeClass(class string) string {
-	if constants.ValidSLOClasses[class] {
-		return class
-	}
-
-	klog.V(4).Infof("Unknown class '%s', defaulting to '%s'", class, constants.DefaultSLOClass)
-	// Use centralized constant for default
-	return constants.DefaultSLOClass
-}
-
-func (ps *ProfileStore) GetOrDefault(key ProfileKey) *ProfileStats {
+func (ps *ProfileStore) GetOrDefault(key apis.ProfileKey) *apis.ProfileStats {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
@@ -169,7 +76,7 @@ func (ps *ProfileStore) GetOrDefault(key ProfileKey) *ProfileStats {
 		return deepCopyProfile(def)
 	}
 
-	return deepCopyProfile(&ProfileStats{
+	return deepCopyProfile(&apis.ProfileStats{
 		MeanDurationMs:    100,
 		P95DurationMs:     200,
 		ConfidenceScore:   0.0,
@@ -178,13 +85,13 @@ func (ps *ProfileStore) GetOrDefault(key ProfileKey) *ProfileStats {
 	})
 }
 
-func deepCopyProfile(p *ProfileStats) *ProfileStats {
+func deepCopyProfile(p *apis.ProfileStats) *apis.ProfileStats {
 	if p == nil {
 		return nil
 	}
 
 	pCopy := *p
-	pCopy.DurationHistogram = make([]HistogramBucket, len(p.DurationHistogram))
+	pCopy.DurationHistogram = make([]apis.HistogramBucket, len(p.DurationHistogram))
 	for i := range p.DurationHistogram {
 		pCopy.DurationHistogram[i] = p.DurationHistogram[i]
 	}
@@ -192,7 +99,7 @@ func deepCopyProfile(p *ProfileStats) *ProfileStats {
 	return &pCopy
 }
 
-func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
+func (ps *ProfileStore) Update(key apis.ProfileKey, update apis.ProfileUpdate) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -257,26 +164,22 @@ func (ps *ProfileStore) Update(key ProfileKey, update ProfileUpdate) {
 	)
 }
 
-// LRU eviction
 func (ps *ProfileStore) evictLRU() {
 	if ps.lru.Len() == 0 {
 		return
 	}
-
 	elem := ps.lru.Back()
 	if elem == nil {
 		return
 	}
-
 	entry := elem.Value.(*lruEntry)
 	ps.lru.Remove(elem)
 	delete(ps.lruMap, entry.key)
 	delete(ps.profiles, entry.key)
-
 	klog.V(3).Infof("Evicted profile %s from LRU cache", entry.key)
 }
 
-func (ps *ProfileStore) getOrDefaultLocked(key ProfileKey) *ProfileStats {
+func (ps *ProfileStore) getOrDefaultLocked(key apis.ProfileKey) *apis.ProfileStats {
 	defaultKey := fmt.Sprintf("%s-%s", key.Class, key.CPUTier)
 	if def, exists := ps.defaults[defaultKey]; exists {
 		pCopy := deepCopyProfile(def)
@@ -285,7 +188,7 @@ func (ps *ProfileStore) getOrDefaultLocked(key ProfileKey) *ProfileStats {
 		return pCopy
 	}
 
-	return &ProfileStats{
+	return &apis.ProfileStats{
 		MeanDurationMs:    100,
 		P95DurationMs:     200,
 		StdDevDurationMs:  50,
@@ -295,8 +198,7 @@ func (ps *ProfileStore) getOrDefaultLocked(key ProfileKey) *ProfileStats {
 	}
 }
 
-// Histogram helpers
-func (ps *ProfileStore) initHistogram() []HistogramBucket {
+func (ps *ProfileStore) initHistogram() []apis.HistogramBucket {
 	var bounds []float64
 	switch ps.hcfg.Mode {
 	case BoundsExplicit:
@@ -314,10 +216,10 @@ func (ps *ProfileStore) initHistogram() []HistogramBucket {
 	if ps.hcfg.IncludeInf {
 		bounds = append(bounds, math.Inf(1))
 	}
-	buckets := make([]HistogramBucket, len(bounds))
+	buckets := make([]apis.HistogramBucket, len(bounds))
 	now := time.Now()
 	for i, bound := range bounds {
-		buckets[i] = HistogramBucket{
+		buckets[i] = apis.HistogramBucket{
 			Count:     0,
 			LastDecay: now,
 		}
@@ -326,35 +228,30 @@ func (ps *ProfileStore) initHistogram() []HistogramBucket {
 	return buckets
 }
 
-func (ps *ProfileStore) updateHistogram(buckets []HistogramBucket, value float64) {
+func (ps *ProfileStore) updateHistogram(buckets []apis.HistogramBucket, value float64) {
 	now := time.Now()
-
-	// Decay every hour (half-life)
 	for i := range buckets {
 		if now.Sub(buckets[i].LastDecay) > ps.hcfg.DecayInterval {
 			buckets[i].Count = buckets[i].Count / 2
 			buckets[i].LastDecay = now
 		}
 	}
-
-	// Use UpperBound() helper to handle Inf properly
 	for i := range buckets {
 		if value <= buckets[i].UpperBound() {
 			buckets[i].Count++
 			return
 		}
 	}
-
 	buckets[len(buckets)-1].Count++
 }
 
-func (ps *ProfileStore) computeP95FromHistogram(buckets []HistogramBucket) float64 {
+func (ps *ProfileStore) computeP95FromHistogram(buckets []apis.HistogramBucket) float64 {
 	total := 0
 	for _, b := range buckets {
 		total += b.Count
 	}
 	if total == 0 {
-		return 150 // Default
+		return 150
 	}
 
 	// Require minimum sample size for trustworthy p95
@@ -441,7 +338,8 @@ func (ps *ProfileStore) computeP95FromHistogram(buckets []HistogramBucket) float
 
 	return ps.lastFiniteUpperBound(buckets)
 }
-func (ps *ProfileStore) lastFiniteUpperBound(buckets []HistogramBucket) float64 {
+
+func (ps *ProfileStore) lastFiniteUpperBound(buckets []apis.HistogramBucket) float64 {
 	for i := len(buckets) - 1; i >= 0; i-- {
 		ub := buckets[i].UpperBound()
 		if !math.IsInf(ub, +1) {
@@ -451,7 +349,6 @@ func (ps *ProfileStore) lastFiniteUpperBound(buckets []HistogramBucket) float64 
 	return ps.hcfg.IngestCapMs
 }
 
-// CRD-based persistence (clean: no custom JSON, uses sentinel fields)
 func (ps *ProfileStore) SaveToCRD(dynClient dynamic.Interface) error {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
@@ -550,7 +447,7 @@ func (ps *ProfileStore) LoadFromCRD(dynClient dynamic.Interface) error {
 			continue
 		}
 
-		profile := &ProfileStats{}
+		profile := &apis.ProfileStats{}
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(specMap, profile); err != nil {
 			klog.V(4).Infof("Convert specMap to ProfileStats for %s failed: %v", keyStr, err)
 			continue
@@ -587,19 +484,19 @@ func (ps *ProfileStore) StartAutoSave(
 	}
 }
 
-func (ps *ProfileStore) ExportAllProfiles() map[string]*ProfileStats {
+func (ps *ProfileStore) ExportAllProfiles() map[string]*apis.ProfileStats {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	export := make(map[string]*ProfileStats, len(ps.profiles))
+	export := make(map[string]*apis.ProfileStats, len(ps.profiles))
 	for k, v := range ps.profiles {
 		export[k] = deepCopyProfile(v)
 	}
 	return export
 }
 
-func defaultProfilesStatic() map[string]*ProfileStats {
-	profiles := make(map[string]*ProfileStats)
+func defaultProfilesStatic() map[string]*apis.ProfileStats {
+	profiles := make(map[string]*apis.ProfileStats)
 
 	classes := make([]string, 0, len(constants.ValidSLOClasses))
 	for class := range constants.ValidSLOClasses {
@@ -632,7 +529,7 @@ func defaultProfilesStatic() map[string]*ProfileStats {
 				est = struct{ mean, p95 float64 }{100, 200}
 			}
 
-			profiles[key] = &ProfileStats{
+			profiles[key] = &apis.ProfileStats{
 				Count:             0,
 				MeanDurationMs:    est.mean,
 				StdDevDurationMs:  (est.p95 - est.mean) / 1.65,
@@ -640,181 +537,9 @@ func defaultProfilesStatic() map[string]*ProfileStats {
 				SLOComplianceRate: 0.5,
 				ConfidenceScore:   0.0,
 				LastUpdated:       time.Now(),
-				// histogram will be assigned in NewProfileStore
 			}
 		}
 	}
 
 	return profiles
-}
-
-// ComputeViolationProbability computes Pr[completion > threshold] from histogram.
-//
-// ALGORITHM:
-//  1. If sufficient samples (≥20): compute from histogram CDF
-//  2. If low samples: use normal approximation from mean/stddev
-//  3. If no data: return 0.5 (maximum uncertainty)
-//
-// HISTOGRAM-BASED (primary method):
-//   - Compute CDF: F(x) = Σ{buckets ≤ x} count / total
-//   - Linear interpolation within buckets
-//   - Return tail: 1 - F(threshold)
-//
-// STATS-BASED (fallback for low samples):
-//   - Normal approximation: Pr[X > t] ≈ 1 - Φ((t - μ) / σ)
-//   - Conservative for right-skewed distributions
-func (ps *ProfileStats) ComputeViolationProbability(threshold float64) float64 {
-	if ps == nil {
-		// No data: maximum uncertainty
-		return 0.5
-	}
-
-	// Deterministic case: no variance (handle before histogram check)
-	if ps.StdDevDurationMs <= 0 {
-		if ps.MeanDurationMs > threshold {
-			return 1.0
-		}
-		return 0.0
-	}
-
-	if len(ps.DurationHistogram) == 0 {
-		// No histogram: maximum uncertainty
-		return 0.5
-	}
-
-	// Require minimum samples for histogram-based probability
-	const minSamplesForHistogram = 20
-	if ps.Count < minSamplesForHistogram {
-		// Low sample count: use stats-based estimate
-		return ps.computeViolationProbabilityFromStats(threshold)
-	}
-
-	// Compute total samples in histogram
-	totalCount := 0
-	for _, bucket := range ps.DurationHistogram {
-		totalCount += bucket.Count
-	}
-
-	if totalCount == 0 {
-		// Histogram exists but empty (edge case after decay)
-		return ps.computeViolationProbabilityFromStats(threshold)
-	}
-
-	// Compute CDF: cumulative count up to threshold
-	cumulativeCount := 0
-	foundBucket := false
-
-	for i, bucket := range ps.DurationHistogram {
-		ub := bucket.UpperBound()
-
-		if ub >= threshold {
-			// Threshold falls in this bucket: interpolate
-			if i == 0 {
-				// First bucket: [0, ub]
-				if ub <= 0 || math.IsInf(ub, 1) {
-					// Can't interpolate: assume half below threshold
-					cumulativeCount += bucket.Count / 2
-				} else {
-					ratio := threshold / ub
-					inBucketCount := int(float64(bucket.Count) * ratio)
-					cumulativeCount += inBucketCount
-				}
-			} else {
-				// General bucket: [prevUB, ub]
-				prevUB := ps.DurationHistogram[i-1].UpperBound()
-				bucketRange := ub - prevUB
-
-				if bucketRange <= 0 || math.IsInf(ub, 1) {
-					// Can't interpolate (collapsed or +Inf bucket)
-					// Assume half below threshold
-					cumulativeCount += bucket.Count / 2
-				} else {
-					// Linear interpolation
-					ratio := (threshold - prevUB) / bucketRange
-					ratio = math.Max(0, math.Min(1, ratio)) // Clamp to [0,1]
-					inBucketCount := int(float64(bucket.Count) * ratio)
-					cumulativeCount += inBucketCount
-				}
-			}
-			foundBucket = true
-			break
-		} else {
-			// Entire bucket is below threshold
-			cumulativeCount += bucket.Count
-		}
-	}
-
-	if !foundBucket {
-		// Threshold exceeds all finite buckets
-		// Check for +Inf bucket with outliers
-		if len(ps.DurationHistogram) > 0 {
-			lastBucket := ps.DurationHistogram[len(ps.DurationHistogram)-1]
-			if math.IsInf(lastBucket.UpperBound(), 1) && lastBucket.Count > 0 {
-				// Some samples in +Inf bucket: these definitely violated
-				// All other samples didn't violate
-				cdf := float64(totalCount-lastBucket.Count) / float64(totalCount)
-				tailProb := 1.0 - cdf
-				return math.Max(0.001, math.Min(1.0, tailProb))
-			}
-		}
-
-		// All samples below threshold: use extrapolation
-		return ps.extrapolateTailProbability(threshold)
-	}
-
-	// Compute tail probability: Pr[X > threshold] = 1 - F(threshold)
-	cdf := float64(cumulativeCount) / float64(totalCount)
-	tailProb := 1.0 - cdf
-
-	// Clamp to valid range
-	return math.Max(0, math.Min(1, tailProb))
-}
-
-// computeViolationProbabilityFromStats uses normal approximation when histogram
-// has insufficient samples.
-func (ps *ProfileStats) computeViolationProbabilityFromStats(threshold float64) float64 {
-	// Deterministic case: no variance
-	if ps.StdDevDurationMs <= 0 {
-		// No variance: deterministic
-		if ps.MeanDurationMs > threshold {
-			return 1.0
-		}
-		return 0.0
-	}
-
-	// Standard normal approximation: Φ((threshold - mean) / stddev)
-	z := (threshold - ps.MeanDurationMs) / ps.StdDevDurationMs
-
-	// Fast approximation of standard normal CDF
-	// Φ(z) ≈ 1 / (1 + exp(-1.702 * z)) for z > 0
-	// Φ(z) ≈ exp(-1.702 * |z|) / (1 + exp(-1.702 * |z|)) for z < 0
-
-	var cdf float64
-	if z >= 0 {
-		// Threshold above mean: low violation probability
-		cdf = 1.0 / (1.0 + math.Exp(-1.702*z))
-	} else {
-		// Threshold below mean: high violation probability
-		absZ := -z
-		cdf = math.Exp(-1.702*absZ) / (1.0 + math.Exp(-1.702*absZ))
-	}
-
-	return 1.0 - cdf
-}
-
-// extrapolateTailProbability estimates tail probability when threshold exceeds
-// all observed samples using exponential tail model.
-func (ps *ProfileStats) extrapolateTailProbability(threshold float64) float64 {
-	// If threshold well beyond P95, use exponential tail
-	if threshold > ps.P95DurationMs && ps.StdDevDurationMs > 0 {
-		// P(X > threshold) ≈ P(X > P95) * exp(-(threshold - P95) / stddev)
-		// P(X > P95) = 0.05 by definition
-		excess := threshold - ps.P95DurationMs
-		lambda := 1.0 / ps.StdDevDurationMs
-		tailProb := 0.05 * math.Exp(-lambda*excess)
-		return math.Max(0.001, tailProb) // At least 0.1% (10× lower than P95 tail)
-	}
-
-	// Threshold comfortably exceeds observations: very low probability
-	return 0.001 // 0.1%
 }

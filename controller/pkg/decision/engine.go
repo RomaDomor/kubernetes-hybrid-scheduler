@@ -8,19 +8,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/slo"
-	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
-
-type Result struct {
-	Location       constants.Location
-	Reason         string
-	PredictedETAMs float64
-	WanRttMs       int
-	LyapunovWeight float64 // Expose weight for debugging
-}
 
 type EngineConfig struct {
 	RTTUnusableMs           int
@@ -35,10 +26,8 @@ type EngineConfig struct {
 	EdgePendingPessimismPct int
 	ProfileStore            *ProfileStore
 	LyapunovScheduler       *LyapunovScheduler
-
-	// Lyapunov configuration
-	CloudCostFactor float64 // Relative cost of cloud vs edge (default: 1.0)
-	EdgeCostFactor  float64 // Relative cost of edge (default: 0.0)
+	CloudCostFactor         float64
+	EdgeCostFactor          float64
 }
 
 type Engine struct {
@@ -68,25 +57,25 @@ func NewEngine(config EngineConfig) *Engine {
 
 func (e *Engine) Decide(
 	pod *corev1.Pod,
-	slo *slo.SLO,
-	local *telemetry.LocalState,
-	wan *telemetry.WANState,
-) Result {
+	slo *apis.SLO,
+	local *apis.LocalState,
+	wan *apis.WANState,
+) apis.Result {
 	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
 
 	// Circuit breakers and safety checks
 	if wan == nil {
 		klog.Warningf("%s: WAN state is nil, using pessimistic defaults", podID)
-		wan = &telemetry.WANState{RTTMs: 999, LossPct: 100, IsStale: true}
+		wan = &apis.WANState{RTTMs: 999, LossPct: 100, IsStale: true}
 	}
 	if local == nil {
 		klog.Warningf("%s: Local state is nil, using empty state", podID)
-		local = &telemetry.LocalState{
+		local = &apis.LocalState{
 			FreeCPU:               0,
 			FreeMem:               0,
 			PendingPodsPerClass:   make(map[string]int),
-			TotalDemand:           make(map[string]telemetry.DemandByClass),
-			BestEdgeNode:          telemetry.BestNode{},
+			TotalDemand:           make(map[string]apis.DemandByClass),
+			BestEdgeNode:          apis.BestNode{},
 			MeasurementConfidence: 0.0,
 		}
 	}
@@ -107,7 +96,7 @@ func (e *Engine) Decide(
 
 	if wan.StaleDuration > 10*time.Minute {
 		klog.Errorf("%s: WAN telemetry stale >10min, disabling cloud", podID)
-		result := Result{constants.Edge, "wan_circuit_breaker", 0, 999, 0}
+		result := apis.Result{Location: constants.Edge, Reason: "wan_circuit_breaker", WanRttMs: 999}
 		recordDecision(result, slo.Class)
 		return result
 	}
@@ -115,7 +104,7 @@ func (e *Engine) Decide(
 	if local.StaleDuration > threshold {
 		klog.Errorf("%s: Local telemetry stale >%v for class %s, forcing cloud",
 			podID, threshold, slo.Class)
-		result := Result{constants.Cloud, "telemetry_circuit_breaker", 0, wan.RTTMs, 0}
+		result := apis.Result{Location: constants.Cloud, Reason: "telemetry_circuit_breaker", WanRttMs: wan.RTTMs}
 		recordDecision(result, slo.Class)
 		return result
 	}
@@ -125,7 +114,7 @@ func (e *Engine) Decide(
 		(slo.Class == "latency" || slo.Class == "interactive") {
 		klog.Warningf("%s: Low measurement confidence (%.2f), using conservative decision",
 			podID, local.MeasurementConfidence)
-		result := Result{constants.Cloud, "low_measurement_confidence", 0, wan.RTTMs, 0}
+		result := apis.Result{Location: constants.Cloud, Reason: "low_measurement_confidence", WanRttMs: wan.RTTMs}
 		recordDecision(result, slo.Class)
 		return result
 	}
@@ -147,21 +136,20 @@ func (e *Engine) Decide(
 	// Hard constraints
 	if !slo.OffloadAllowed {
 		klog.V(4).Infof("%s: Offload disabled by SLO", podID)
-		result := Result{constants.Edge, "offload_disabled", 0, wan.RTTMs, 0}
+		result := apis.Result{Location: constants.Edge, Reason: "offload_disabled", WanRttMs: wan.RTTMs}
 		recordDecision(result, slo.Class)
 		return result
 	}
 
 	if wan.RTTMs > e.config.RTTUnusableMs || wan.LossPct > e.config.LossUnusablePct {
 		klog.V(4).Infof("%s: WAN deemed unusable", podID)
-		result := Result{constants.Edge, "wan_unusable", 0, wan.RTTMs, 0}
+		result := apis.Result{Location: constants.Edge, Reason: "wan_unusable", WanRttMs: wan.RTTMs}
 		recordDecision(result, slo.Class)
 		return result
 	}
 
-	// Get execution profiles
-	edgeKey := GetProfileKey(pod, constants.Edge)
-	cloudKey := GetProfileKey(pod, constants.Cloud)
+	edgeKey := apis.GetProfileKey(pod, constants.Edge)
+	cloudKey := apis.GetProfileKey(pod, constants.Cloud)
 	edgeProfile := e.config.ProfileStore.GetOrDefault(edgeKey)
 	cloudProfile := e.config.ProfileStore.GetOrDefault(cloudKey)
 
@@ -208,7 +196,7 @@ func (e *Engine) Decide(
 		predictedETA = cloudETA
 	}
 
-	result := Result{
+	result := apis.Result{
 		Location:       location,
 		Reason:         reason,
 		PredictedETAMs: predictedETA,
@@ -228,7 +216,7 @@ func (e *Engine) Decide(
 // Confidence-aware feasibility check
 func (e *Engine) isEdgeFeasibleWithConfidence(
 	pod *corev1.Pod,
-	local *telemetry.LocalState,
+	local *apis.LocalState,
 	reqCPU int64,
 	reqMem int64,
 	edgeETA float64,
@@ -293,24 +281,7 @@ func (e *Engine) isEdgeFeasibleWithConfidence(
 	return true
 }
 
-// predictEdgeETA predicts completion time on edge using proper queueing analysis.
-//
-// MODEL: Multi-class G/G/c queue with resource constraints
-//
-// COMPONENTS:
-//  1. Queuing delay: time waiting for resources to become available
-//  2. Execution time: P95 duration from profile (conservative)
-//  3. Variance penalty: buffer for high utilization (Kingman's formula)
-//  4. Confidence adjustment: degrade prediction when measurement uncertain
-//
-// INPUTS:
-//   - profile: historical execution statistics
-//   - local: current cluster state (free resources, pending pods)
-//   - slo: workload SLO class
-//
-// OUTPUT: Predicted end-to-end completion time in milliseconds
-func (e *Engine) predictEdgeETA(profile *ProfileStats, local *telemetry.LocalState, slo *slo.SLO) float64 {
-	// Base execution time (P95 for conservative estimate)
+func (e *Engine) predictEdgeETA(profile *apis.ProfileStats, local *apis.LocalState, slo *apis.SLO) float64 {
 	execTime := profile.P95DurationMs
 
 	// If no pending pressure, return execution time only
@@ -336,10 +307,10 @@ func (e *Engine) predictEdgeETA(profile *ProfileStats, local *telemetry.LocalSta
 	avgPodMem := classDemand.Mem / int64(pendingCount)
 
 	if avgPodCPU == 0 {
-		avgPodCPU = 100 // 100m minimum to avoid div-by-zero
+		avgPodCPU = 100
 	}
 	if avgPodMem == 0 {
-		avgPodMem = 64 // 64Mi minimum
+		avgPodMem = 64
 	}
 
 	// Compute parallelism limited by CPU
@@ -367,7 +338,7 @@ func (e *Engine) predictEdgeETA(profile *ProfileStats, local *telemetry.LocalSta
 		physicalParallelism = 1
 	}
 	if physicalParallelism > 64 {
-		physicalParallelism = 64 // cap at reasonable upper bound
+		physicalParallelism = 64
 	}
 	if parallelism > physicalParallelism {
 		parallelism = physicalParallelism
@@ -443,8 +414,8 @@ func (e *Engine) predictEdgeETA(profile *ProfileStats, local *telemetry.LocalSta
 
 // predictCloudETA predicts completion time on cloud
 func (e *Engine) predictCloudETA(
-	profile *ProfileStats,
-	wan *telemetry.WANState,
+	profile *apis.ProfileStats,
+	wan *apis.WANState,
 ) float64 {
 	// Cloud: WAN transfer + execution (assume no queue)
 	return 2.0*float64(wan.RTTMs) + profile.P95DurationMs
@@ -487,7 +458,7 @@ func (e *Engine) GetProfileStore() *ProfileStore {
 	return e.config.ProfileStore
 }
 
-func fmtProfile(p *ProfileStats) string {
+func fmtProfile(p *apis.ProfileStats) string {
 	if p == nil {
 		return "nil"
 	}

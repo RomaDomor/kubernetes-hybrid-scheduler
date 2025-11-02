@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 )
@@ -15,17 +16,16 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 		Beta:                1.0,
 		TargetViolationPct:  0.05,
 		TargetViolationProb: 0.05,
-		DecayFactor:         1.0, // No decay for test
+		DecayFactor:         1.0,
 		ProbabilityWeight:   1.0,
 	})
 
-	// Create realistic profiles with histograms
-	edgeProfile := &decision.ProfileStats{
+	edgeProfile := &apis.ProfileStats{
 		Count:            100,
 		MeanDurationMs:   800,
 		StdDevDurationMs: 200,
 		P95DurationMs:    1200,
-		DurationHistogram: []decision.HistogramBucket{
+		DurationHistogram: []apis.HistogramBucket{
 			{Count: 50, LastDecay: time.Now()},
 			{Count: 30, LastDecay: time.Now()},
 			{Count: 15, LastDecay: time.Now()},
@@ -37,12 +37,12 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 	edgeProfile.DurationHistogram[2].SetUpperBound(1500)
 	edgeProfile.DurationHistogram[3].SetUpperBound(math.Inf(1))
 
-	cloudProfile := &decision.ProfileStats{
+	cloudProfile := &apis.ProfileStats{
 		Count:            100,
 		MeanDurationMs:   600,
 		StdDevDurationMs: 150,
 		P95DurationMs:    900,
-		DurationHistogram: []decision.HistogramBucket{
+		DurationHistogram: []apis.HistogramBucket{
 			{Count: 60, LastDecay: time.Now()},
 			{Count: 30, LastDecay: time.Now()},
 			{Count: 8, LastDecay: time.Now()},
@@ -67,8 +67,8 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 
 	// Simulate 10 violations out of 20 jobs (50% violation rate)
 	for i := 0; i < 10; i++ {
-		lyap.UpdateVirtualQueue(class, deadline, 1200, constants.Edge) // Violation
-		lyap.UpdateVirtualQueue(class, deadline, 800, constants.Edge)  // Success
+		lyap.UpdateVirtualQueue(class, deadline, 1200, constants.Edge)
+		lyap.UpdateVirtualQueue(class, deadline, 800, constants.Edge)
 	}
 
 	Zp := lyap.GetVirtualProbQueue(class)
@@ -87,10 +87,10 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 	// Now test decision with profiles
 	loc, weight := lyap.Decide(
 		class, deadline,
-		1000, 900, // Edge slower
+		1000, 900,
 		edgeProfile, cloudProfile,
 		true, true,
-		0, 1, // Edge free, cloud costs 1
+		0, 1,
 	)
 
 	t.Logf("Decision after violations: location=%s weight=%.2f", loc, weight)
@@ -121,13 +121,12 @@ func TestLyapunov_PerClassBeta(t *testing.T) {
 		ProbabilityWeight:   1.0,
 	})
 
-	// Create dummy profiles
-	profile := &decision.ProfileStats{
+	profile := &apis.ProfileStats{
 		Count:             100,
 		MeanDurationMs:    900,
 		StdDevDurationMs:  100,
 		P95DurationMs:     1100,
-		DurationHistogram: []decision.HistogramBucket{{Count: 100}},
+		DurationHistogram: []apis.HistogramBucket{{Count: 100}},
 	}
 	profile.DurationHistogram[0].SetUpperBound(1000)
 
@@ -186,7 +185,7 @@ func TestLyapunov_PerClassDecay(t *testing.T) {
 		Beta:                1.0,
 		TargetViolationPct:  0.20,
 		TargetViolationProb: 0.20,
-		DecayFactor:         0.5, // 50% decay
+		DecayFactor:         0.5,
 		DecayInterval:       100 * time.Millisecond,
 		ProbabilityWeight:   1.0,
 	})
@@ -202,10 +201,9 @@ func TestLyapunov_PerClassDecay(t *testing.T) {
 	// Wait for decay
 	time.Sleep(150 * time.Millisecond)
 
-	// Trigger decay by making a decision
-	profile := &decision.ProfileStats{
+	profile := &apis.ProfileStats{
 		Count: 100, MeanDurationMs: 500, StdDevDurationMs: 100,
-		DurationHistogram: []decision.HistogramBucket{{Count: 100}},
+		DurationHistogram: []apis.HistogramBucket{{Count: 100}},
 	}
 	profile.DurationHistogram[0].SetUpperBound(1000)
 
@@ -226,27 +224,26 @@ func TestLyapunov_ProbabilityQueueInfluencesDecision(t *testing.T) {
 		TargetViolationPct:  0.05,
 		TargetViolationProb: 0.05,
 		DecayFactor:         1.0,
-		ProbabilityWeight:   100.0, // High weight to dominate
+		ProbabilityWeight:   100.0,
 	})
 
-	// Create profiles with different violation probabilities
-	safeProfile := &decision.ProfileStats{
+	safeProfile := &apis.ProfileStats{
 		Count:            100,
 		MeanDurationMs:   500,
 		StdDevDurationMs: 50,
 		P95DurationMs:    600,
-		DurationHistogram: []decision.HistogramBucket{
+		DurationHistogram: []apis.HistogramBucket{
 			{Count: 100, LastDecay: time.Now()},
 		},
 	}
 	safeProfile.DurationHistogram[0].SetUpperBound(600)
 
-	riskyProfile := &decision.ProfileStats{
+	riskyProfile := &apis.ProfileStats{
 		Count:            100,
 		MeanDurationMs:   900,
 		StdDevDurationMs: 200,
 		P95DurationMs:    1300,
-		DurationHistogram: []decision.HistogramBucket{
+		DurationHistogram: []apis.HistogramBucket{
 			{Count: 50, LastDecay: time.Now()},
 			{Count: 50, LastDecay: time.Now()},
 		},
@@ -267,10 +264,10 @@ func TestLyapunov_ProbabilityQueueInfluencesDecision(t *testing.T) {
 	// Decision with safe edge vs risky cloud
 	loc, weight := lyap.Decide(
 		"latency", deadline,
-		700, 800, // Edge faster
+		700, 800,
 		safeProfile, riskyProfile,
 		true, true,
-		0, 0, // Equal cost
+		0, 0,
 	)
 
 	t.Logf("Decision: loc=%s weight=%.2f (Zp=%.2f should prefer safe edge)", loc, weight, Zp)

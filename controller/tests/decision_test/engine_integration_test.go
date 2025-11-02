@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
-	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 )
 
 func TestEngine_ProbabilityBasedDecision(t *testing.T) {
@@ -25,36 +25,36 @@ func TestEngine_ProbabilityBasedDecision(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	local := &telemetry.LocalState{
+	local := &apis.LocalState{
 		FreeCPU:               1000,
 		FreeMem:               1000,
 		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalDemand:           map[string]apis.DemandByClass{},
 		TotalAllocatableCPU:   1000,
 		TotalAllocatableMem:   1000,
-		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
+		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
 		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true, // Add this
-		MeasurementConfidence: 1.0,  // Add this
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
 	}
-	wan := &telemetry.WANState{RTTMs: 20, LossPct: 0.5}
+	wan := &apis.WANState{RTTMs: 20, LossPct: 0.5}
 
 	// Seed profiles with different risk levels
 	ps := e.GetProfileStore()
-	edgeKey := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
-	cloudKey := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Cloud}
+	edgeKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
+	cloudKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Cloud}
 
 	// Edge: fast but risky (high variance)
 	for i := 0; i < 50; i++ {
-		ps.Update(edgeKey, decision.ProfileUpdate{ObservedDurationMs: 700, SLOMet: true})
+		ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 700, SLOMet: true})
 	}
 	for i := 0; i < 50; i++ {
-		ps.Update(edgeKey, decision.ProfileUpdate{ObservedDurationMs: 1200, SLOMet: false})
+		ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 1200, SLOMet: false})
 	}
 
 	// Cloud: slower but consistent
 	for i := 0; i < 100; i++ {
-		ps.Update(cloudKey, decision.ProfileUpdate{ObservedDurationMs: 850, SLOMet: true})
+		ps.Update(cloudKey, apis.ProfileUpdate{ObservedDurationMs: 850, SLOMet: true})
 	}
 
 	// Initial decision (no Zp buildup)
@@ -85,29 +85,29 @@ func TestEngine_ProfilesInfluenceDecision(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	local := &telemetry.LocalState{
+	local := &apis.LocalState{
 		FreeCPU:               1000,
 		FreeMem:               1000,
 		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalDemand:           map[string]apis.DemandByClass{},
 		TotalAllocatableCPU:   1000,
 		TotalAllocatableMem:   1000,
-		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
+		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
 		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true, // Add this
-		MeasurementConfidence: 1.0,  // Add this
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
 	}
-	wan := &telemetry.WANState{RTTMs: 30, LossPct: 0.5}
+	wan := &apis.WANState{RTTMs: 30, LossPct: 0.5}
 
-	edgeKey := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
-	cloudKey := decision.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Cloud}
+	edgeKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
+	cloudKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Cloud}
 
 	// Scenario: Edge historically violates, cloud is safe
 	for i := 0; i < 100; i++ {
-		ps.Update(edgeKey, decision.ProfileUpdate{ObservedDurationMs: 1200, SLOMet: false})
+		ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 1200, SLOMet: false})
 	}
 	for i := 0; i < 100; i++ {
-		ps.Update(cloudKey, decision.ProfileUpdate{ObservedDurationMs: 800, SLOMet: true})
+		ps.Update(cloudKey, apis.ProfileUpdate{ObservedDurationMs: 800, SLOMet: true})
 	}
 
 	edgeProf := ps.GetOrDefault(edgeKey)

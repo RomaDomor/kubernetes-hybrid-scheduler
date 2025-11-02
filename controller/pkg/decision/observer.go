@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
@@ -113,7 +114,7 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 	actualDuration := endTime.Sub(startTime).Milliseconds()
 
 	deadlineMs, _ := parseFloat64(pod.Annotations[constants.AnnotationSLODeadline])
-	totalTime := float64(queueWait) + float64(actualDuration)
+	totalTime := queueWait + float64(actualDuration)
 	sloMet := true
 	if deadlineMs != 0 {
 		sloMet = totalTime <= deadlineMs
@@ -125,11 +126,10 @@ func (o *PodObserver) recordCompletion(pod *corev1.Pod) {
 		class = constants.DefaultSLOClass
 	}
 
-	// Update profile store
-	key := GetProfileKey(pod, decision)
-	o.store.Update(key, ProfileUpdate{
+	key := apis.GetProfileKey(pod, decision)
+	o.store.Update(key, apis.ProfileUpdate{
 		ObservedDurationMs: float64(actualDuration),
-		QueueWaitMs:        float64(queueWait),
+		QueueWaitMs:        queueWait,
 		SLOMet:             sloMet,
 	})
 

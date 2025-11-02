@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 )
 
@@ -43,28 +44,22 @@ var (
 
 type LocalCollector struct {
 	kubeClient       kubernetes.Interface
-	cache            *LocalState
+	cache            *apis.LocalState
 	cacheMu          sync.RWMutex
 	podLister        corelisters.PodLister
 	nodeLister       corelisters.NodeLister
 	podIndexer       cache.Indexer
 	pessimismPctEdge int64
 	decisionMu       sync.Mutex
-
-	nodeCache      map[string]*nodeSnapshot
-	nodeCacheMu    sync.RWMutex
-	lastFullUpdate time.Time
+	nodeCache        map[string]*nodeSnapshot
+	nodeCacheMu      sync.RWMutex
+	lastFullUpdate   time.Time
 }
 
 type nodeSnapshot struct {
 	allocatableCPU int64
 	allocatableMem int64
 	lastSeen       time.Time
-}
-
-type DemandByClass struct {
-	CPU int64
-	Mem int64
 }
 
 func NewLocalCollector(
@@ -97,7 +92,7 @@ func NewLocalCollector(
 
 	lc := &LocalCollector{
 		kubeClient:       kube,
-		cache:            &LocalState{PendingPodsPerClass: make(map[string]int), TotalDemand: make(map[string]DemandByClass)},
+		cache:            &apis.LocalState{PendingPodsPerClass: make(map[string]int), TotalDemand: make(map[string]apis.DemandByClass)},
 		podLister:        podInformer.Lister(),
 		nodeLister:       nodeInformer.Lister(),
 		podIndexer:       podInformer.Informer().GetIndexer(),
@@ -130,9 +125,7 @@ func NewLocalCollector(
 	return lc
 }
 
-func (l *LocalCollector) triggerIncremental() {
-	// Debounced: actual update happens in background loop
-}
+func (l *LocalCollector) triggerIncremental() {}
 
 func (l *LocalCollector) updateNodeCache(node *corev1.Node) {
 	if node.Labels[constants.NodeRoleLabelEdge] != constants.LabelValueTrue {
@@ -155,8 +148,7 @@ func (l *LocalCollector) removeNodeCache(nodeName string) {
 	delete(l.nodeCache, nodeName)
 }
 
-// GetLocalState computes state with timeout awareness
-func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error) {
+func (l *LocalCollector) GetLocalState(ctx context.Context) (*apis.LocalState, error) {
 	start := time.Now()
 	defer func() {
 		localComputeDuration.Observe(time.Since(start).Seconds())
@@ -171,15 +163,15 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	l.nodeCacheMu.RUnlock()
 
 	if len(nodeSnapshots) == 0 {
-		st := &LocalState{
+		st := &apis.LocalState{
 			FreeCPU:               0,
 			FreeMem:               0,
 			PendingPodsPerClass:   make(map[string]int),
-			TotalDemand:           make(map[string]DemandByClass),
+			TotalDemand:           make(map[string]apis.DemandByClass),
 			TotalAllocatableCPU:   0,
 			TotalAllocatableMem:   0,
 			Timestamp:             time.Now(),
-			BestEdgeNode:          BestNode{},
+			BestEdgeNode:          apis.BestNode{},
 			IsCompleteSnapshot:    true,
 			MeasurementConfidence: 1.0,
 		}
@@ -187,8 +179,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 		return st, nil
 	}
 
-	// Compute with context deadline awareness
-	resultCh := make(chan *LocalState, 1)
+	resultCh := make(chan *apis.LocalState, 1)
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -208,7 +199,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 
 		cached := l.GetCachedLocalState()
 		cached.IsCompleteSnapshot = false
-		cached.MeasurementConfidence = 0.3 // Low confidence
+		cached.MeasurementConfidence = 0.3
 		return cached, nil
 
 	case err := <-errCh:
@@ -222,7 +213,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*LocalState, error)
 	}
 }
 
-func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*LocalState, error) {
+func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*apis.LocalState, error) {
 	var totalAllocCPU, totalAllocMem int64
 	edgeNodes := make(map[string]bool, len(nodeSnapshots))
 
@@ -319,7 +310,7 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 	// Pending pressure
 	var pendingCPU, pendingMemMi int64
 	pendingPerClass := make(map[string]int, 8)
-	totalDemand := make(map[string]DemandByClass, 8)
+	totalDemand := make(map[string]apis.DemandByClass, 8)
 
 	for _, p := range pods {
 		if p.Labels[constants.LabelManaged] == constants.LabelValueTrue &&
@@ -379,7 +370,7 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 		freeMemMi = 0
 	}
 
-	return &LocalState{
+	return &apis.LocalState{
 		FreeCPU:             freeCPU,
 		FreeMem:             freeMemMi,
 		PendingPodsPerClass: pendingPerClass,
@@ -387,20 +378,20 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 		TotalAllocatableCPU: totalAllocCPU,
 		TotalAllocatableMem: totalAllocMem,
 		Timestamp:           time.Now(),
-		BestEdgeNode:        BestNode{Name: bestName, FreeCPU: bestFreeCPU, FreeMem: bestFreeMemMi},
+		BestEdgeNode:        apis.BestNode{Name: bestName, FreeCPU: bestFreeCPU, FreeMem: bestFreeMemMi},
 		IsStale:             false,
 		StaleDuration:       0,
 	}, nil
 }
 
-func (l *LocalCollector) GetCachedLocalState() *LocalState {
+func (l *LocalCollector) GetCachedLocalState() *apis.LocalState {
 	l.cacheMu.RLock()
 	defer l.cacheMu.RUnlock()
 
 	if l.cache == nil {
-		return &LocalState{
+		return &apis.LocalState{
 			PendingPodsPerClass:   make(map[string]int),
-			TotalDemand:           make(map[string]DemandByClass),
+			TotalDemand:           make(map[string]apis.DemandByClass),
 			IsStale:               true,
 			IsCompleteSnapshot:    false,
 			MeasurementConfidence: 0.0,
@@ -433,7 +424,7 @@ func (l *LocalCollector) UpdateMetrics() {
 	localStaleGauge.Set(state.StaleDuration.Seconds())
 }
 
-func (l *LocalCollector) setCache(state *LocalState) {
+func (l *LocalCollector) setCache(state *apis.LocalState) {
 	l.cacheMu.Lock()
 	l.cache = state
 	l.cacheMu.Unlock()
@@ -473,18 +464,3 @@ func wantsEdge(pod *corev1.Pod) bool {
 
 func (l *LocalCollector) LockForDecision()   { l.decisionMu.Lock() }
 func (l *LocalCollector) UnlockForDecision() { l.decisionMu.Unlock() }
-
-type LocalCollectorForTest struct {
-	Cache *LocalState
-}
-
-func (l *LocalCollectorForTest) GetCachedLocalState() *LocalState {
-	if l.Cache == nil {
-		return &LocalState{PendingPodsPerClass: map[string]int{}, TotalDemand: map[string]DemandByClass{}, IsStale: true}
-	}
-	staleDuration := time.Since(l.Cache.Timestamp)
-	state := *l.Cache
-	state.IsStale = staleDuration > 60*time.Second
-	state.StaleDuration = staleDuration
-	return &state
-}

@@ -7,10 +7,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
-	"kubernetes-hybrid-scheduler/controller/pkg/slo"
-	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 )
 
 func podWith(class string, cpuM, memMi int64) *corev1.Pod {
@@ -18,8 +17,8 @@ func podWith(class string, cpuM, memMi int64) *corev1.Pod {
 	return p
 }
 
-func sloMust(class string, deadline int, offload bool, prio int) *slo.SLO {
-	return &slo.SLO{
+func sloMust(class string, deadline int, offload bool, prio int) *apis.SLO {
+	return &apis.SLO{
 		Class:          class,
 		DeadlineMs:     deadline,
 		OffloadAllowed: offload,
@@ -30,7 +29,6 @@ func sloMust(class string, deadline int, offload bool, prio int) *slo.SLO {
 func newEngine() *decision.Engine {
 	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
 
-	// Initialize Lyapunov scheduler
 	lyap := decision.NewLyapunovScheduler()
 	lyap.SetTargetViolationRate("latency", 0.05)
 	lyap.SetTargetViolationRate("interactive", 0.05)
@@ -43,7 +41,7 @@ func newEngine() *decision.Engine {
 		LossUnusablePct:         10,
 		LocalityBonus:           50,
 		ConfidenceWeight:        30,
-		ExplorationRate:         0, // deterministic
+		ExplorationRate:         0,
 		MaxProfileCount:         100,
 		ProfileStore:            ps,
 		LyapunovScheduler:       lyap,
@@ -61,19 +59,19 @@ func TestDecide_WANUnusable_ForcesEdge(t *testing.T) {
 	e := newEngine()
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, true, 5)
-	local := &telemetry.LocalState{
+	local := &apis.LocalState{
 		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalDemand:           map[string]apis.DemandByClass{},
 		TotalAllocatableCPU:   1000,
 		TotalAllocatableMem:   1000,
 		FreeCPU:               1000,
 		FreeMem:               1000,
-		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
+		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
 		Timestamp:             time.Now(),
 		IsCompleteSnapshot:    true,
 		MeasurementConfidence: 1.0,
 	}
-	wan := &telemetry.WANState{RTTMs: 400, LossPct: 15}
+	wan := &apis.WANState{RTTMs: 400, LossPct: 15}
 
 	res := e.Decide(p, s, local, wan)
 	if res.Location != constants.Edge || res.Reason != "wan_unusable" {
@@ -85,19 +83,19 @@ func TestDecide_OffloadDisabled_StaysEdge(t *testing.T) {
 	e := newEngine()
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, false, 5)
-	local := &telemetry.LocalState{
+	local := &apis.LocalState{
 		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalDemand:           map[string]apis.DemandByClass{},
 		TotalAllocatableCPU:   1000,
 		TotalAllocatableMem:   1000,
 		FreeCPU:               1000,
 		FreeMem:               1000,
-		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
+		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
 		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true, // Add this
-		MeasurementConfidence: 1.0,  // Add this
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
 	}
-	wan := &telemetry.WANState{RTTMs: 50, LossPct: 0.1}
+	wan := &apis.WANState{RTTMs: 50, LossPct: 0.1}
 
 	res := e.Decide(p, s, local, wan)
 	if res.Location != constants.Edge || res.Reason != "offload_disabled" {
@@ -108,24 +106,23 @@ func TestDecide_OffloadDisabled_StaysEdge(t *testing.T) {
 func TestDecide_CloudFeasibleOnly(t *testing.T) {
 	e := newEngine()
 	p := podWith("latency", 200, 128)
-	s := sloMust("latency", 100, true, 5) // Very tight deadline
+	s := sloMust("latency", 100, true, 5)
 
-	local := &telemetry.LocalState{
+	local := &apis.LocalState{
 		FreeCPU:             1000,
 		FreeMem:             1000,
-		PendingPodsPerClass: map[string]int{"latency": 10}, // Queue will cause edge to miss deadline
-		TotalDemand: map[string]telemetry.DemandByClass{
+		PendingPodsPerClass: map[string]int{"latency": 10},
+		TotalDemand: map[string]apis.DemandByClass{
 			"latency": {CPU: 200, Mem: 128},
 		},
 		TotalAllocatableCPU:   1000,
 		TotalAllocatableMem:   1000,
-		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 800, FreeMem: 800},
+		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 800, FreeMem: 800},
 		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true, // Add this
-		MeasurementConfidence: 1.0,  // Add this
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
 	}
-	// Cloud is fast enough
-	wan := &telemetry.WANState{RTTMs: 10, LossPct: 0.0}
+	wan := &apis.WANState{RTTMs: 10, LossPct: 0.0}
 
 	res := e.Decide(p, s, local, wan)
 	if res.Location != constants.Cloud {
@@ -138,24 +135,22 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, true, 5)
 
-	// Local stale >5s (class threshold) => force cloud
-	local := &telemetry.LocalState{
+	local := &apis.LocalState{
 		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalDemand:           map[string]apis.DemandByClass{},
 		IsStale:               true,
-		StaleDuration:         6 * time.Second, // Changed from 6 minutes
+		StaleDuration:         6 * time.Second,
 		Timestamp:             time.Now().Add(-6 * time.Second),
 		IsCompleteSnapshot:    false,
 		MeasurementConfidence: 0.2,
 	}
-	wan := &telemetry.WANState{RTTMs: 50}
+	wan := &apis.WANState{RTTMs: 50}
 
 	res := e.Decide(p, s, local, wan)
 	if res.Location != constants.Cloud || res.Reason != "telemetry_circuit_breaker" {
 		t.Fatalf("want CLOUD telemetry_circuit_breaker, got %v %s", res.Location, res.Reason)
 	}
 
-	// WAN stale >10m => force edge with wan_circuit_breaker
 	local.IsStale = false
 	local.StaleDuration = 0
 	local.Timestamp = time.Now()
@@ -174,26 +169,25 @@ func TestDecide_EdgePreferred_BothFeasible(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 5000, true, 5)
 
-	local := &telemetry.LocalState{
+	local := &apis.LocalState{
 		FreeCPU:             800,
 		FreeMem:             800,
 		PendingPodsPerClass: map[string]int{"latency": 0},
-		TotalDemand: map[string]telemetry.DemandByClass{
+		TotalDemand: map[string]apis.DemandByClass{
 			"latency": {CPU: 200, Mem: 128},
 		},
 		TotalAllocatableCPU:   1000,
 		TotalAllocatableMem:   1000,
-		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 800, FreeMem: 800},
+		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 800, FreeMem: 800},
 		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true, // Add this
-		MeasurementConfidence: 1.0,  // Add this
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
 	}
 
-	wan := &telemetry.WANState{RTTMs: 50, LossPct: 1}
+	wan := &apis.WANState{RTTMs: 50, LossPct: 1}
 
 	res := e.Decide(p, s, local, wan)
 
-	// Both should be feasible, edge should be preferred due to locality
 	if res.Location != constants.Edge {
 		t.Fatalf("want EDGE (both feasible), got %v (reason=%s)", res.Location, res.Reason)
 	}
@@ -206,22 +200,22 @@ func TestDecide_LyapunovAdaptsToViolations(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	local := &telemetry.LocalState{
+	local := &apis.LocalState{
 		FreeCPU:             500,
 		FreeMem:             500,
 		PendingPodsPerClass: map[string]int{"latency": 5},
-		TotalDemand: map[string]telemetry.DemandByClass{
+		TotalDemand: map[string]apis.DemandByClass{
 			"latency": {CPU: 500, Mem: 500},
 		},
 		TotalAllocatableCPU:   1000,
 		TotalAllocatableMem:   1000,
-		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 500, FreeMem: 500},
+		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 500, FreeMem: 500},
 		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true, // Add this
-		MeasurementConfidence: 1.0,  // Add this
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
 	}
 
-	wan := &telemetry.WANState{RTTMs: 20, LossPct: 0.5}
+	wan := &apis.WANState{RTTMs: 20, LossPct: 0.5}
 
 	// Initial decision
 	res1 := e.Decide(p, s, local, wan)
@@ -267,19 +261,19 @@ func TestDecide_LowConfidenceForcesCloud(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, true, 5)
 
-	local := &telemetry.LocalState{
+	local := &apis.LocalState{
 		FreeCPU:               1000,
 		FreeMem:               1000,
 		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]telemetry.DemandByClass{},
+		TotalDemand:           map[string]apis.DemandByClass{},
 		TotalAllocatableCPU:   1000,
 		TotalAllocatableMem:   1000,
-		BestEdgeNode:          telemetry.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
+		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
 		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    false, // Timed out!
-		MeasurementConfidence: 0.3,   // Low confidence
+		IsCompleteSnapshot:    false,
+		MeasurementConfidence: 0.3,
 	}
-	wan := &telemetry.WANState{RTTMs: 50, LossPct: 0.1}
+	wan := &apis.WANState{RTTMs: 50, LossPct: 0.1}
 
 	res := e.Decide(p, s, local, wan)
 

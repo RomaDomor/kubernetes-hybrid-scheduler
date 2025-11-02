@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/signals"
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
@@ -407,9 +408,9 @@ func readyHandlerFactory(syncChecks ...cache.InformerSynced) http.HandlerFunc {
 func debugTelemetryHandler(tel telemetry.Collector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		state := struct {
-			Local *telemetry.LocalState `json:"local"`
-			WAN   *telemetry.WANState   `json:"wan"`
-			Time  time.Time             `json:"timestamp"`
+			Local *apis.LocalState `json:"local"`
+			WAN   *apis.WANState   `json:"wan"`
+			Time  time.Time        `json:"timestamp"`
 		}{
 			Local: tel.GetCachedLocalState(),
 			WAN:   tel.GetCachedWANState(),

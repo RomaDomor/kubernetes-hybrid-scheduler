@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/util"
 	"net/http"
 	"time"
 
@@ -16,14 +14,17 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/slo"
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
+	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
 
 type decider interface {
-	Decide(pod *corev1.Pod, slo *slo.SLO, local *telemetry.LocalState, wan *telemetry.WANState) decision.Result
+	Decide(pod *corev1.Pod, slo *apis.SLO, local *apis.LocalState, wan *apis.WANState) apis.Result
 }
+
 type Server struct {
 	dec        decider
 	tel        telemetry.Collector
@@ -51,7 +52,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		admissionLatency.Observe(time.Since(start).Seconds())
 	}()
 
-	// Rate limiting
 	if !s.limiter.Allow() {
 		klog.Warning("Admission rate limit exceeded")
 		admissionRateLimited.Inc()
@@ -120,7 +120,6 @@ func (s *Server) processScheduling(
 	ctx context.Context,
 	pod *corev1.Pod,
 ) *admissionv1.AdmissionResponse {
-	// Parse SLO
 	sloData, err := slo.ParseSLO(pod)
 	if err != nil {
 		klog.Warningf("%s: Invalid SLO: %v",
@@ -128,11 +127,9 @@ func (s *Server) processScheduling(
 		return allow()
 	}
 
-	// Lock before reading telemetry
 	s.tel.LockForDecision()
 	defer s.tel.UnlockForDecision()
 
-	// Try a quick refresh with explicit timeout
 	ctx2, cancel2 := context.WithTimeout(ctx, 500*time.Millisecond)
 	freshLocal, err := s.tel.GetLocalState(ctx2)
 	cancel2()
@@ -149,15 +146,12 @@ func (s *Server) processScheduling(
 
 	wan := s.tel.GetCachedWANState()
 
-	// Log measurement quality
 	klog.V(4).Infof("%s: Telemetry quality: complete=%v confidence=%.2f age=%v",
 		util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
 		local.IsCompleteSnapshot, local.MeasurementConfidence, local.StaleDuration)
 
-	// Decide
 	result := s.dec.Decide(pod, sloData, local, wan)
 
-	// Record event
 	_, err = s.kubeClient.CoreV1().Events(pod.Namespace).Create(ctx, &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s.%x", pod.Name, time.Now().UnixNano()),

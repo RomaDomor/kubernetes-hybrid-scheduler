@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"kubernetes-hybrid-scheduler/controller/pkg/util"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -15,7 +15,7 @@ import (
 
 func (s *Server) buildPatchResponse(
 	pod *corev1.Pod,
-	res decision.Result,
+	res apis.Result,
 ) *admissionv1.AdmissionResponse {
 	var patches []map[string]interface{}
 
@@ -57,7 +57,6 @@ func (s *Server) buildPatchResponse(
 			"value": constants.LabelValueTrue,
 		})
 
-		// Assign appropriate PriorityClass based on decision reason
 		priorityClass := s.getPriorityClassForReason(res.Reason)
 		if priorityClass != "" {
 			patches = append(patches, map[string]interface{}{
@@ -75,7 +74,6 @@ func (s *Server) buildPatchResponse(
 			},
 		)
 
-		// Cloud workloads get lower priority
 		patches = append(patches, map[string]interface{}{
 			"op":    "add",
 			"path":  "/spec/priorityClassName",
@@ -93,22 +91,14 @@ func (s *Server) buildPatchResponse(
 	}
 }
 
-// getPriorityClassForReason maps scheduling decision reasons to PriorityClasses
 func (s *Server) getPriorityClassForReason(reason string) string {
 	switch reason {
-	// High priority: queued pods protecting reserved space
 	case "edge_queue_preferred", "edge_queue_marginal":
 		return "queued-edge-workload"
-
-	// Medium priority: immediate edge scheduling
 	case "edge_feasible_only", "edge_preferred":
 		return "edge-preferred"
-
-	// Low priority: best effort
 	case "best_effort_edge":
 		return "edge-best-effort"
-
-	// No priority assignment for other reasons
 	default:
 		return ""
 	}
@@ -122,6 +112,6 @@ func addAnnotation(key, val string) map[string]interface{} {
 	}
 }
 
-func (s *Server) BuildPatchResponseForTest(pod *corev1.Pod, res decision.Result) *admissionv1.AdmissionResponse {
+func (s *Server) BuildPatchResponseForTest(pod *corev1.Pod, res apis.Result) *admissionv1.AdmissionResponse {
 	return s.buildPatchResponse(pod, res)
 }

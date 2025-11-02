@@ -36,8 +36,7 @@ func TestWANProbe_CacheStaleness(t *testing.T) {
 }
 
 func TestWANProbe_DefaultValues(t *testing.T) {
-	p := telemetry.NewWANProbe("192.0.2.1", 1*time.Second) // TEST-NET-1 (unreachable)
-
+	p := telemetry.NewWANProbe("192.0.2.1", 1*time.Second)
 	time.Sleep(100 * time.Millisecond)
 
 	s := p.GetCachedWANState()

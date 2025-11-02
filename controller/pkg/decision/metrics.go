@@ -3,6 +3,8 @@ package decision
 import (
 	"strings"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -99,7 +101,7 @@ var (
 			Name: "scheduler_measurement_confidence",
 			Help: "Confidence score of local measurements (0-1)",
 		},
-		[]string{"type"}, // "local" or "wan"
+		[]string{"type"},
 	)
 
 	lowConfidenceDecisions = promauto.NewCounterVec(
@@ -119,7 +121,7 @@ var (
 	)
 )
 
-func recordDecision(result Result, class string) {
+func recordDecision(result apis.Result, class string) {
 	decisionsTotal.WithLabelValues(
 		string(result.Location),
 		result.Reason,
@@ -163,7 +165,6 @@ func (ps *ProfileStore) UpdateMetrics() {
 	}
 }
 
-// UpdateLyapunovMetrics updates Lyapunov-specific metrics
 func UpdateLyapunovMetrics(lyapunov *LyapunovScheduler) {
 	state := lyapunov.ExportState()
 
@@ -187,7 +188,7 @@ func UpdateLyapunovMetrics(lyapunov *LyapunovScheduler) {
 	}
 }
 
-func recordPredictionError(key ProfileKey, errorMs float64) {
+func recordPredictionError(key apis.ProfileKey, errorMs float64) {
 	labels := prometheus.Labels{
 		"class":    key.Class,
 		"tier":     key.CPUTier,

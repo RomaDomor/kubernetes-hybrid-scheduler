@@ -7,43 +7,10 @@ import (
 
 	"k8s.io/klog/v2"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 )
 
-// LyapunovScheduler implements drift-plus-penalty optimization for SLO guarantees.
-//
-// MATHEMATICAL FOUNDATION:
-// Based on Lyapunov optimization theory, this scheduler maintains
-// virtual queues to enforce time-average SLO constraints while optimizing cost.
-//
-// LYAPUNOV FUNCTION:
-// We use L(Z) = (1/2) * Σ_c (Z_c^2 + Zp_c^2) where:
-//   - Z_c: magnitude-based virtual queue for class c (tracks deadline slack violations)
-//   - Zp_c: probability-based virtual queue for class c (tracks violation probability)
-//
-// DRIFT-PLUS-PENALTY:
-// At each decision slot t, we minimize an upper bound on:
-//
-//	Δ(t) + β * Cost(t)
-//
-// where Δ(t) = E[L(t+1) - L(t) | Z(t)] is the one-slot drift.
-//
-// PRACTICAL PROXY:
-// Rather than computing the full drift bound analytically, we use the weighted proxy:
-//
-//	Weight = β*Cost + Z_c*PredictedViolation + Zp_c*PredictedProbability
-//
-// This proxy correlates strongly with the drift-plus-penalty objective and is
-// computationally efficient for online decisions.
-//
-// GUARANTEES:
-// 1. Queue Stability: If SLO constraints are feasible, virtual queues remain bounded
-// 2. Near-Optimality: Time-average cost within O(1/β) of optimal
-// 3. Constraint Satisfaction: Time-average violation rate ≤ target + O(1/β)
-//
-// REFERENCES:
-//   - L. Huang and M. J. Neely, "Delay Reduction via Lagrange Multipliers in
-//     Stochastic Network Optimization," IEEE Trans. Automatic Control, 2011
 type LyapunovScheduler struct {
 	mu sync.RWMutex
 
@@ -189,9 +156,6 @@ func (l *LyapunovScheduler) getClassConfig(class string) *ClassConfig {
 	case "latency", "interactive":
 		targetPct = 0.05
 		targetProb = 0.05
-	case "throughput", "streaming":
-		targetPct = 0.10
-		targetProb = 0.10
 	case "batch":
 		targetPct = 0.20
 		targetProb = 0.20
@@ -235,8 +199,8 @@ func (l *LyapunovScheduler) Decide(
 	deadline float64,
 	localETA float64,
 	cloudETA float64,
-	localProfile *ProfileStats,
-	cloudProfile *ProfileStats,
+	localProfile *apis.ProfileStats,
+	cloudProfile *apis.ProfileStats,
 	localFeasible bool,
 	cloudFeasible bool,
 	localCost float64,

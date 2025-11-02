@@ -5,12 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 )
 
 func TestComputeViolationProbability_HistogramBased(t *testing.T) {
-	// Create a profile with realistic histogram
-	profile := &decision.ProfileStats{
+	profile := &apis.ProfileStats{
 		Count:             100,
 		MeanDurationMs:    500,
 		StdDevDurationMs:  100,
@@ -18,13 +17,13 @@ func TestComputeViolationProbability_HistogramBased(t *testing.T) {
 		ConfidenceScore:   1.0,
 		SLOComplianceRate: 0.85,
 		LastUpdated:       time.Now(),
-		DurationHistogram: []decision.HistogramBucket{
-			{Count: 10, LastDecay: time.Now()}, // 0-100ms
-			{Count: 20, LastDecay: time.Now()}, // 100-200ms
-			{Count: 30, LastDecay: time.Now()}, // 200-500ms
-			{Count: 25, LastDecay: time.Now()}, // 500-1000ms
-			{Count: 10, LastDecay: time.Now()}, // 1000-2000ms
-			{Count: 5, LastDecay: time.Now()},  // 2000+ms (inf)
+		DurationHistogram: []apis.HistogramBucket{
+			{Count: 10, LastDecay: time.Now()},
+			{Count: 20, LastDecay: time.Now()},
+			{Count: 30, LastDecay: time.Now()},
+			{Count: 25, LastDecay: time.Now()},
+			{Count: 10, LastDecay: time.Now()},
+			{Count: 5, LastDecay: time.Now()},
 		},
 	}
 
@@ -71,10 +70,8 @@ func TestComputeViolationProbability_HistogramBased(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
 			prob := profile.ComputeViolationProbability(tt.deadline)
-
 			t.Logf("Deadline=%.0fms: Pr[violation]=%.3f (expected %.3f-%.3f)",
 				tt.deadline, prob, tt.wantProbMin, tt.wantProbMax)
-
 			if prob < tt.wantProbMin || prob > tt.wantProbMax {
 				t.Errorf("Probability %.3f outside expected range [%.3f, %.3f]",
 					prob, tt.wantProbMin, tt.wantProbMax)
@@ -84,8 +81,7 @@ func TestComputeViolationProbability_HistogramBased(t *testing.T) {
 }
 
 func TestComputeViolationProbability_LowSampleCount(t *testing.T) {
-	// Profile with insufficient samples for histogram
-	profile := &decision.ProfileStats{
+	profile := &apis.ProfileStats{
 		Count:             5,
 		MeanDurationMs:    500,
 		StdDevDurationMs:  100,
@@ -93,7 +89,7 @@ func TestComputeViolationProbability_LowSampleCount(t *testing.T) {
 		ConfidenceScore:   0.25,
 		SLOComplianceRate: 0.80,
 		LastUpdated:       time.Now(),
-		DurationHistogram: []decision.HistogramBucket{}, // Empty histogram
+		DurationHistogram: []apis.HistogramBucket{},
 	}
 
 	tests := []struct {
@@ -108,16 +104,11 @@ func TestComputeViolationProbability_LowSampleCount(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
 			prob := profile.ComputeViolationProbability(tt.deadline)
-
 			t.Logf("%s: deadline=%.0fms mean=%.0fms → Pr[violation]=%.3f",
 				tt.description, tt.deadline, profile.MeanDurationMs, prob)
-
-			// Should use stats-based estimate
 			if prob < 0 || prob > 1 {
 				t.Errorf("Invalid probability: %.3f", prob)
 			}
-
-			// Basic sanity: higher deadline → lower probability
 			if tt.deadline > profile.MeanDurationMs+profile.StdDevDurationMs {
 				if prob > 0.5 {
 					t.Errorf("Deadline well above mean should have low violation prob, got %.3f", prob)
@@ -129,7 +120,7 @@ func TestComputeViolationProbability_LowSampleCount(t *testing.T) {
 
 func TestComputeViolationProbability_EdgeCases(t *testing.T) {
 	t.Run("nil profile", func(t *testing.T) {
-		var profile *decision.ProfileStats
+		var profile *apis.ProfileStats
 		prob := profile.ComputeViolationProbability(1000)
 		if prob != 0.5 {
 			t.Errorf("nil profile should return 0.5 (max uncertainty), got %.3f", prob)
@@ -137,11 +128,11 @@ func TestComputeViolationProbability_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("zero_variance_deterministic", func(t *testing.T) {
-		profile := &decision.ProfileStats{
+		profile := &apis.ProfileStats{
 			Count:             100,
 			MeanDurationMs:    500,
-			StdDevDurationMs:  0, // Zero variance
-			DurationHistogram: []decision.HistogramBucket{},
+			StdDevDurationMs:  0,
+			DurationHistogram: []apis.HistogramBucket{},
 		}
 
 		// Deadline BELOW mean: completion time is deterministically 500, which is >= 400
@@ -167,11 +158,11 @@ func TestComputeViolationProbability_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("empty histogram after decay", func(t *testing.T) {
-		profile := &decision.ProfileStats{
+		profile := &apis.ProfileStats{
 			Count:            50,
 			MeanDurationMs:   500,
 			StdDevDurationMs: 100,
-			DurationHistogram: []decision.HistogramBucket{
+			DurationHistogram: []apis.HistogramBucket{
 				{Count: 0, LastDecay: time.Now()},
 				{Count: 0, LastDecay: time.Now()},
 			},
@@ -193,12 +184,12 @@ func TestComputeViolationProbability_EdgeCases(t *testing.T) {
 }
 
 func TestComputeViolationProbability_Monotonicity(t *testing.T) {
-	profile := &decision.ProfileStats{
+	profile := &apis.ProfileStats{
 		Count:            100,
 		MeanDurationMs:   500,
 		StdDevDurationMs: 150,
 		P95DurationMs:    800,
-		DurationHistogram: []decision.HistogramBucket{
+		DurationHistogram: []apis.HistogramBucket{
 			{Count: 20, LastDecay: time.Now()},
 			{Count: 40, LastDecay: time.Now()},
 			{Count: 30, LastDecay: time.Now()},
