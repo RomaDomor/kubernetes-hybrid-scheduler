@@ -96,28 +96,12 @@ var (
 		[]string{"class"},
 	)
 
-	measurementConfidence = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "scheduler_measurement_confidence",
-			Help: "Confidence score of local measurements (0-1)",
-		},
-		[]string{"type"},
-	)
-
 	lowConfidenceDecisions = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "scheduler_low_confidence_decisions_total",
 			Help: "Decisions made with low measurement confidence",
 		},
 		[]string{"class", "decision"},
-	)
-
-	adjustedHeadroomGauge = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "scheduler_adjusted_headroom_percent",
-			Help: "Adjusted headroom based on measurement confidence",
-		},
-		[]string{"class"},
 	)
 )
 

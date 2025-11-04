@@ -40,6 +40,22 @@ var (
 		Name: "scheduler_local_incomplete_snapshots_total",
 		Help: "Number of incomplete local state snapshots due to timeout",
 	})
+	nonManagedCPUGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_non_managed_cpu_millicores",
+		Help: "CPU consumed by non-managed workloads on edge",
+	})
+	nonManagedMemGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_non_managed_memory_mebibytes",
+		Help: "Memory consumed by non-managed workloads on edge",
+	})
+	effectiveCapacityCPUGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_effective_capacity_cpu_millicores",
+		Help: "Effective CPU capacity available for managed workloads",
+	})
+	effectiveCapacityMemGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_effective_capacity_memory_mebibytes",
+		Help: "Effective memory capacity available for managed workloads",
+	})
 )
 
 type LocalCollector struct {
@@ -370,17 +386,61 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 		freeMemMi = 0
 	}
 
+	var totalNonManagedCPU, totalNonManagedMem int64
+	var totalManagedCPU, totalManagedMem int64
+
+	for _, p := range pods {
+		if !edgeNodes[p.Spec.NodeName] {
+			continue
+		}
+
+		// Skip completed pods
+		if p.Status.Phase == corev1.PodSucceeded ||
+			p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+
+		pr := podReqCache[p]
+
+		// Separate managed vs non-managed consumption
+		if p.Labels[constants.LabelManaged] == constants.LabelValueTrue {
+			totalManagedCPU += pr.cpuM
+			totalManagedMem += pr.memMi
+		} else {
+			// Non-managed: treat as permanent capacity reduction
+			totalNonManagedCPU += pr.cpuM
+			totalNonManagedMem += pr.memMi
+		}
+	}
+
+	// Effective capacity = Total - Non-managed (permanent baseline)
+	effectiveAllocCPU := totalAllocCPU - totalNonManagedCPU
+	effectiveAllocMem := totalAllocMem - totalNonManagedMem
+
+	// Prevent negative capacity
+	if effectiveAllocCPU < 0 {
+		effectiveAllocCPU = 0
+	}
+	if effectiveAllocMem < 0 {
+		effectiveAllocMem = 0
+	}
+
 	return &apis.LocalState{
-		FreeCPU:             freeCPU,
-		FreeMem:             freeMemMi,
-		PendingPodsPerClass: pendingPerClass,
-		TotalDemand:         totalDemand,
-		TotalAllocatableCPU: totalAllocCPU,
-		TotalAllocatableMem: totalAllocMem,
-		Timestamp:           time.Now(),
-		BestEdgeNode:        apis.BestNode{Name: bestName, FreeCPU: bestFreeCPU, FreeMem: bestFreeMemMi},
-		IsStale:             false,
-		StaleDuration:       0,
+		FreeCPU:                 freeCPU,
+		FreeMem:                 freeMemMi,
+		PendingPodsPerClass:     pendingPerClass,
+		TotalDemand:             totalDemand,
+		TotalAllocatableCPU:     totalAllocCPU,
+		TotalAllocatableMem:     totalAllocMem,
+		NonManagedCPU:           totalNonManagedCPU,
+		NonManagedMem:           totalNonManagedMem,
+		EffectiveAllocatableCPU: effectiveAllocCPU,
+		EffectiveAllocatableMem: effectiveAllocMem,
+
+		Timestamp:     time.Now(),
+		BestEdgeNode:  apis.BestNode{Name: bestName, FreeCPU: bestFreeCPU, FreeMem: bestFreeMemMi},
+		IsStale:       false,
+		StaleDuration: 0,
 	}, nil
 }
 
@@ -422,6 +482,10 @@ func (l *LocalCollector) UpdateMetrics() {
 	localFreeCPUGauge.Set(float64(state.FreeCPU))
 	localFreeMemGauge.Set(float64(state.FreeMem))
 	localStaleGauge.Set(state.StaleDuration.Seconds())
+	nonManagedCPUGauge.Set(float64(state.NonManagedCPU))
+	nonManagedMemGauge.Set(float64(state.NonManagedMem))
+	effectiveCapacityCPUGauge.Set(float64(state.EffectiveAllocatableCPU))
+	effectiveCapacityMemGauge.Set(float64(state.EffectiveAllocatableMem))
 }
 
 func (l *LocalCollector) setCache(state *apis.LocalState) {

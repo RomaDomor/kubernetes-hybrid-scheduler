@@ -333,7 +333,7 @@ func (e *Engine) predictEdgeETA(profile *apis.ProfileStats, local *apis.LocalSta
 
 	// Cap at realistic physical parallelism (assume ~8 cores per node, multiple nodes)
 	// Use allocatable CPU as proxy for total cluster capacity
-	physicalParallelism := local.TotalAllocatableCPU / 1000 // rough cores estimate
+	physicalParallelism := local.EffectiveAllocatableCPU / 1000 // rough cores estimate
 	if physicalParallelism < 1 {
 		physicalParallelism = 1
 	}
@@ -344,8 +344,13 @@ func (e *Engine) predictEdgeETA(profile *apis.ProfileStats, local *apis.LocalSta
 		parallelism = physicalParallelism
 	}
 
-	klog.V(5).Infof("Queue model for %s: pending=%d avgCPU=%dm avgMem=%dMi freeCPU=%dm freeMem=%dMi → parallelism=%d",
-		slo.Class, pendingCount, avgPodCPU, avgPodMem, local.FreeCPU, local.FreeMem, parallelism)
+	klog.V(5).Infof(
+		"Queue model: class=%s pending=%d avgCPU=%dm "+
+			"effectiveAlloc=%dm nonManaged=%dm freeCPU=%dm → parallelism=%d",
+		slo.Class, pendingCount, avgPodCPU,
+		local.EffectiveAllocatableCPU, local.NonManagedCPU,
+		local.FreeCPU, parallelism,
+	)
 
 	// G/G/c queue delay estimation using Kingman-Whitt approximation
 	//
@@ -363,20 +368,23 @@ func (e *Engine) predictEdgeETA(profile *apis.ProfileStats, local *apis.LocalSta
 	// Deterministic queue drain time
 	queueDrainTime := float64(pendingCount) * profile.MeanDurationMs / float64(parallelism)
 
-	// Compute utilization for variance adjustment
-	utilization := 0.0
-	if local.TotalAllocatableCPU > 0 {
-		utilization = float64(local.TotalAllocatableCPU-local.FreeCPU) / float64(local.TotalAllocatableCPU)
+	// Compute managedUtilization for variance adjustment
+	// This represents transient load that actually participates in queuing
+	managedUtilization := 0.0
+	if local.EffectiveAllocatableCPU > 0 {
+		managedActiveCPU := local.EffectiveAllocatableCPU - local.FreeCPU
+		managedUtilization = float64(managedActiveCPU) /
+			float64(local.EffectiveAllocatableCPU)
 	}
 
 	// Kingman's approximation for variance penalty
 	// VarPenalty = (C² / 2) * (ρ / (1-ρ)) * E[S]
 	// Where C² ≈ (σ/μ)² is squared coefficient of variation
 	varianceBuffer := 0.0
-	if utilization < 0.95 && profile.MeanDurationMs > 0 {
+	if managedUtilization < 0.95 && profile.MeanDurationMs > 0 {
 		cv2 := (profile.StdDevDurationMs / profile.MeanDurationMs) *
 			(profile.StdDevDurationMs / profile.MeanDurationMs)
-		rho := utilization
+		rho := managedUtilization
 		varianceBuffer = (cv2 / 2.0) * (rho / (1.0 - rho)) * profile.MeanDurationMs
 
 		// Scale by sqrt(c) for multi-server effect (variance reduction)
@@ -384,13 +392,17 @@ func (e *Engine) predictEdgeETA(profile *apis.ProfileStats, local *apis.LocalSta
 			varianceBuffer /= math.Sqrt(float64(parallelism))
 		}
 
-		klog.V(5).Infof("Variance buffer: cv²=%.2f ρ=%.2f buffer=%.0fms",
-			cv2, rho, varianceBuffer)
-	} else if utilization >= 0.95 {
-		// High utilization: use worst-case buffer (system near saturation)
+		klog.V(5).Infof(
+			"Variance buffer: cv²=%.2f ρ_managed=%.2f buffer=%.0fms",
+			cv2, rho, varianceBuffer,
+		)
+	} else if managedUtilization >= 0.95 {
+		// High managedUtilization: use worst-case buffer (system near saturation)
 		varianceBuffer = profile.StdDevDurationMs * 2.0
-		klog.V(5).Infof("High utilization (%.2f), using worst-case buffer: %.0fms",
-			utilization, varianceBuffer)
+		klog.V(5).Infof(
+			"High managed managedUtilization (%.2f), worst-case buffer: %.0fms",
+			managedUtilization, varianceBuffer,
+		)
 	}
 
 	queueWait := queueDrainTime + varianceBuffer
@@ -406,8 +418,12 @@ func (e *Engine) predictEdgeETA(profile *apis.ProfileStats, local *apis.LocalSta
 
 	totalETA := queueWait + execTime
 
-	klog.V(4).Infof("Edge ETA prediction: exec=%.0fms queue=%.0fms (drain=%.0fms variance=%.0fms) total=%.0fms",
-		execTime, queueWait, queueDrainTime, varianceBuffer, totalETA)
+	klog.V(4).Infof(
+		"Edge ETA: exec=%.0fms queue=%.0fms "+
+			"(drain=%.0fms variance=%.0fms ρ_managed=%.2f) total=%.0fms",
+		execTime, queueWait, queueDrainTime, varianceBuffer,
+		managedUtilization, totalETA,
+	)
 
 	return totalETA
 }
