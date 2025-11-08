@@ -59,18 +59,12 @@ func TestDecide_WANUnusable_ForcesEdge(t *testing.T) {
 	e := newEngine()
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, true, 5)
-	local := &apis.LocalState{
-		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]apis.DemandByClass{},
-		TotalAllocatableCPU:   1000,
-		TotalAllocatableMem:   1000,
-		FreeCPU:               1000,
-		FreeMem:               1000,
-		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
-		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true,
-		MeasurementConfidence: 1.0,
-	}
+	local := localStateWith(
+		1000, 1000, // free
+		1000, 1000, // allocatable
+		map[string]int{"latency": 0},
+		map[string]apis.DemandByClass{},
+	)
 	wan := &apis.WANState{RTTMs: 400, LossPct: 15}
 
 	res := e.Decide(p, s, local, wan)
@@ -83,18 +77,12 @@ func TestDecide_OffloadDisabled_StaysEdge(t *testing.T) {
 	e := newEngine()
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, false, 5)
-	local := &apis.LocalState{
-		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]apis.DemandByClass{},
-		TotalAllocatableCPU:   1000,
-		TotalAllocatableMem:   1000,
-		FreeCPU:               1000,
-		FreeMem:               1000,
-		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
-		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true,
-		MeasurementConfidence: 1.0,
-	}
+	local := localStateWith(
+		1000, 1000,
+		1000, 1000,
+		map[string]int{"latency": 0},
+		map[string]apis.DemandByClass{},
+	)
 	wan := &apis.WANState{RTTMs: 50, LossPct: 0.1}
 
 	res := e.Decide(p, s, local, wan)
@@ -108,20 +96,14 @@ func TestDecide_CloudFeasibleOnly(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 100, true, 5)
 
-	local := &apis.LocalState{
-		FreeCPU:             1000,
-		FreeMem:             1000,
-		PendingPodsPerClass: map[string]int{"latency": 10},
-		TotalDemand: map[string]apis.DemandByClass{
+	local := localStateWith(
+		1000, 1000,
+		1000, 1000,
+		map[string]int{"latency": 10},
+		map[string]apis.DemandByClass{
 			"latency": {CPU: 200, Mem: 128},
 		},
-		TotalAllocatableCPU:   1000,
-		TotalAllocatableMem:   1000,
-		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 800, FreeMem: 800},
-		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true,
-		MeasurementConfidence: 1.0,
-	}
+	)
 	wan := &apis.WANState{RTTMs: 10, LossPct: 0.0}
 
 	res := e.Decide(p, s, local, wan)
@@ -135,15 +117,19 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, true, 5)
 
-	local := &apis.LocalState{
-		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]apis.DemandByClass{},
-		IsStale:               true,
-		StaleDuration:         6 * time.Second,
-		Timestamp:             time.Now().Add(-6 * time.Second),
-		IsCompleteSnapshot:    false,
-		MeasurementConfidence: 0.2,
-	}
+	// Create stale local state
+	local := localStateWith(
+		1000, 1000,
+		1000, 1000,
+		map[string]int{"latency": 0},
+		map[string]apis.DemandByClass{},
+	)
+	local.IsStale = true
+	local.StaleDuration = 6 * time.Second
+	local.Timestamp = time.Now().Add(-6 * time.Second)
+	local.IsCompleteSnapshot = false
+	local.MeasurementConfidence = 0.2
+
 	wan := &apis.WANState{RTTMs: 50}
 
 	res := e.Decide(p, s, local, wan)
@@ -151,6 +137,7 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 		t.Fatalf("want CLOUD telemetry_circuit_breaker, got %v %s", res.Location, res.Reason)
 	}
 
+	// Test WAN circuit breaker
 	local.IsStale = false
 	local.StaleDuration = 0
 	local.Timestamp = time.Now()
@@ -158,6 +145,7 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 	local.MeasurementConfidence = 1.0
 	wan.IsStale = true
 	wan.StaleDuration = 11 * time.Minute
+
 	res2 := e.Decide(p, s, local, wan)
 	if res2.Location != constants.Edge || res2.Reason != "wan_circuit_breaker" {
 		t.Fatalf("want EDGE wan_circuit_breaker, got %v %s", res2.Location, res2.Reason)
@@ -169,21 +157,14 @@ func TestDecide_EdgePreferred_BothFeasible(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 5000, true, 5)
 
-	local := &apis.LocalState{
-		FreeCPU:             800,
-		FreeMem:             800,
-		PendingPodsPerClass: map[string]int{"latency": 0},
-		TotalDemand: map[string]apis.DemandByClass{
+	local := localStateWith(
+		800, 800,
+		1000, 1000,
+		map[string]int{"latency": 0},
+		map[string]apis.DemandByClass{
 			"latency": {CPU: 200, Mem: 128},
 		},
-		TotalAllocatableCPU:   1000,
-		TotalAllocatableMem:   1000,
-		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 800, FreeMem: 800},
-		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true,
-		MeasurementConfidence: 1.0,
-	}
-
+	)
 	wan := &apis.WANState{RTTMs: 50, LossPct: 1}
 
 	res := e.Decide(p, s, local, wan)
@@ -200,21 +181,14 @@ func TestDecide_LyapunovAdaptsToViolations(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	local := &apis.LocalState{
-		FreeCPU:             500,
-		FreeMem:             500,
-		PendingPodsPerClass: map[string]int{"latency": 5},
-		TotalDemand: map[string]apis.DemandByClass{
+	local := localStateWith(
+		500, 500,
+		1000, 1000,
+		map[string]int{"latency": 5},
+		map[string]apis.DemandByClass{
 			"latency": {CPU: 500, Mem: 500},
 		},
-		TotalAllocatableCPU:   1000,
-		TotalAllocatableMem:   1000,
-		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 500, FreeMem: 500},
-		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true,
-		MeasurementConfidence: 1.0,
-	}
-
+	)
 	wan := &apis.WANState{RTTMs: 20, LossPct: 0.5}
 
 	// Initial decision
@@ -261,18 +235,15 @@ func TestDecide_LowConfidenceForcesCloud(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, true, 5)
 
-	local := &apis.LocalState{
-		FreeCPU:               1000,
-		FreeMem:               1000,
-		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]apis.DemandByClass{},
-		TotalAllocatableCPU:   1000,
-		TotalAllocatableMem:   1000,
-		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
-		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    false,
-		MeasurementConfidence: 0.3,
-	}
+	local := localStateWith(
+		1000, 1000,
+		1000, 1000,
+		map[string]int{"latency": 0},
+		map[string]apis.DemandByClass{},
+	)
+	local.IsCompleteSnapshot = false
+	local.MeasurementConfidence = 0.3
+
 	wan := &apis.WANState{RTTMs: 50, LossPct: 0.1}
 
 	res := e.Decide(p, s, local, wan)
@@ -280,5 +251,35 @@ func TestDecide_LowConfidenceForcesCloud(t *testing.T) {
 	if res.Location != constants.Cloud || res.Reason != "low_measurement_confidence" {
 		t.Fatalf("Expected cloud with low_measurement_confidence, got %v %s",
 			res.Location, res.Reason)
+	}
+}
+
+func localStateWith(freeCPU, freeMem, allocCPU, allocMem int64, pending map[string]int, demand map[string]apis.DemandByClass) *apis.LocalState {
+	// Compute non-managed workload (difference between alloc and free)
+	usedCPU := allocCPU - freeCPU
+	usedMem := allocMem - freeMem
+
+	// For tests, assume 20% of usage is non-managed (system pods)
+	nonManagedCPU := int64(float64(usedCPU) * 0.2)
+	nonManagedMem := int64(float64(usedMem) * 0.2)
+
+	effectiveAllocCPU := allocCPU - nonManagedCPU
+	effectiveAllocMem := allocMem - nonManagedMem
+
+	return &apis.LocalState{
+		FreeCPU:                 freeCPU,
+		FreeMem:                 freeMem,
+		PendingPodsPerClass:     pending,
+		TotalDemand:             demand,
+		TotalAllocatableCPU:     allocCPU,
+		TotalAllocatableMem:     allocMem,
+		NonManagedCPU:           nonManagedCPU,
+		NonManagedMem:           nonManagedMem,
+		EffectiveAllocatableCPU: effectiveAllocCPU,
+		EffectiveAllocatableMem: effectiveAllocMem,
+		BestEdgeNode:            apis.BestNode{Name: "edge1", FreeCPU: freeCPU, FreeMem: freeMem},
+		Timestamp:               time.Now(),
+		IsCompleteSnapshot:      true,
+		MeasurementConfidence:   1.0,
 	}
 }

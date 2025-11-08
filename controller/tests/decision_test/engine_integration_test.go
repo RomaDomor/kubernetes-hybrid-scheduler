@@ -1,12 +1,10 @@
 package decision_test
 
 import (
-	"testing"
-	"time"
-
 	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
+	"testing"
 )
 
 func TestEngine_ProbabilityBasedDecision(t *testing.T) {
@@ -25,21 +23,16 @@ func TestEngine_ProbabilityBasedDecision(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	local := &apis.LocalState{
-		FreeCPU:               1000,
-		FreeMem:               1000,
-		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]apis.DemandByClass{},
-		TotalAllocatableCPU:   1000,
-		TotalAllocatableMem:   1000,
-		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
-		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true,
-		MeasurementConfidence: 1.0,
-	}
+	// UPDATED: Use helper
+	local := localStateWith(
+		1000, 1000,
+		1000, 1000,
+		map[string]int{"latency": 0},
+		map[string]apis.DemandByClass{},
+	)
 	wan := &apis.WANState{RTTMs: 20, LossPct: 0.5}
 
-	// Seed profiles with different risk levels
+	// ... rest of test unchanged
 	ps := e.GetProfileStore()
 	edgeKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
 	cloudKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Cloud}
@@ -85,18 +78,13 @@ func TestEngine_ProfilesInfluenceDecision(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	local := &apis.LocalState{
-		FreeCPU:               1000,
-		FreeMem:               1000,
-		PendingPodsPerClass:   map[string]int{"latency": 0},
-		TotalDemand:           map[string]apis.DemandByClass{},
-		TotalAllocatableCPU:   1000,
-		TotalAllocatableMem:   1000,
-		BestEdgeNode:          apis.BestNode{Name: "edge1", FreeCPU: 1000, FreeMem: 1000},
-		Timestamp:             time.Now(),
-		IsCompleteSnapshot:    true,
-		MeasurementConfidence: 1.0,
-	}
+	// UPDATED: Use helper
+	local := localStateWith(
+		1000, 1000,
+		1000, 1000,
+		map[string]int{"latency": 0},
+		map[string]apis.DemandByClass{},
+	)
 	wan := &apis.WANState{RTTMs: 30, LossPct: 0.5}
 
 	edgeKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}

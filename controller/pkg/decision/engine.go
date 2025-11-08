@@ -222,60 +222,60 @@ func (e *Engine) isEdgeFeasibleWithConfidence(
 	edgeETA float64,
 	deadline float64,
 ) bool {
-	// Check 1: Does it meet deadline?
+	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
+
+	// Guard: Check for degenerate cluster state
+	if local.EffectiveAllocatableCPU == 0 || local.EffectiveAllocatableMem == 0 {
+		klog.V(5).Infof("%s: No effective edge capacity available", podID)
+		return false
+	}
+
+	// 1. Check deadline feasibility (fails fast for time-critical checks)
 	if edgeETA > deadline {
+		klog.V(5).Infof("%s: Edge ETA %.0fms > deadline %.0fms", podID, edgeETA, deadline)
 		return false
 	}
 
-	// Check 2: Adjust headroom based on measurement confidence
-	baseHeadroom := e.config.EdgeHeadroomOverridePct
-
-	// Lower confidence → higher headroom (more conservative)
-	// confidence=1.0 → 1.0x headroom
-	// confidence=0.5 → 2.0x headroom
-	// confidence=0.0 → 3.0x headroom
-	confidenceFactor := 1.0 + (2.0 * (1.0 - local.MeasurementConfidence))
-	adjustedHeadroom := baseHeadroom * confidenceFactor
-
-	klog.V(5).Infof("Adjusted headroom: base=%.2f%% confidence=%.2f adjusted=%.2f%%",
-		baseHeadroom*100, local.MeasurementConfidence, adjustedHeadroom*100)
-
-	// Calculate demand from OTHER classes
-	podClass := pod.Annotations[constants.AnnotationSLOClass]
-	if podClass == "" {
-		podClass = constants.DefaultSLOClass
-	}
-
-	var otherClassDemandCPU int64
-	for class, demand := range local.TotalDemand {
-		if class != podClass {
-			otherClassDemandCPU += demand.CPU
-		}
-	}
-
-	// Available capacity after other classes
-	availableAfterOthers := local.TotalAllocatableCPU - otherClassDemandCPU
-
-	// Apply adjusted headroom
-	headroom := float64(availableAfterOthers) * adjustedHeadroom
-	effectiveAvailable := availableAfterOthers - int64(headroom)
-
-	if effectiveAvailable < reqCPU {
-		klog.V(5).Infof("Edge not feasible: need %dm but only %dm available (after other classes + %.1f%% headroom)",
-			reqCPU, effectiveAvailable, adjustedHeadroom*100)
+	// 2. Check basic resource availability
+	if local.FreeCPU < reqCPU || local.FreeMem < reqMem {
+		klog.V(5).Infof("%s: Insufficient free resources: need %dm/%dMi, have %dm/%dMi",
+			podID, reqCPU, reqMem, local.FreeCPU, local.FreeMem)
 		return false
 	}
 
-	// Check 3: Can best node fit it (with adjusted headroom)?
+	// 3. Check node-level feasibility with confidence-adjusted safety margin
 	if local.BestEdgeNode.Name != "" {
-		headroomMultiplier := 1.0 + adjustedHeadroom
-		requiredCPU := int64(float64(reqCPU) * headroomMultiplier)
-		requiredMem := int64(float64(reqMem) * headroomMultiplier)
+		// Class-aware safety margins
+		baseSafetyMargin := 0.2
+		switch pod.Annotations[constants.AnnotationSLOClass] {
+		case "latency", "interactive":
+			baseSafetyMargin = 0.1 // Less conservative for latency-sensitive
+		case "batch":
+			baseSafetyMargin = 0.3 // More conservative for batch
+		}
 
-		if local.BestEdgeNode.FreeCPU < requiredCPU || local.BestEdgeNode.FreeMem < requiredMem {
-			klog.V(5).Infof("Best edge node cannot fit pod with adjusted headroom")
+		// Scale safety margin by measurement confidence
+		safetyFactor := 1.0 + baseSafetyMargin*(1.0-local.MeasurementConfidence)
+		requiredCPU := int64(float64(reqCPU) * safetyFactor)
+		requiredMem := int64(float64(reqMem) * safetyFactor)
+
+		if local.BestEdgeNode.FreeCPU < requiredCPU ||
+			local.BestEdgeNode.FreeMem < requiredMem {
+			klog.V(5).Infof("%s: Best node %s cannot fit pod with safety margin %.2fx (conf=%.2f)",
+				podID, local.BestEdgeNode.Name, safetyFactor, local.MeasurementConfidence)
 			return false
 		}
+	}
+
+	// 4. Cluster-wide admission control: prevent exceeding utilization threshold
+	utilizationLimit := 0.90
+	utilizationAfterScheduling := float64(local.EffectiveAllocatableCPU-local.FreeCPU+reqCPU) /
+		float64(local.EffectiveAllocatableCPU)
+
+	if utilizationAfterScheduling > utilizationLimit {
+		klog.V(5).Infof("%s: Would exceed cluster utilization: %.1f%% > %.1f%%",
+			podID, utilizationAfterScheduling*100, utilizationLimit*100)
+		return false
 	}
 
 	return true
