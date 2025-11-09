@@ -10,6 +10,17 @@ import (
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 )
 
+// Create a dummy probability calculator for tests that don't need the real logic.
+var dummyProbCalc apis.ProbabilityCalculator = func(stats *apis.ProfileStats, threshold float64) float64 {
+	if stats == nil {
+		return 0.5
+	}
+	if stats.MeanDurationMs > threshold {
+		return 0.8 // high chance of violation
+	}
+	return 0.1 // low chance of violation
+}
+
 func TestLyapunov_ProbabilityQueue(t *testing.T) {
 	lyap := decision.NewLyapunovScheduler()
 	lyap.SetClassConfig("latency", &decision.ClassConfig{
@@ -90,7 +101,7 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 		1000, 900,
 		edgeProfile, cloudProfile,
 		true, true,
-		0, 1,
+		0, 1, dummyProbCalc,
 	)
 
 	t.Logf("Decision after violations: location=%s weight=%.2f", loc, weight)
@@ -135,7 +146,7 @@ func TestLyapunov_PerClassBeta(t *testing.T) {
 	// Edge weight = 0.5*2 + Z*0 = 1.0
 	// Cloud weight = 0.5*1 + Z*0 = 0.5
 	// Cloud wins (lower weight, cheaper)
-	loc1, weight1 := lyap.Decide("latency", 1000, 800, 900, profile, profile, true, true, 2.0, 1.0)
+	loc1, weight1 := lyap.Decide("latency", 1000, 800, 900, profile, profile, true, true, 2.0, 1.0, dummyProbCalc)
 	t.Logf("Latency (β=0.5): loc=%s weight=%.2f | cost dominates when violations equal", loc1, weight1)
 	if loc1 != constants.Cloud {
 		t.Errorf("With equal violations and low beta, should choose cheaper cloud, got %v", loc1)
@@ -147,7 +158,7 @@ func TestLyapunov_PerClassBeta(t *testing.T) {
 	// Edge weight = 0.5*2 + Z*200 = 1.0 + Z*200
 	// Cloud weight = 0.5*1 + Z*100 = 0.5 + Z*100
 	// Cloud has lower violation, should win
-	loc2, weight2 := lyap.Decide("latency", 500, 700, 600, profile, profile, true, true, 2.0, 1.0)
+	loc2, weight2 := lyap.Decide("latency", 500, 700, 600, profile, profile, true, true, 2.0, 1.0, dummyProbCalc)
 	t.Logf("Latency (β=0.5): loc=%s weight=%.2f | violations matter: edge_viol=200 > cloud_viol=100", loc2, weight2)
 	if loc2 != constants.Cloud {
 		t.Errorf("With lower violations and low beta, should choose cloud, got %v", loc2)
@@ -159,7 +170,7 @@ func TestLyapunov_PerClassBeta(t *testing.T) {
 	// Edge weight = 2.0*2 + Z*0 = 4.0
 	// Cloud weight = 2.0*1 + Z*0 = 2.0
 	// Cloud wins (much cheaper matters with high beta)
-	loc3, weight3 := lyap.Decide("batch", 1000, 700, 800, profile, profile, true, true, 2.0, 1.0)
+	loc3, weight3 := lyap.Decide("batch", 1000, 700, 800, profile, profile, true, true, 2.0, 1.0, dummyProbCalc)
 	t.Logf("Batch (β=2.0): loc=%s weight=%.2f | high beta makes cost dominant", loc3, weight3)
 	if loc3 != constants.Cloud {
 		t.Errorf("With high beta, cost dominates, should choose cheaper cloud, got %v", loc3)
@@ -170,7 +181,7 @@ func TestLyapunov_PerClassBeta(t *testing.T) {
 	// Edge weight = 2.0*2 + Z*200 = 4.0 + Z*200
 	// Cloud weight = 2.0*1 + Z*100 = 2.0 + Z*100
 	// Cloud still wins (2.0 < 4.0 initially, and smaller violation delta)
-	loc4, weight4 := lyap.Decide("batch", 500, 700, 600, profile, profile, true, true, 2.0, 1.0)
+	loc4, weight4 := lyap.Decide("batch", 500, 700, 600, profile, profile, true, true, 2.0, 1.0, dummyProbCalc)
 	t.Logf("Batch (β=2.0): loc=%s weight=%.2f | high beta but cloud better on both cost and violation", loc4, weight4)
 	if loc4 != constants.Cloud {
 		t.Errorf("Cloud better on cost and violation, should win, got %v", loc4)
@@ -207,7 +218,7 @@ func TestLyapunov_PerClassDecay(t *testing.T) {
 	}
 	profile.DurationHistogram[0].SetUpperBound(1000)
 
-	_, _ = lyap.Decide("batch", 1000, 500, 500, profile, profile, true, true, 0, 0)
+	_, _ = lyap.Decide("batch", 1000, 500, 500, profile, profile, true, true, 0, 0, dummyProbCalc)
 
 	Z2 := lyap.GetVirtualQueue("batch")
 	t.Logf("Z after decay: %.2f", Z2)
@@ -268,6 +279,7 @@ func TestLyapunov_ProbabilityQueueInfluencesDecision(t *testing.T) {
 		safeProfile, riskyProfile,
 		true, true,
 		0, 0,
+		dummyProbCalc,
 	)
 
 	t.Logf("Decision: loc=%s weight=%.2f (Zp=%.2f should prefer safe edge)", loc, weight, Zp)

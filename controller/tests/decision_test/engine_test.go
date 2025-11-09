@@ -101,7 +101,7 @@ func TestDecide_CloudFeasibleOnly(t *testing.T) {
 		1000, 1000,
 		map[string]int{"latency": 10},
 		map[string]apis.DemandByClass{
-			"latency": {CPU: 200, Mem: 128},
+			"latency": {CPU: 200 * 10, Mem: 128 * 10},
 		},
 	)
 	wan := &apis.WANState{RTTMs: 10, LossPct: 0.0}

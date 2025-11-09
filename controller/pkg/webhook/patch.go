@@ -5,20 +5,23 @@ import (
 	"fmt"
 	"time"
 
+	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
+
 	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/util"
-
-	admissionv1 "k8s.io/api/admission/v1"
-	corev1 "k8s.io/api/core/v1"
 )
 
+// buildPatchResponse constructs the JSON patch to mutate the pod spec based on the scheduling decision.
 func (s *Server) buildPatchResponse(
 	pod *corev1.Pod,
 	res apis.Result,
 ) *admissionv1.AdmissionResponse {
 	var patches []map[string]interface{}
 
+	// Ensure annotations map exists
 	if pod.Annotations == nil {
 		patches = append(patches, map[string]interface{}{
 			"op":    "add",
@@ -27,6 +30,7 @@ func (s *Server) buildPatchResponse(
 		})
 	}
 
+	// Add decision annotations
 	patches = append(patches,
 		addAnnotation(constants.AnnotationDecision, string(res.Location)),
 		addAnnotation(constants.AnnotationPredictedETA, fmt.Sprintf("%.0f", res.PredictedETAMs)),
@@ -35,6 +39,7 @@ func (s *Server) buildPatchResponse(
 		addAnnotation(constants.AnnotationWANRtt, fmt.Sprintf("%d", res.WanRttMs)),
 	)
 
+	// Ensure nodeSelector map exists
 	if pod.Spec.NodeSelector == nil {
 		patches = append(patches, map[string]interface{}{
 			"op":    "add",
@@ -43,6 +48,7 @@ func (s *Server) buildPatchResponse(
 		})
 	}
 
+	// Remove existing priority to avoid conflicts
 	if pod.Spec.Priority != nil {
 		patches = append(patches, map[string]interface{}{
 			"op":   "remove",
@@ -50,60 +56,54 @@ func (s *Server) buildPatchResponse(
 		})
 	}
 
+	// Apply node selector and priority based on location
 	if res.Location == constants.Edge {
-		patches = append(patches, map[string]interface{}{
-			"op":    "add",
-			"path":  "/spec/nodeSelector/" + util.EscapeJSONPointer(constants.NodeRoleLabelEdge),
-			"value": constants.LabelValueTrue,
-		})
-
-		priorityClass := s.getPriorityClassForReason(res.Reason)
+		patches = append(patches, addNodeSelector(constants.NodeRoleLabelEdge, constants.LabelValueTrue))
+		priorityClass := s.getPriorityClassForEdgeReason(res.Reason)
 		if priorityClass != "" {
-			patches = append(patches, map[string]interface{}{
-				"op":    "add",
-				"path":  "/spec/priorityClassName",
-				"value": priorityClass,
-			})
+			patches = append(patches, addPriorityClass(priorityClass))
 		}
-	} else {
+	} else { // Cloud
 		patches = append(patches,
-			map[string]interface{}{
-				"op":    "add",
-				"path":  "/spec/nodeSelector/" + util.EscapeJSONPointer(constants.NodeRoleLabelCloud),
-				"value": constants.LabelValueTrue,
-			},
+			addNodeSelector(constants.NodeRoleLabelCloud, constants.LabelValueTrue),
+			addPriorityClass(constants.PriorityClassCloud),
 		)
-
-		patches = append(patches, map[string]interface{}{
-			"op":    "add",
-			"path":  "/spec/priorityClassName",
-			"value": "cloud-workload",
-		})
 	}
 
-	patchBytes, _ := json.Marshal(patches)
-	pt := admissionv1.PatchTypeJSONPatch
+	patchBytes, err := json.Marshal(patches)
+	if err != nil {
+		// This should not happen with correctly formed patches
+		klog.Errorf("Failed to marshal patches: %v", err)
+		return deny(err)
+	}
+	patchType := admissionv1.PatchTypeJSONPatch
 
 	return &admissionv1.AdmissionResponse{
 		Allowed:   true,
 		Patch:     patchBytes,
-		PatchType: &pt,
+		PatchType: &patchType,
 	}
 }
 
-func (s *Server) getPriorityClassForReason(reason string) string {
+// getPriorityClassForEdgeReason maps a decision reason to a Kubernetes PriorityClass name for edge workloads.
+func (s *Server) getPriorityClassForEdgeReason(reason string) string {
 	switch reason {
+	// These reasons imply the pod may wait in a queue, so they get a specific priority.
 	case "edge_queue_preferred", "edge_queue_marginal":
-		return "queued-edge-workload"
-	case "edge_feasible_only", "edge_preferred":
-		return "edge-preferred"
-	case "best_effort_edge":
-		return "edge-best-effort"
+		return constants.PriorityClassQueuedEdge
+	// These are high-priority placements on the edge.
+	case constants.ReasonEdgeFeasibleOnly, constants.ReasonEdgePreferred:
+		return constants.PriorityClassEdgePref
+	// This is for workloads that are placed on the edge without strong guarantees.
+	case constants.ReasonEdgeBestEffort:
+		return constants.PriorityClassBestEffort
 	default:
+		// Default to no specific priority class if reason doesn't map.
 		return ""
 	}
 }
 
+// addAnnotation creates a JSON patch operation to add a metadata annotation.
 func addAnnotation(key, val string) map[string]interface{} {
 	return map[string]interface{}{
 		"op":    "add",
@@ -112,6 +112,25 @@ func addAnnotation(key, val string) map[string]interface{} {
 	}
 }
 
+// addNodeSelector creates a JSON patch operation to add a node selector.
+func addNodeSelector(key, val string) map[string]interface{} {
+	return map[string]interface{}{
+		"op":    "add",
+		"path":  "/spec/nodeSelector/" + util.EscapeJSONPointer(key),
+		"value": val,
+	}
+}
+
+// addPriorityClass creates a JSON patch operation to set the priorityClassName.
+func addPriorityClass(name string) map[string]interface{} {
+	return map[string]interface{}{
+		"op":    "add",
+		"path":  "/spec/priorityClassName",
+		"value": name,
+	}
+}
+
+// BuildPatchResponseForTest is a public wrapper for testing purposes.
 func (s *Server) BuildPatchResponseForTest(pod *corev1.Pod, res apis.Result) *admissionv1.AdmissionResponse {
 	return s.buildPatchResponse(pod, res)
 }

@@ -205,6 +205,7 @@ func (l *LyapunovScheduler) Decide(
 	cloudFeasible bool,
 	localCost float64,
 	cloudCost float64,
+	probCalc apis.ProbabilityCalculator,
 ) (location constants.Location, weight float64) {
 
 	l.mu.Lock()
@@ -230,8 +231,8 @@ func (l *LyapunovScheduler) Decide(
 	cloudViolation := math.Max(0, cloudETA-deadline)
 
 	// Compute violation probabilities from profile histograms
-	localProbability := localProfile.ComputeViolationProbability(deadline)
-	cloudProbability := cloudProfile.ComputeViolationProbability(deadline)
+	localProbability := probCalc(localProfile, deadline)
+	cloudProbability := probCalc(cloudProfile, deadline)
 
 	// Compute drift-plus-penalty weights
 	// Weight = β*Cost + Z*Violation_magnitude + Zp*Violation_probability

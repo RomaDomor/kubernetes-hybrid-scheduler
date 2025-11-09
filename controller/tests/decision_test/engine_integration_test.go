@@ -101,8 +101,8 @@ func TestEngine_ProfilesInfluenceDecision(t *testing.T) {
 	edgeProf := ps.GetOrDefault(edgeKey)
 	cloudProf := ps.GetOrDefault(cloudKey)
 
-	edgeViolProb := edgeProf.ComputeViolationProbability(1000)
-	cloudViolProb := cloudProf.ComputeViolationProbability(1000)
+	edgeViolProb := ps.ComputeViolationProbability(edgeProf, 1000)
+	cloudViolProb := ps.ComputeViolationProbability(cloudProf, 1000)
 
 	t.Logf("Edge violation probability: %.3f", edgeViolProb)
 	t.Logf("Cloud violation probability: %.3f", cloudViolProb)

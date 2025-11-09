@@ -1,14 +1,25 @@
 package decision_test
 
 import (
+	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"math"
 	"testing"
 	"time"
 
 	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
+
+	"k8s.io/client-go/kubernetes/fake"
 )
 
+// Helper to create a ProfileStore for testing probability calculations.
+// It will use the default histogram config, where MinSampleCount is 10.
+func newTestProfileStore() *decision.ProfileStore {
+	return decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
+}
+
 func TestComputeViolationProbability_HistogramBased(t *testing.T) {
+	ps := newTestProfileStore()
+
 	profile := &apis.ProfileStats{
 		Count:             100,
 		MeanDurationMs:    500,
@@ -69,7 +80,7 @@ func TestComputeViolationProbability_HistogramBased(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
-			prob := profile.ComputeViolationProbability(tt.deadline)
+			prob := ps.ComputeViolationProbability(profile, tt.deadline)
 			t.Logf("Deadline=%.0fms: Pr[violation]=%.3f (expected %.3f-%.3f)",
 				tt.deadline, prob, tt.wantProbMin, tt.wantProbMax)
 			if prob < tt.wantProbMin || prob > tt.wantProbMax {
@@ -81,6 +92,8 @@ func TestComputeViolationProbability_HistogramBased(t *testing.T) {
 }
 
 func TestComputeViolationProbability_LowSampleCount(t *testing.T) {
+	ps := newTestProfileStore()
+
 	profile := &apis.ProfileStats{
 		Count:             5,
 		MeanDurationMs:    500,
@@ -103,7 +116,7 @@ func TestComputeViolationProbability_LowSampleCount(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
-			prob := profile.ComputeViolationProbability(tt.deadline)
+			prob := ps.ComputeViolationProbability(profile, tt.deadline)
 			t.Logf("%s: deadline=%.0fms mean=%.0fms → Pr[violation]=%.3f",
 				tt.description, tt.deadline, profile.MeanDurationMs, prob)
 			if prob < 0 || prob > 1 {
@@ -119,9 +132,11 @@ func TestComputeViolationProbability_LowSampleCount(t *testing.T) {
 }
 
 func TestComputeViolationProbability_EdgeCases(t *testing.T) {
+	ps := newTestProfileStore()
+
 	t.Run("nil profile", func(t *testing.T) {
 		var profile *apis.ProfileStats
-		prob := profile.ComputeViolationProbability(1000)
+		prob := ps.ComputeViolationProbability(profile, 1000)
 		if prob != 0.5 {
 			t.Errorf("nil profile should return 0.5 (max uncertainty), got %.3f", prob)
 		}
@@ -137,21 +152,21 @@ func TestComputeViolationProbability_EdgeCases(t *testing.T) {
 
 		// Deadline BELOW mean: completion time is deterministically 500, which is >= 400
 		// So Pr[completion > 400] = 1.0
-		prob1 := profile.ComputeViolationProbability(400)
+		prob1 := ps.ComputeViolationProbability(profile, 400)
 		if prob1 != 1.0 {
 			t.Errorf("Deadline below deterministic mean should be 1 (completion exceeds it), got %.3f", prob1)
 		}
 
 		// Deadline ABOVE mean: completion time is deterministically 500, which is < 600
 		// So Pr[completion > 600] = 0.0
-		prob2 := profile.ComputeViolationProbability(600)
+		prob2 := ps.ComputeViolationProbability(profile, 600)
 		if prob2 != 0.0 {
 			t.Errorf("Deadline above deterministic mean should be 0 (completion doesn't exceed it), got %.3f", prob2)
 		}
 
 		// Deadline EQUAL to mean: completion time is deterministically 500, which is NOT > 500
 		// So Pr[completion > 500] = 0.0
-		prob3 := profile.ComputeViolationProbability(500)
+		prob3 := ps.ComputeViolationProbability(profile, 500)
 		if prob3 != 0.0 {
 			t.Errorf("Deadline equal to mean should be 0 (not greater), got %.3f", prob3)
 		}
@@ -170,7 +185,7 @@ func TestComputeViolationProbability_EdgeCases(t *testing.T) {
 		profile.DurationHistogram[0].SetUpperBound(500)
 		profile.DurationHistogram[1].SetUpperBound(1000)
 
-		prob := profile.ComputeViolationProbability(600)
+		prob := ps.ComputeViolationProbability(profile, 600)
 		// Should fall back to stats-based (normal approximation)
 		if prob < 0 || prob > 1 {
 			t.Errorf("Should fall back to stats, got invalid prob %.3f", prob)
@@ -184,6 +199,8 @@ func TestComputeViolationProbability_EdgeCases(t *testing.T) {
 }
 
 func TestComputeViolationProbability_Monotonicity(t *testing.T) {
+	ps := newTestProfileStore()
+
 	profile := &apis.ProfileStats{
 		Count:            100,
 		MeanDurationMs:   500,
@@ -206,7 +223,7 @@ func TestComputeViolationProbability_Monotonicity(t *testing.T) {
 	probs := make([]float64, len(deadlines))
 
 	for i, d := range deadlines {
-		probs[i] = profile.ComputeViolationProbability(d)
+		probs[i] = ps.ComputeViolationProbability(profile, d)
 		t.Logf("Deadline=%.0fms: Pr[violation]=%.3f", d, probs[i])
 	}
 
