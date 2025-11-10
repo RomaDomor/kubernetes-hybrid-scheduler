@@ -45,6 +45,95 @@ func newEngine() *Engine {
 	return NewEngine(cfg)
 }
 
+func TestDecide_NilLocalState_ForcesCloud(t *testing.T) {
+	e := newEngine()
+	p := podWith("latency", 200, 128)
+	s := sloMust("latency", 2000, true, 5)
+	wan := &apis.WANState{RTTMs: 50}
+
+	res := e.Decide(p, s, nil, wan)
+	if res.Location != constants.Cloud || res.Reason != constants.ReasonTelemetryCircuitBreaker {
+		t.Fatalf("want CLOUD with telemetry_circuit_breaker, got %v %s", res.Location, res.Reason)
+	}
+}
+
+func TestDecide_NilWANState_ForcesEdge(t *testing.T) {
+	e := newEngine()
+	p := podWith("latency", 200, 128)
+	s := sloMust("latency", 2000, true, 5)
+	local := localStateWithDefaults()
+
+	res := e.Decide(p, s, local, nil)
+	if res.Location != constants.Edge || res.Reason != constants.ReasonWANCircuitBreaker {
+		t.Fatalf("want EDGE with wan_circuit_breaker, got %v %s", res.Location, res.Reason)
+	}
+}
+
+// --- NEW: Tests for Feasibility Logic (isEdgeFeasibleWithConfidence) ---
+
+func TestDecide_InfeasibleResources_Hard_TooLargeForNode(t *testing.T) {
+	e := newEngine()
+	// Pod requests more CPU than the biggest edge node can offer, even when empty.
+	p := podWith("batch", 10000, 128)
+	s := sloMust("batch", 5000, true, 5)
+	local := localStateWithDefaults() // Best node has 9000m effective CPU
+	wan := &apis.WANState{RTTMs: 10}
+
+	res := e.Decide(p, s, local, wan)
+	if res.Location != constants.Cloud || res.Reason != constants.ReasonCloudFeasibleOnly {
+		t.Fatalf("Expected CLOUD with cloud_feasible_only because pod is too big for edge, got %v %s", res.Location, res.Reason)
+	}
+}
+
+func TestDecide_InfeasibleResources_Hard_UtilizationLimit(t *testing.T) {
+	e := newEngine()
+	// Pod fits, but scheduling it would push the cluster's manageable utilization over 90%.
+	p := podWith("batch", 8000, 128)
+	s := sloMust("batch", 5000, true, 5)
+	local := localStateWithDefaults() // Has 9000m effective CPU, 8000m free.
+	wan := &apis.WANState{RTTMs: 10}
+
+	// Calculation: (EffectiveAlloc - Free + Request) / EffectiveAlloc
+	// (9000 - 8000 + 8000) / 9000 = 9000 / 9000 = 100%, which is > 90%
+
+	res := e.Decide(p, s, local, wan)
+	if res.Location != constants.Cloud || res.Reason != constants.ReasonCloudFeasibleOnly {
+		t.Fatalf("Expected CLOUD with cloud_feasible_only due to utilization limit, got %v %s", res.Location, res.Reason)
+	}
+}
+
+func TestDecide_InfeasibleTime_Edge(t *testing.T) {
+	e := newEngine()
+	ps := e.GetProfileStore()
+	edgeKey := apis.GetProfileKey(podWith("latency", 200, 128), constants.Edge)
+	ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 1200}) // P95 > 1000ms deadline
+
+	p := podWith("latency", 200, 128)
+	s := sloMust("latency", 1000, true, 5)
+	local := localStateWithDefaults()
+	wan := &apis.WANState{RTTMs: 10}
+
+	res := e.Decide(p, s, local, wan)
+	if res.Location != constants.Cloud || res.Reason != constants.ReasonCloudFeasibleOnly {
+		t.Fatalf("Expected CLOUD with cloud_feasible_only when edge is time-infeasible, got %v %s", res.Location, res.Reason)
+	}
+}
+
+func TestDecide_InfeasibleResources_Soft(t *testing.T) {
+	e := newEngine()
+	p := podWith("batch", 2000, 512)
+	s := sloMust("batch", 5000, true, 5)
+
+	local := localStateWithDefaults()
+	local.FreeCPU = 1000 // Not enough free CPU right now
+	wan := &apis.WANState{RTTMs: 10}
+
+	res := e.Decide(p, s, local, wan)
+	if res.Location != constants.Cloud || res.Reason != constants.ReasonCloudFeasibleOnly {
+		t.Fatalf("Expected CLOUD with cloud_feasible_only when edge is temporarily full, got %v %s", res.Location, res.Reason)
+	}
+}
+
 func TestDecide_WANUnusable_ForcesEdge(t *testing.T) {
 	e := newEngine()
 	p := podWith("latency", 200, 128)
@@ -71,26 +160,6 @@ func TestDecide_OffloadDisabled_StaysEdge(t *testing.T) {
 	}
 }
 
-func TestDecide_CloudFeasibleOnly_WhenEdgeFull(t *testing.T) {
-	e := newEngine()
-	p := podWith("latency", 500, 256)
-	s := sloMust("latency", 500, true, 5)
-
-	local := localStateWithDefaults()
-	local.FreeCPU = 100 // Not enough for the 500m request
-	local.FreeMem = 100
-
-	wan := &apis.WANState{RTTMs: 10, LossPct: 0.0}
-
-	res := e.Decide(p, s, local, wan)
-	if res.Location != constants.Cloud {
-		t.Fatalf("expected CLOUD when edge is full, got %v (reason=%s)", res.Location, res.Reason)
-	}
-	if res.Reason != constants.ReasonCloudFeasibleOnly {
-		t.Errorf("expected reason cloud_feasible_only, got %s", res.Reason)
-	}
-}
-
 func TestDecide_StaleCircuitBreakers(t *testing.T) {
 	e := newEngine()
 	p := podWith("latency", 200, 128)
@@ -108,7 +177,7 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 		t.Fatalf("want CLOUD telemetry_circuit_breaker, got %v %s", res.Location, res.Reason)
 	}
 
-	local = localStateWithDefaults() // Reset to fresh state
+	local = localStateWithDefaults()
 	wan.IsStale = true
 	wan.StaleDuration = 11 * time.Minute
 
@@ -154,9 +223,8 @@ func TestDecide_LyapunovAdaptsToViolations(t *testing.T) {
 	edgeKey := apis.GetProfileKey(p, constants.Edge)
 	cloudKey := apis.GetProfileKey(p, constants.Cloud)
 
-	// SCENARIO 1: Edge is slightly better than cloud, both are feasible.
-	ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 900})  // EdgeETA = 900ms
-	ps.Update(cloudKey, apis.ProfileUpdate{ObservedDurationMs: 880}) // CloudETA = 880 + 2*20 = 920ms
+	ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 900})
+	ps.Update(cloudKey, apis.ProfileUpdate{ObservedDurationMs: 880})
 
 	// 1. Initial Decision: Z is zero. Both are feasible with no predicted violation.
 	// Edge is cheaper and faster, so it must be chosen.
@@ -167,15 +235,14 @@ func TestDecide_LyapunovAdaptsToViolations(t *testing.T) {
 
 	// 2. Simulate many SLO violations on the edge. This will increase the Z queue.
 	for i := 0; i < 20; i++ {
-		lyap.UpdateVirtualQueue("latency", 1000, 1200, constants.Edge) // Actual runs were 1200ms
+		lyap.UpdateVirtualQueue("latency", 1000, 1200, constants.Edge)
 	}
 	afterViolationsZ := lyap.GetVirtualQueue("latency")
 	if afterViolationsZ <= 0 {
-		t.Fatal("Expected virtual queue to grow significantly after violations")
+		t.Fatal("Expected virtual queue to grow")
 	}
 
-	// 3. Now, update the edge profile to reflect reality: it's actually slower and violates the SLO.
-	ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 1200}) // P95 is now > 1000
+	ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 1200})
 
 	// 4. Second Decision: Z is now very high, and the Edge profile correctly predicts a violation.
 	// EdgeETA = 1200ms (Violation = 200ms) -> EdgeWeight = 0.0 + Z*200 -> high
@@ -183,7 +250,7 @@ func TestDecide_LyapunovAdaptsToViolations(t *testing.T) {
 	// The high edge weight should force a cloud decision.
 	res2 := e.Decide(p, s, local, wan)
 	if res2.Location != constants.Cloud {
-		t.Errorf("Expected CLOUD after many edge violations made the violation penalty high, but got %s", res2.Location)
+		t.Errorf("Expected CLOUD after many edge violations, but got %s", res2.Location)
 	}
 }
 
