@@ -6,24 +6,17 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 )
 
-type SLO struct {
-	DeadlineMs      int
-	LatencyTargetMs int
-	Class           string
-	Priority        int
-	OffloadAllowed  bool
-}
-
-func ParseSLO(pod *corev1.Pod) (*SLO, error) {
+func ParseSLO(pod *corev1.Pod) (*apis.SLO, error) {
 	annotations := pod.Annotations
 	if annotations == nil {
 		return nil, fmt.Errorf("pod has no annotations")
 	}
 
-	slo := &SLO{
+	slo := &apis.SLO{
 		Priority:       5,
 		OffloadAllowed: true,
 	}
@@ -33,7 +26,7 @@ func ParseSLO(pod *corev1.Pod) (*SLO, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid deadlineMs: %v", err)
 		}
-		if val < 1 || val > 3600000 { // 1ms to 1 hour
+		if val < 1 || val > 3600000 {
 			return nil, fmt.Errorf("deadlineMs out of range [1-3600000]: %d", val)
 		}
 		slo.DeadlineMs = val

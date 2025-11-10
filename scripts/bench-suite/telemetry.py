@@ -1,59 +1,69 @@
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 from kubernetes import client
 from kubernetes.client import ApiException
 
-import k8s_helpers
 from utils import log
 
-def measure_http(v1: client.CoreV1Api, ns_local: str, results_dir: Path, args, http_svc_url: str) -> Dict[str, Any]:
-    """Runs the HTTP benchmark using 'hey' from the toolbox pod."""
-    log(f"HTTP warmup {args.http_warmup_sec}s @ {http_svc_url}")
-    k8s_helpers.toolbox_exec(v1, ns_local, f"/hey -z {args.http_warmup_sec}s -q {args.http_qps} -c {args.http_conc} {http_svc_url}")
 
-    log(f"Running HTTP benchmark for {args.http_test_sec}s...")
-    out = k8s_helpers.toolbox_exec(v1, ns_local, f"/hey -z {args.http_test_sec}s -q {args.http_qps} -c {args.http_conc} {http_svc_url}")
-    (results_dir / "http_benchmark.txt").write_text(out)
+def collect_controller_metrics(
+        v1: client.CoreV1Api,
+        results_dir: Path,
+        controller_ns: str,
+        service_name: str,
+        metrics_port: str,
+        pod_label: str,
+):
+    """
+    Finds the controller service and scrapes its /metrics endpoint via
+    the K8s API proxy.
+    Also checks if the backing pod is running as a sanity check.
+    """
+    log(f"Attempting to collect metrics from service '{service_name}' "
+        f"in namespace '{controller_ns}'...")
+    try:
+        # Verify pod is running
+        pods = v1.list_namespaced_pod(
+            namespace=controller_ns, label_selector=pod_label
+        ).items
+        running_pods = [p for p in pods if p.status.phase == "Running"]
 
-    def extract(line: str) -> Optional[float]:
-        try:
-            return float(line.strip().split()[-2]) * 1000.0
-        except (ValueError, IndexError):
-            return None
+        if not running_pods:
+            msg = (f"Warning: No running controller pod found with label "
+                   f"'{pod_label}' in namespace '{controller_ns}'. "
+                   f"Cannot collect metrics.")
+            log(msg)
+            (results_dir / "controller_metrics.txt").write_text(f"ERROR: {msg}")
+            return
 
-    p50 = p95 = p99 = rps = None
-    for ln in out.splitlines():
-        if "50% in" in ln: p50 = extract(ln)
-        elif "95% in" in ln: p95 = extract(ln)
-        elif "99% in" in ln: p99 = extract(ln)
-        elif "Requests/sec:" in ln:
-            try: rps = float(ln.split(":")[1].strip())
-            except Exception: pass
+        log(f"Found {len(running_pods)} running pod(s) backing the service.")
 
-    return {"http-latency": {"metric": "latency", "p50_ms": p50, "p95_ms": p95, "p99_ms": p99, "rps": rps}}
+        # Connect to service proxy with port specification in the path
+        # Format: ":<port>/path" or just "/path" for default port
+        metrics_text = v1.connect_get_namespaced_service_proxy_with_path(
+            name=service_name,
+            namespace=controller_ns,
+            path=f":{metrics_port}/metrics"
+        )
 
-def measure_stream(apps_v1: client.AppsV1Api, ns_offloaded: str, results_dir: Path) -> Dict[str, Any]:
-    """Parses stream-data-generator logs to extract stream processing metrics."""
-    log_file = results_dir / "stream-data-generator_logs.txt"
-    if not log_file.exists():
-        return {}
+        out_path = results_dir / "controller_metrics.txt"
+        out_path.write_text(metrics_text)
+        log(f"Successfully saved controller metrics to {out_path}")
 
-    avg_ms = anomalies = slo_viol = None
-    for ln in log_file.read_text().splitlines():
-        if "Average latency:" in ln:
-            try: avg_ms = float(ln.split(":")[-1].replace("ms", "").strip())
-            except Exception: pass
-        elif "Anomalies detected:" in ln:
-            try: anomalies = int(ln.split(":")[-1].strip())
-            except Exception: pass
-        elif "SLO violations" in ln:
-            try: slo_viol = int(ln.split(":")[-1].strip())
-            except Exception: pass
+    except ApiException as e:
+        error_msg = (f"ERROR: Failed to connect to controller service "
+                     f"'{service_name}': {e.reason} (Status: {e.status})")
+        log(error_msg)
+        (results_dir / "controller_metrics.txt").write_text(error_msg)
+    except Exception as e:
+        error_msg = (f"ERROR: An unexpected error occurred while "
+                     f"collecting controller metrics: {e}")
+        log(error_msg)
+        (results_dir / "controller_metrics.txt").write_text(error_msg)
 
-    return {"stream-processor": {"metric": "latency", "avg_ms": avg_ms, "anomalies": anomalies, "slo_violations": slo_viol}}
 
 def measure_jobs_via_api(batch_v1: client.BatchV1Api, ns: str, names: List[str]) -> Dict[str, Any]:
     """Measures job duration by querying the Kubernetes API for start/completion times."""
@@ -68,6 +78,7 @@ def measure_jobs_via_api(batch_v1: client.BatchV1Api, ns: str, names: List[str])
         except ApiException:
             continue
     return out
+
 
 def get_job_logs(v1: client.CoreV1Api, ns: str, job_name: str) -> str:
     """Gets logs from all pods created by a specific job."""
@@ -87,6 +98,7 @@ def get_job_logs(v1: client.CoreV1Api, ns: str, job_name: str) -> str:
         log(f"Error getting logs for job {job_name}: {e}")
         return ""
 
+
 def get_events(v1: client.CoreV1Api, ns: str, out_path: Path):
     """Retrieves and saves all events from a namespace."""
     try:
@@ -95,6 +107,7 @@ def get_events(v1: client.CoreV1Api, ns: str, out_path: Path):
         out_path.write_text(json.dumps(events, indent=2, default=str))
     except ApiException as e:
         log(f"Warning: could not retrieve events for {ns}: {e}")
+
 
 def get_pod_node_map(v1: client.CoreV1Api, ns: str, out_path: Path):
     """Creates a CSV mapping pods to the nodes they are scheduled on."""
@@ -106,13 +119,15 @@ def get_pod_node_map(v1: client.CoreV1Api, ns: str, out_path: Path):
     except ApiException as e:
         log(f"Warning: could not generate pod-node map for {ns}: {e}")
 
+
 def get_nodes_info(v1: client.CoreV1Api, out_path: Path):
     """Saves node information similar to 'kubectl get nodes'."""
     try:
         nodes = v1.list_node().items
         lines = ["NAME STATUS VERSION"]
         for n in nodes:
-            status = "Ready" if any(c.type == "Ready" and c.status == "True" for c in n.status.conditions or []) else "NotReady"
+            status = "Ready" if any(
+                c.type == "Ready" and c.status == "True" for c in n.status.conditions or []) else "NotReady"
             version = n.status.node_info.kubelet_version
             lines.append(f"{n.metadata.name} {status} {version}")
         out_path.write_text("\n".join(lines))

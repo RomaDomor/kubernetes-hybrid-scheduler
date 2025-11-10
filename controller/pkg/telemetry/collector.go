@@ -2,42 +2,17 @@ package telemetry
 
 import (
 	"context"
-	"time"
+	"kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 )
 
 type Collector interface {
-	GetLocalState(ctx context.Context) (*LocalState, error)
-	GetWANState(ctx context.Context) (*WANState, error)
-	GetCachedLocalState() *LocalState
-	GetCachedWANState() *WANState
+	GetLocalState(ctx context.Context) (*v1alpha1.LocalState, error)
+	GetWANState(ctx context.Context) (*v1alpha1.WANState, error)
+	GetCachedLocalState() *v1alpha1.LocalState
+	GetCachedWANState() *v1alpha1.WANState
 	UpdateMetrics()
-
 	LockForDecision()
 	UnlockForDecision()
-}
-
-type LocalState struct {
-	FreeCPU             int64
-	FreeMem             int64
-	PendingPodsPerClass map[string]int
-	Timestamp           time.Time
-	BestEdgeNode        BestNode
-	IsStale             bool
-	StaleDuration       time.Duration
-}
-
-type BestNode struct {
-	Name    string
-	FreeCPU int64
-	FreeMem int64
-}
-
-type WANState struct {
-	RTTMs         int
-	LossPct       float64
-	Timestamp     time.Time
-	IsStale       bool
-	StaleDuration time.Duration
 }
 
 type CombinedCollector struct {
@@ -49,31 +24,27 @@ func NewCombinedCollector(local *LocalCollector, wan *WANProbe) *CombinedCollect
 	return &CombinedCollector{local: local, wan: wan}
 }
 
-// Local state
-func (c *CombinedCollector) GetLocalState(ctx context.Context) (*LocalState, error) {
+func (c *CombinedCollector) GetLocalState(ctx context.Context) (*v1alpha1.LocalState, error) {
 	return c.local.GetLocalState(ctx)
 }
 
-func (c *CombinedCollector) GetCachedLocalState() *LocalState {
+func (c *CombinedCollector) GetCachedLocalState() *v1alpha1.LocalState {
 	return c.local.GetCachedLocalState()
 }
 
-// WAN state
-func (c *CombinedCollector) GetWANState(ctx context.Context) (*WANState, error) {
+func (c *CombinedCollector) GetWANState(ctx context.Context) (*v1alpha1.WANState, error) {
 	return c.wan.GetWANState(ctx)
 }
 
-func (c *CombinedCollector) GetCachedWANState() *WANState {
+func (c *CombinedCollector) GetCachedWANState() *v1alpha1.WANState {
 	return c.wan.GetCachedWANState()
 }
 
-// Metrics
 func (c *CombinedCollector) UpdateMetrics() {
 	c.local.UpdateMetrics()
 	c.wan.UpdateMetrics()
 }
 
-// Mutex
 func (c *CombinedCollector) LockForDecision() {
 	c.local.LockForDecision()
 }

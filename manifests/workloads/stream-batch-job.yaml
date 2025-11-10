@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stream-batch-job
+  labels:
+    app: stream-batch-job
+  annotations:
+    slo.hybrid.io/class: "latency"
+    slo.hybrid.io/deadlineMs: "60000" # 60-second deadline to process the entire batch
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: stream-batch-job
+        scheduling.hybrid.io/managed: "true"
+      annotations:
+        slo.hybrid.io/class: "latency" # Class is 'latency' because each individual operation is latency-sensitive
+        slo.hybrid.io/deadlineMs: "60000"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: stream-processor
+          image: python:3.11-slim
+          env:
+            - name: "NUM_MESSAGES"
+              value: "1000"
+            - name: "COMPLEXITY"
+              value: "1000" # Controls CPU work per message
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir numpy
+              python - <<'PY'
+              import numpy as np, time, os, math
+              
+              num_messages = int(os.getenv("NUM_MESSAGES", "1000"))
+              complexity = int(os.getenv("COMPLEXITY", "1000"))
+              
+              print(f"Starting stream batch job: {num_messages} messages, complexity {complexity}")
+              t0 = time.time()
+              
+              # Simulate processing messages one by one
+              for i in range(num_messages):
+                  # Simulate a small amount of CPU work for each "message"
+                  data = np.random.rand(complexity)
+                  _ = np.sin(data).sum()
+                  if (i+1) % 100 == 0:
+                      print(f"  Processed {i+1}/{num_messages} messages...")
+              
+              duration = time.time() - t0
+              print(f"Finished job in {duration:.2f} seconds.")
+              PY
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

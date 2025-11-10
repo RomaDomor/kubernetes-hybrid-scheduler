@@ -22,16 +22,21 @@ def parse_args() -> argparse.Namespace:
     core.add_argument("--results-root", required=True, help="Root directory to store benchmark results.")
     core.add_argument("--context", default="", help="Kubernetes context to use.")
     core.add_argument("--kubeconfig", default=os.path.expanduser("~/.kube/config"), help="Path to the kubeconfig file.")
+
+    # Scheduling controller Configuration
+    core.add_argument("--controller-namespace", default="kube-system", help="Namespace where the scheduler controller is running.")
+    core.add_argument("--controller-service-name", default="smart-scheduler-webhook", help="Name of the controller's service.")
+    core.add_argument("--controller-metrics-port", default="8080", help="Port number or name for the metrics endpoint on the service.")
+    core.add_argument("--controller-label-selector", default="app.kubernetes.io/name=smart-scheduler", help="Label selector to find the controller pod for debugging.")
     # Manifest Filenames
     manifests = parser.add_argument_group("Manifest Filenames")
-    manifests.add_argument("--http-latency-file", default="http-latency.yaml")
+    manifests.add_argument("--http-latency-file", default="http-latency-job.yaml")
     manifests.add_argument("--toolbox-file", default="toolbox.yaml")
     manifests.add_argument("--cpu-batch-file", default="cpu-batch.yaml")
     manifests.add_argument("--ml-infer-file", default="ml-infer.yaml")
     manifests.add_argument("--io-job-file", default="io-job.yaml")
     manifests.add_argument("--memory-intensive-file", default="memory-intensive.yaml")
-    manifests.add_argument("--stream-processor-file", default="stream-processor.yaml")
-    manifests.add_argument("--stream-generator-file", default="stream-generator.yaml")
+    manifests.add_argument("--stream-batch-file", default="stream-batch-job.yaml")
     manifests.add_argument("--build-job-file", default="build-job.yaml")
     # Benchmark Parameters
     params = parser.add_argument_group("Benchmark Parameters")
@@ -45,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     # Control Flags
     control = parser.add_argument_group("Control Flags")
     control.add_argument("--no-cleanup", action="store_true")
+    control.add_argument("--no-controller-metrics", action="store_true",
+                         help="Disable the collection of metrics from the scheduler controller.")
     # WAN Emulation
     wan = parser.add_argument_group("WAN Emulation")
     wan.add_argument("--wan-router", default="")
@@ -129,18 +136,11 @@ def deploy_and_prepare_cluster(ns_offloaded: str, ns_local: str, manifests_dir: 
     k8s_helpers.k_apply(ns_offloaded, ns_local, manifests_dir / args.toolbox_file)
     k8s_helpers.wait_pod_ready(v1, ns_local, "toolbox", 180)
 
-    log("Deploying interactive services and waiting for them...")
-    if file_exists(manifests_dir / args.http_latency_file):
-        k8s_helpers.k_apply(ns_offloaded, ns_local, manifests_dir / args.http_latency_file)
-        k8s_helpers.wait_deployment_ready(apps_v1, ns_offloaded, "http-latency", 240)
-    if file_exists(manifests_dir / args.stream_processor_file):
-        k8s_helpers.k_apply(ns_offloaded, ns_local, manifests_dir / args.stream_processor_file)
-        k8s_helpers.wait_deployment_ready(apps_v1, ns_offloaded, "stream-processor", 240)
-
     log("Applying all batch jobs asynchronously...")
     job_files = [
+        args.http_latency_file, args.stream_batch_file,
         args.cpu_batch_file, args.ml_infer_file, args.io_job_file,
-        args.memory_intensive_file, args.build_job_file, args.stream_generator_file
+        args.memory_intensive_file, args.build_job_file,
     ]
     for filename in job_files:
         path = manifests_dir / filename
@@ -170,7 +170,7 @@ def wait_for_all_jobs(batch_v1: client.BatchV1Api, v1: client.CoreV1Api, ns_offl
                       results_dir: Path, args: argparse.Namespace):
     """Waits for all deployed batch jobs to finish."""
     log("Waiting for all background batch jobs to complete...")
-    offloaded_jobs = ["cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job"]
+    offloaded_jobs = ["http-latency-job", "stream-batch-job", "cpu-batch", "ml-infer", "io-job", "memory-intensive", "build-job"]
     for job_name in offloaded_jobs:
         try:
             record_job(batch_v1, v1, ns_offloaded, results_dir, job_name, args.timeout_job_sec)
@@ -196,8 +196,8 @@ def cleanup_workloads(ns_offloaded: str, ns_local: str, manifests_dir: Path, arg
                 log(f"Warning: could not delete local-cpu-load deployment: {e}")
     all_files = [
         args.http_latency_file, args.cpu_batch_file, args.ml_infer_file,
-        args.io_job_file, args.memory_intensive_file, args.stream_processor_file,
-        args.build_job_file, args.toolbox_file, args.stream_generator_file,
+        args.io_job_file, args.memory_intensive_file, args.stream_batch_file,
+        args.build_job_file, args.toolbox_file,
     ]
 
     for filename in reversed(all_files):

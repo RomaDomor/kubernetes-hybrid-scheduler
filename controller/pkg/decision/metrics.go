@@ -3,6 +3,8 @@ package decision
 import (
 	"strings"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -14,14 +16,6 @@ var (
 			Help: "Total scheduling decisions by location, reason, and class",
 		},
 		[]string{"location", "reason", "class"},
-	)
-
-	decisionLatency = promauto.NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "scheduler_decision_duration_seconds",
-			Help:    "Time spent making scheduling decisions",
-			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5},
-		},
 	)
 
 	profileCount = promauto.NewGaugeVec(
@@ -56,14 +50,78 @@ var (
 		},
 		[]string{"class", "tier", "location"},
 	)
+
+	// Lyapunov metrics - magnitude queue
+	lyapunovVirtualQueue = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scheduler_virtual_queue",
+			Help: "Current Lyapunov magnitude virtual queue length per class",
+		},
+		[]string{"class"},
+	)
+
+	// Lyapunov metrics - probability queue
+	lyapunovProbQueue = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scheduler_prob_queue",
+			Help: "Current Lyapunov probability virtual queue length per class",
+		},
+		[]string{"class"},
+	)
+
+	// Track violations by class and location for observability
+	lyapunovViolationRate = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scheduler_violation_rate",
+			Help: "Observed SLO violation rate per class (0-1)",
+		},
+		[]string{"class"},
+	)
+
+	lyapunovDecisionWeight = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "scheduler_decision_weight",
+			Help:    "Lyapunov drift-plus-penalty weight for decisions",
+			Buckets: []float64{0, 10, 50, 100, 250, 500, 1000, 2500, 5000},
+		},
+		[]string{"class", "location"},
+	)
+
+	// Actual violation rate tracking
+	lyapunovActualViolationRate = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scheduler_actual_violation_rate",
+			Help: "Actual observed SLO violation rate per class (0-1)",
+		},
+		[]string{"class"},
+	)
+
+	lowConfidenceDecisions = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scheduler_low_confidence_decisions_total",
+			Help: "Decisions made with low measurement confidence",
+		},
+		[]string{"class", "decision"},
+	)
 )
 
-func recordDecision(result Result, class string) {
+func recordDecision(result apis.Result, class string) {
 	decisionsTotal.WithLabelValues(
 		string(result.Location),
 		result.Reason,
 		class,
 	).Inc()
+
+	lyapunovDecisionWeight.WithLabelValues(
+		class,
+		string(result.Location),
+	).Observe(result.LyapunovWeight)
+
+	// Track low-confidence decisions
+	if result.Reason == "low_measurement_confidence" ||
+		result.Reason == "telemetry_circuit_breaker" {
+		lowConfidenceDecisions.WithLabelValues(class, string(result.Location)).Inc()
+	}
 }
 
 func (ps *ProfileStore) UpdateMetrics() {
@@ -91,7 +149,30 @@ func (ps *ProfileStore) UpdateMetrics() {
 	}
 }
 
-func recordPredictionError(key ProfileKey, errorMs float64) {
+func UpdateLyapunovMetrics(lyapunov *LyapunovScheduler) {
+	state := lyapunov.ExportState()
+
+	// Magnitude queues
+	queues := state["virtual_queues"].(map[string]float64)
+	for class, qLen := range queues {
+		lyapunovVirtualQueue.WithLabelValues(class).Set(qLen)
+	}
+
+	// Probability queues
+	probQueues := state["virtual_prob_queues"].(map[string]float64)
+	for class, qLen := range probQueues {
+		lyapunovProbQueue.WithLabelValues(class).Set(qLen)
+	}
+
+	// Stats including actual violation rates
+	stats := state["stats"].(map[string]*LyapunovStats)
+	for class, st := range stats {
+		lyapunovActualViolationRate.WithLabelValues(class).Set(st.ActualViolationPct)
+		lyapunovViolationRate.WithLabelValues(class).Set(st.ActualViolationPct)
+	}
+}
+
+func recordPredictionError(key apis.ProfileKey, errorMs float64) {
 	labels := prometheus.Labels{
 		"class":    key.Class,
 		"tier":     key.CPUTier,

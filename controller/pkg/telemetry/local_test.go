@@ -1,11 +1,9 @@
-package telemetry_test
+package telemetry
 
 import (
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"testing"
 	"time"
-
-	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,11 +15,11 @@ func TestWantsEdge_NodeSelector(t *testing.T) {
 	kubeClient := fake.NewSimpleClientset()
 	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 
-	lc := telemetry.NewLocalCollector(
+	lc := NewLocalCollector(
 		kubeClient,
 		informerFactory.Core().V1().Pods(),
 		informerFactory.Core().V1().Nodes(),
-		0, // staleness threshold in seconds, set to 0 for testing purposes
+		0,
 	)
 
 	if lc == nil {
@@ -53,11 +51,11 @@ func TestLocalCollector_Staleness(t *testing.T) {
 	kubeClient := fake.NewSimpleClientset()
 	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 
-	lc := telemetry.NewLocalCollector(
+	lc := NewLocalCollector(
 		kubeClient,
 		informerFactory.Core().V1().Pods(),
 		informerFactory.Core().V1().Nodes(),
-		0, // staleness threshold in seconds, set to 0 for testing purposes
+		0,
 	)
 
 	if lc == nil {
