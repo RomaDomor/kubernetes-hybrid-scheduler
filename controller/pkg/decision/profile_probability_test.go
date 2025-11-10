@@ -1,7 +1,6 @@
-package decision_test
+package decision
 
 import (
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"math"
 	"testing"
 	"time"
@@ -13,8 +12,8 @@ import (
 
 // Helper to create a ProfileStore for testing probability calculations.
 // It will use the default histogram config, where MinSampleCount is 10.
-func newTestProfileStore() *decision.ProfileStore {
-	return decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
+func newTestProfileStore() *ProfileStore {
+	return NewProfileStore(fake.NewSimpleClientset(), 100, DefaultHistogramConfig())
 }
 
 func TestComputeViolationProbability_HistogramBased(t *testing.T) {

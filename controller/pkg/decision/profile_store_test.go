@@ -1,4 +1,4 @@
-package decision_test
+package decision
 
 import (
 	"testing"
@@ -11,7 +11,6 @@ import (
 
 	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 )
 
 func testPod(cpuMillis, memMi int64, class string) *corev1.Pod {
@@ -61,7 +60,7 @@ func TestProfileKey_TieringAndClass(t *testing.T) {
 }
 
 func TestProfileStore_UpdateAndHistogram(t *testing.T) {
-	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
+	ps := NewProfileStore(fake.NewSimpleClientset(), 100, DefaultHistogramConfig())
 	key := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
 
 	// Feed some durations
@@ -78,7 +77,7 @@ func TestProfileStore_UpdateAndHistogram(t *testing.T) {
 }
 
 func TestProfileStore_LRUEviction(t *testing.T) {
-	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 2, decision.DefaultHistogramConfig())
+	ps := NewProfileStore(fake.NewSimpleClientset(), 2, DefaultHistogramConfig())
 	keys := []apis.ProfileKey{
 		{Class: "latency", CPUTier: "small", Location: constants.Edge},
 		{Class: "batch", CPUTier: "small", Location: constants.Edge},
@@ -99,7 +98,7 @@ func TestProfileStore_LRUEviction(t *testing.T) {
 }
 
 func TestProfileStore_Serialization(t *testing.T) {
-	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 10, decision.DefaultHistogramConfig())
+	ps := NewProfileStore(fake.NewSimpleClientset(), 10, DefaultHistogramConfig())
 	k := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
 	ps.Update(k, apis.ProfileUpdate{ObservedDurationMs: 42, SLOMet: true})
 

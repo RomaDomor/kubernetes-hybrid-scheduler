@@ -1,9 +1,8 @@
-package decision_test
+package decision
 
 import (
 	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 	"testing"
 )
 
@@ -12,7 +11,7 @@ func TestEngine_ProbabilityBasedDecision(t *testing.T) {
 	lyap := e.GetLyapunovScheduler()
 
 	// Configure to weight probability heavily
-	lyap.SetClassConfig("latency", &decision.ClassConfig{
+	lyap.SetClassConfig("latency", &ClassConfig{
 		Beta:                1.0,
 		TargetViolationPct:  0.05,
 		TargetViolationProb: 0.05,

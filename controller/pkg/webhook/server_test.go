@@ -1,4 +1,4 @@
-package webhook_test
+package webhook
 
 import (
 	"bytes"
@@ -18,7 +18,6 @@ import (
 	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
-	"kubernetes-hybrid-scheduler/controller/pkg/webhook"
 )
 
 type fakeTel struct{}
@@ -98,7 +97,7 @@ func TestWebhook_ManagedPodPatched(t *testing.T) {
 		Reason:         "edge_preferred",
 	}}
 
-	s := webhook.NewServer(eng, &fakeTel{}, rate.NewLimiter(100, 100), fake.NewSimpleClientset())
+	s := NewServer(eng, &fakeTel{}, rate.NewLimiter(100, 100), fake.NewSimpleClientset())
 	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)

@@ -1,4 +1,4 @@
-package slo_test
+package slo
 
 import (
 	"testing"
@@ -7,7 +7,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/slo"
 )
 
 func TestParseSLO_Success_MinimalWithDeadline(t *testing.T) {
@@ -19,7 +18,7 @@ func TestParseSLO_Success_MinimalWithDeadline(t *testing.T) {
 			},
 		},
 	}
-	got, err := slo.ParseSLO(p)
+	got, err := ParseSLO(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -40,7 +39,7 @@ func TestParseSLO_UsesLatencyTargetAsDeadline(t *testing.T) {
 			},
 		},
 	}
-	got, err := slo.ParseSLO(p)
+	got, err := ParseSLO(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -103,7 +102,7 @@ func TestParseSLO_ValidationErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: tt.ann}}
-			_, err := slo.ParseSLO(p)
+			_, err := ParseSLO(p)
 			if err == nil || (err != nil && !contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("want error containing %q, got %v", tt.wantErr, err)
 			}

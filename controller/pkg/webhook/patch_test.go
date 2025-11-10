@@ -1,4 +1,4 @@
-package webhook_test
+package webhook
 
 import (
 	"encoding/json"
@@ -9,11 +9,10 @@ import (
 
 	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/webhook"
 )
 
 func TestBuildPatchResponse_Edge(t *testing.T) {
-	s := webhook.NewServer(nil, nil, nil, fake.NewSimpleClientset())
+	s := NewServer(nil, nil, nil, fake.NewSimpleClientset())
 	pod := &corev1.Pod{}
 	res := apis.Result{Location: constants.Edge, PredictedETAMs: 123, WanRttMs: 10, Reason: "edge_preferred"}
 

@@ -1,4 +1,4 @@
-package decision_test
+package decision
 
 import (
 	"testing"
@@ -9,7 +9,6 @@ import (
 
 	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 )
 
 func podWith(class string, cpuM, memMi int64) *corev1.Pod {
@@ -26,14 +25,14 @@ func sloMust(class string, deadline int, offload bool, prio int) *apis.SLO {
 	}
 }
 
-func newEngine() *decision.Engine {
-	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
+func newEngine() *Engine {
+	ps := NewProfileStore(fake.NewSimpleClientset(), 100, DefaultHistogramConfig())
 
-	lyap := decision.NewLyapunovScheduler()
-	lyap.SetClassConfig("latency", &decision.ClassConfig{Beta: 1.0, TargetViolationProb: 0.05})
-	lyap.SetClassConfig("batch", &decision.ClassConfig{Beta: 1.0, TargetViolationProb: 0.2})
+	lyap := NewLyapunovScheduler()
+	lyap.SetClassConfig("latency", &ClassConfig{Beta: 1.0, TargetViolationProb: 0.05})
+	lyap.SetClassConfig("batch", &ClassConfig{Beta: 1.0, TargetViolationProb: 0.2})
 
-	cfg := decision.EngineConfig{
+	cfg := EngineConfig{
 		RTTUnusableMs:           300,
 		LossUnusablePct:         10,
 		MaxProfileCount:         100,
@@ -43,7 +42,7 @@ func newEngine() *decision.Engine {
 		EdgeCostFactor:          0.0,
 		EdgePendingPessimismPct: 10,
 	}
-	return decision.NewEngine(cfg)
+	return NewEngine(cfg)
 }
 
 func TestDecide_WANUnusable_ForcesEdge(t *testing.T) {

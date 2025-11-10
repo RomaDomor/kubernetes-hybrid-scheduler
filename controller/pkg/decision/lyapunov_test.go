@@ -1,4 +1,4 @@
-package decision_test
+package decision
 
 import (
 	"math"
@@ -7,7 +7,6 @@ import (
 
 	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
 )
 
 // Create a dummy probability calculator for tests that don't need the real logic.
@@ -23,8 +22,8 @@ var dummyProbCalc apis.ProbabilityCalculator = func(stats *apis.ProfileStats, th
 
 // TestLyapunov_InfeasibleTieBreaking tests the new logic for when both locations are infeasible.
 func TestLyapunov_InfeasibleTieBreaking(t *testing.T) {
-	lyap := decision.NewLyapunovScheduler()
-	lyap.SetClassConfig("batch", &decision.ClassConfig{
+	lyap := NewLyapunovScheduler()
+	lyap.SetClassConfig("batch", &ClassConfig{
 		Beta: 1.0, TargetViolationProb: 0.1, ProbabilityWeight: 1.0,
 	})
 
@@ -76,8 +75,8 @@ func TestLyapunov_InfeasibleTieBreaking(t *testing.T) {
 }
 
 func TestLyapunov_ProbabilityQueue(t *testing.T) {
-	lyap := decision.NewLyapunovScheduler()
-	lyap.SetClassConfig("latency", &decision.ClassConfig{
+	lyap := NewLyapunovScheduler()
+	lyap.SetClassConfig("latency", &ClassConfig{
 		Beta:                1.0,
 		TargetViolationPct:  0.05,
 		TargetViolationProb: 0.05,
@@ -162,9 +161,9 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 }
 
 func TestLyapunov_PerClassBeta(t *testing.T) {
-	lyap := decision.NewLyapunovScheduler()
-	lyap.SetClassConfig("latency", &decision.ClassConfig{Beta: 0.5})
-	lyap.SetClassConfig("batch", &decision.ClassConfig{Beta: 2.0})
+	lyap := NewLyapunovScheduler()
+	lyap.SetClassConfig("latency", &ClassConfig{Beta: 0.5})
+	lyap.SetClassConfig("batch", &ClassConfig{Beta: 2.0})
 
 	profile := &apis.ProfileStats{Count: 100, MeanDurationMs: 900}
 
@@ -182,8 +181,8 @@ func TestLyapunov_PerClassBeta(t *testing.T) {
 }
 
 func TestLyapunov_PerClassDecay(t *testing.T) {
-	lyap := decision.NewLyapunovScheduler()
-	lyap.SetClassConfig("batch", &decision.ClassConfig{
+	lyap := NewLyapunovScheduler()
+	lyap.SetClassConfig("batch", &ClassConfig{
 		DecayFactor: 0.5, DecayInterval: 100 * time.Millisecond,
 	})
 
@@ -203,8 +202,8 @@ func TestLyapunov_PerClassDecay(t *testing.T) {
 }
 
 func TestLyapunov_ProbabilityQueueInfluencesDecision(t *testing.T) {
-	lyap := decision.NewLyapunovScheduler()
-	lyap.SetClassConfig("latency", &decision.ClassConfig{
+	lyap := NewLyapunovScheduler()
+	lyap.SetClassConfig("latency", &ClassConfig{
 		TargetViolationProb: 0.05, ProbabilityWeight: 100.0,
 	})
 
