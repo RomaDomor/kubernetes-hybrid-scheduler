@@ -18,6 +18,10 @@ const (
 	ReasonCloudBestEffort         = "cloud_best_effort"
 	ReasonTelemetryCircuitBreaker = "telemetry_circuit_breaker"
 	ReasonLowMeasurementConf      = "low_measurement_confidence"
+
+	// Infeasibility reasons (internal to decision engine)
+	ReasonInfeasibleResources = "infeasible_resources"
+	ReasonInfeasibleTime      = "infeasible_time"
 )
 
 // Priority class names for Kubernetes

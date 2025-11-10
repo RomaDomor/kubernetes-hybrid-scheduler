@@ -202,7 +202,9 @@ func (l *LyapunovScheduler) Decide(
 	localProfile *apis.ProfileStats,
 	cloudProfile *apis.ProfileStats,
 	localFeasible bool,
+	localFeasibilityReason string,
 	cloudFeasible bool,
+	cloudFeasibilityReason string,
 	localCost float64,
 	cloudCost float64,
 	probCalc apis.ProbabilityCalculator,
@@ -253,7 +255,23 @@ func (l *LyapunovScheduler) Decide(
 
 	// Feasibility-aware decision
 	if !localFeasible && !cloudFeasible {
-		// Neither feasible - choose minimum total penalty
+		// A resource infeasibility is a hard "no". A time infeasibility is a soft, prediction-based "no".
+		// If one option fails on resources and the other only on time, prefer the one that can at least run.
+		if localFeasibilityReason == constants.ReasonInfeasibleResources && cloudFeasibilityReason == constants.ReasonInfeasibleTime {
+			klog.V(4).Info("Both infeasible: Prioritizing cloud (time-infeasible) over edge (resource-infeasible)")
+			l.stats[class].TotalDecisions++
+			l.stats[class].CloudDecisions++
+			return constants.Cloud, cloudWeight
+		}
+		// This case is unlikely as cloud is assumed to have infinite resources
+		if cloudFeasibilityReason == constants.ReasonInfeasibleResources && localFeasibilityReason == constants.ReasonInfeasibleTime {
+			klog.V(4).Info("Both infeasible: Prioritizing edge (time-infeasible) over cloud (resource-infeasible)")
+			l.stats[class].TotalDecisions++
+			l.stats[class].EdgeDecisions++
+			return constants.Edge, localWeight
+		}
+
+		klog.V(4).Info("Both infeasible for similar reasons: Choosing minimum total penalty as fallback")
 		localPenalty := localViolation + localProbability*deadline
 		cloudPenalty := cloudViolation + cloudProbability*deadline
 
