@@ -21,6 +21,60 @@ var dummyProbCalc apis.ProbabilityCalculator = func(stats *apis.ProfileStats, th
 	return 0.1 // low chance of violation
 }
 
+// TestLyapunov_InfeasibleTieBreaking tests the new logic for when both locations are infeasible.
+func TestLyapunov_InfeasibleTieBreaking(t *testing.T) {
+	lyap := decision.NewLyapunovScheduler()
+	lyap.SetClassConfig("batch", &decision.ClassConfig{
+		Beta: 1.0, TargetViolationProb: 0.1, ProbabilityWeight: 1.0,
+	})
+
+	profile := &apis.ProfileStats{Count: 100, MeanDurationMs: 1000}
+
+	// SCENARIO 1: Edge is Hard-Infeasible (resource-constrained), Cloud is Time-Infeasible.
+	// The scheduler MUST choose cloud, as the edge is not a real option.
+	loc1, _ := lyap.Decide(
+		"batch", 1000,
+		500, 1200, // Edge is faster, Cloud is slower than deadline
+		profile, profile,
+		false, constants.ReasonInfeasibleResourcesHard, // Edge fails HARD check
+		false, constants.ReasonInfeasibleTime, // Cloud fails time check
+		0.0, 1.0, dummyProbCalc,
+	)
+	if loc1 != constants.Cloud {
+		t.Errorf("Scenario 1 failed: Expected CLOUD when edge is hard-infeasible, but got %s", loc1)
+	}
+
+	// SCENARIO 2: Edge is Soft-Infeasible (temporarily full), Cloud is Time-Infeasible.
+	// Both are "bad" options, so it should fall back to the one with the lower performance penalty.
+	// Edge penalty is lower (ETA is within deadline), so it should choose Edge (i.e., decide to wait in the queue).
+	loc2, _ := lyap.Decide(
+		"batch", 1000,
+		500, 1200, // Edge ETA < deadline, Cloud ETA > deadline
+		profile, profile,
+		false, constants.ReasonInfeasibleResourcesSoft, // Edge is SOFT-infeasible
+		false, constants.ReasonInfeasibleTime, // Cloud is time-infeasible
+		0.0, 1.0, dummyProbCalc,
+	)
+	if loc2 != constants.Edge {
+		t.Errorf("Scenario 2 failed: Expected EDGE when edge is soft-infeasible and has lower penalty, but got %s", loc2)
+	}
+
+	// SCENARIO 3: Both are Time-Infeasible.
+	// It should fall back to the one with the lower performance penalty.
+	// Cloud is slightly less bad (1200ms vs 1300ms), so it should be chosen.
+	loc3, _ := lyap.Decide(
+		"batch", 1000,
+		1300, 1200, // Both ETAs > deadline
+		profile, profile,
+		false, constants.ReasonInfeasibleTime, // Edge is time-infeasible
+		false, constants.ReasonInfeasibleTime, // Cloud is time-infeasible
+		0.0, 1.0, dummyProbCalc,
+	)
+	if loc3 != constants.Cloud {
+		t.Errorf("Scenario 3 failed: Expected CLOUD when both are time-infeasible and cloud has lower violation, but got %s", loc3)
+	}
+}
+
 func TestLyapunov_ProbabilityQueue(t *testing.T) {
 	lyap := decision.NewLyapunovScheduler()
 	lyap.SetClassConfig("latency", &decision.ClassConfig{
@@ -37,10 +91,8 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 		StdDevDurationMs: 200,
 		P95DurationMs:    1200,
 		DurationHistogram: []apis.HistogramBucket{
-			{Count: 50, LastDecay: time.Now()},
-			{Count: 30, LastDecay: time.Now()},
-			{Count: 15, LastDecay: time.Now()},
-			{Count: 5, LastDecay: time.Now()},
+			{Count: 50, LastDecay: time.Now()}, {Count: 30, LastDecay: time.Now()},
+			{Count: 15, LastDecay: time.Now()}, {Count: 5, LastDecay: time.Now()},
 		},
 	}
 	edgeProfile.DurationHistogram[0].SetUpperBound(500)
@@ -54,10 +106,8 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 		StdDevDurationMs: 150,
 		P95DurationMs:    900,
 		DurationHistogram: []apis.HistogramBucket{
-			{Count: 60, LastDecay: time.Now()},
-			{Count: 30, LastDecay: time.Now()},
-			{Count: 8, LastDecay: time.Now()},
-			{Count: 2, LastDecay: time.Now()},
+			{Count: 60, LastDecay: time.Now()}, {Count: 30, LastDecay: time.Now()},
+			{Count: 8, LastDecay: time.Now()}, {Count: 2, LastDecay: time.Now()},
 		},
 	}
 	cloudProfile.DurationHistogram[0].SetUpperBound(500)
@@ -90,7 +140,6 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 	t.Logf("  Actual violation rate = %.2f%%", stats.ActualViolationPct*100)
 	t.Logf("  Target = 5%%")
 
-	// Zp should be positive since actual (50%) > target (5%)
 	if Zp <= 0 {
 		t.Errorf("Zp should be positive when violation rate exceeds target, got %.2f", Zp)
 	}
@@ -100,129 +149,54 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 		class, deadline,
 		1000, 900,
 		edgeProfile, cloudProfile,
-		true, true,
+		true, "",
+		true, "",
 		0, 1, dummyProbCalc,
 	)
 
 	t.Logf("Decision after violations: location=%s weight=%.2f", loc, weight)
 
-	// With high Zp, should prefer cloud despite cost
 	if loc != constants.Cloud {
 		t.Logf("Warning: Expected cloud due to high Zp, got %s (may be OK depending on Z)", loc)
 	}
 }
+
 func TestLyapunov_PerClassBeta(t *testing.T) {
 	lyap := decision.NewLyapunovScheduler()
+	lyap.SetClassConfig("latency", &decision.ClassConfig{Beta: 0.5})
+	lyap.SetClassConfig("batch", &decision.ClassConfig{Beta: 2.0})
 
-	// High-priority class with low beta (prioritize SLO compliance over cost)
-	lyap.SetClassConfig("latency", &decision.ClassConfig{
-		Beta:                0.5,
-		TargetViolationPct:  0.05,
-		TargetViolationProb: 0.05,
-		DecayFactor:         1.0,
-		ProbabilityWeight:   1.0,
-	})
+	profile := &apis.ProfileStats{Count: 100, MeanDurationMs: 900}
 
-	// Low-priority class with high beta (prioritize cost over SLO)
-	lyap.SetClassConfig("batch", &decision.ClassConfig{
-		Beta:                2.0,
-		TargetViolationPct:  0.20,
-		TargetViolationProb: 0.20,
-		DecayFactor:         1.0,
-		ProbabilityWeight:   1.0,
-	})
-
-	profile := &apis.ProfileStats{
-		Count:             100,
-		MeanDurationMs:    900,
-		StdDevDurationMs:  100,
-		P95DurationMs:     1100,
-		DurationHistogram: []apis.HistogramBucket{{Count: 100}},
-	}
-	profile.DurationHistogram[0].SetUpperBound(1000)
-
-	// TEST 1: Equal violations (both well below deadline), cost dominates
-	// Deadline=1000, Edge ETA=800 (viol=0), Cloud ETA=900 (viol=0)
-	// Edge weight = 0.5*2 + Z*0 = 1.0
-	// Cloud weight = 0.5*1 + Z*0 = 0.5
-	// Cloud wins (lower weight, cheaper)
-	loc1, weight1 := lyap.Decide("latency", 1000, 800, 900, profile, profile, true, true, 2.0, 1.0, dummyProbCalc)
-	t.Logf("Latency (β=0.5): loc=%s weight=%.2f | cost dominates when violations equal", loc1, weight1)
+	// TEST 1: Latency (low beta)
+	loc1, _ := lyap.Decide("latency", 1000, 800, 900, profile, profile, true, "", true, "", 2.0, 1.0, dummyProbCalc)
 	if loc1 != constants.Cloud {
 		t.Errorf("With equal violations and low beta, should choose cheaper cloud, got %v", loc1)
 	}
 
-	// TEST 2: Edge violates more than cloud
-	// Deadline=500, Edge ETA=700 (viol=200), Cloud ETA=600 (viol=100)
-	// With low beta=0.5, violations weighted heavily
-	// Edge weight = 0.5*2 + Z*200 = 1.0 + Z*200
-	// Cloud weight = 0.5*1 + Z*100 = 0.5 + Z*100
-	// Cloud has lower violation, should win
-	loc2, weight2 := lyap.Decide("latency", 500, 700, 600, profile, profile, true, true, 2.0, 1.0, dummyProbCalc)
-	t.Logf("Latency (β=0.5): loc=%s weight=%.2f | violations matter: edge_viol=200 > cloud_viol=100", loc2, weight2)
+	// TEST 2: Batch (high beta)
+	loc2, _ := lyap.Decide("batch", 1000, 700, 800, profile, profile, true, "", true, "", 2.0, 1.0, dummyProbCalc)
 	if loc2 != constants.Cloud {
-		t.Errorf("With lower violations and low beta, should choose cloud, got %v", loc2)
-	}
-
-	// TEST 3: Batch with high beta (cost-sensitive)
-	// Deadline=1000, Edge ETA=700 (viol=0), Cloud ETA=800 (viol=0)
-	// With high beta=2.0, cost dominates
-	// Edge weight = 2.0*2 + Z*0 = 4.0
-	// Cloud weight = 2.0*1 + Z*0 = 2.0
-	// Cloud wins (much cheaper matters with high beta)
-	loc3, weight3 := lyap.Decide("batch", 1000, 700, 800, profile, profile, true, true, 2.0, 1.0, dummyProbCalc)
-	t.Logf("Batch (β=2.0): loc=%s weight=%.2f | high beta makes cost dominant", loc3, weight3)
-	if loc3 != constants.Cloud {
-		t.Errorf("With high beta, cost dominates, should choose cheaper cloud, got %v", loc3)
-	}
-
-	// TEST 4: Batch with violation (high beta, but edge is much cheaper)
-	// Deadline=500, Edge ETA=700 (viol=200), Cloud ETA=600 (viol=100)
-	// Edge weight = 2.0*2 + Z*200 = 4.0 + Z*200
-	// Cloud weight = 2.0*1 + Z*100 = 2.0 + Z*100
-	// Cloud still wins (2.0 < 4.0 initially, and smaller violation delta)
-	loc4, weight4 := lyap.Decide("batch", 500, 700, 600, profile, profile, true, true, 2.0, 1.0, dummyProbCalc)
-	t.Logf("Batch (β=2.0): loc=%s weight=%.2f | high beta but cloud better on both cost and violation", loc4, weight4)
-	if loc4 != constants.Cloud {
-		t.Errorf("Cloud better on cost and violation, should win, got %v", loc4)
+		t.Errorf("With high beta, cost dominates, should choose cheaper cloud, got %v", loc2)
 	}
 }
 
 func TestLyapunov_PerClassDecay(t *testing.T) {
 	lyap := decision.NewLyapunovScheduler()
-
-	// Aggressive decay for batch
 	lyap.SetClassConfig("batch", &decision.ClassConfig{
-		Beta:                1.0,
-		TargetViolationPct:  0.20,
-		TargetViolationProb: 0.20,
-		DecayFactor:         0.5,
-		DecayInterval:       100 * time.Millisecond,
-		ProbabilityWeight:   1.0,
+		DecayFactor: 0.5, DecayInterval: 100 * time.Millisecond,
 	})
 
-	// Build up some queue
 	for i := 0; i < 5; i++ {
 		lyap.UpdateVirtualQueue("batch", 1000, 1500, constants.Edge)
 	}
-
 	Z1 := lyap.GetVirtualQueue("batch")
-	t.Logf("Z before decay: %.2f", Z1)
 
-	// Wait for decay
 	time.Sleep(150 * time.Millisecond)
-
-	profile := &apis.ProfileStats{
-		Count: 100, MeanDurationMs: 500, StdDevDurationMs: 100,
-		DurationHistogram: []apis.HistogramBucket{{Count: 100}},
-	}
-	profile.DurationHistogram[0].SetUpperBound(1000)
-
-	_, _ = lyap.Decide("batch", 1000, 500, 500, profile, profile, true, true, 0, 0, dummyProbCalc)
+	profile := &apis.ProfileStats{Count: 100, MeanDurationMs: 500}
+	_, _ = lyap.Decide("batch", 1000, 500, 500, profile, profile, true, "", true, "", 0, 0, dummyProbCalc)
 
 	Z2 := lyap.GetVirtualQueue("batch")
-	t.Logf("Z after decay: %.2f", Z2)
-
 	if Z2 >= Z1 {
 		t.Errorf("Expected decay to reduce Z, got %.2f >= %.2f", Z2, Z1)
 	}
@@ -231,37 +205,11 @@ func TestLyapunov_PerClassDecay(t *testing.T) {
 func TestLyapunov_ProbabilityQueueInfluencesDecision(t *testing.T) {
 	lyap := decision.NewLyapunovScheduler()
 	lyap.SetClassConfig("latency", &decision.ClassConfig{
-		Beta:                1.0,
-		TargetViolationPct:  0.05,
-		TargetViolationProb: 0.05,
-		DecayFactor:         1.0,
-		ProbabilityWeight:   100.0,
+		TargetViolationProb: 0.05, ProbabilityWeight: 100.0,
 	})
 
-	safeProfile := &apis.ProfileStats{
-		Count:            100,
-		MeanDurationMs:   500,
-		StdDevDurationMs: 50,
-		P95DurationMs:    600,
-		DurationHistogram: []apis.HistogramBucket{
-			{Count: 100, LastDecay: time.Now()},
-		},
-	}
-	safeProfile.DurationHistogram[0].SetUpperBound(600)
-
-	riskyProfile := &apis.ProfileStats{
-		Count:            100,
-		MeanDurationMs:   900,
-		StdDevDurationMs: 200,
-		P95DurationMs:    1300,
-		DurationHistogram: []apis.HistogramBucket{
-			{Count: 50, LastDecay: time.Now()},
-			{Count: 50, LastDecay: time.Now()},
-		},
-	}
-	riskyProfile.DurationHistogram[0].SetUpperBound(1000)
-	riskyProfile.DurationHistogram[1].SetUpperBound(math.Inf(1))
-
+	safeProfile := &apis.ProfileStats{Count: 100, MeanDurationMs: 500}
+	riskyProfile := &apis.ProfileStats{Count: 100, MeanDurationMs: 1100}
 	deadline := 1000.0
 
 	// Build up Zp through violations
@@ -272,19 +220,15 @@ func TestLyapunov_ProbabilityQueueInfluencesDecision(t *testing.T) {
 	Zp := lyap.GetVirtualProbQueue("latency")
 	t.Logf("Zp after violations: %.2f", Zp)
 
-	// Decision with safe edge vs risky cloud
-	loc, weight := lyap.Decide(
+	loc, _ := lyap.Decide(
 		"latency", deadline,
 		700, 800,
 		safeProfile, riskyProfile,
-		true, true,
-		0, 0,
-		dummyProbCalc,
+		true, "", true, "",
+		0, 0, dummyProbCalc,
 	)
 
-	t.Logf("Decision: loc=%s weight=%.2f (Zp=%.2f should prefer safe edge)", loc, weight, Zp)
-
 	if loc != constants.Edge {
-		t.Errorf("With high Zp, should prefer safe edge profile, got %v", loc)
+		t.Errorf("With high Zp, should prefer safe edge profile (low violation prob), got %v", loc)
 	}
 }

@@ -20,8 +20,9 @@ const (
 	ReasonLowMeasurementConf      = "low_measurement_confidence"
 
 	// Infeasibility reasons (internal to decision engine)
-	ReasonInfeasibleResources = "infeasible_resources"
-	ReasonInfeasibleTime      = "infeasible_time"
+	ReasonInfeasibleResourcesHard = "infeasible_resources_hard" // Not enough capacity even if all managed pods finish
+	ReasonInfeasibleResourcesSoft = "infeasible_resources_soft" // Temporarily occupied with other managed pods
+	ReasonInfeasibleTime          = "infeasible_time"
 )
 
 // Priority class names for Kubernetes

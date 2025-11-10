@@ -253,57 +253,64 @@ func (l *LyapunovScheduler) Decide(
 		cloudETA, cloudViolation, cloudProbability, cloudProfile.Count, cloudProfile.ConfidenceScore, cloudCost, cloudWeight,
 	)
 
-	// Feasibility-aware decision
-	if !localFeasible && !cloudFeasible {
-		// A resource infeasibility is a hard "no". A time infeasibility is a soft, prediction-based "no".
-		// If one option fails on resources and the other only on time, prefer the one that can at least run.
-		if localFeasibilityReason == constants.ReasonInfeasibleResources && cloudFeasibilityReason == constants.ReasonInfeasibleTime {
-			klog.V(4).Info("Both infeasible: Prioritizing cloud (time-infeasible) over edge (resource-infeasible)")
-			l.stats[class].TotalDecisions++
-			l.stats[class].CloudDecisions++
-			return constants.Cloud, cloudWeight
-		}
-		// This case is unlikely as cloud is assumed to have infinite resources
-		if cloudFeasibilityReason == constants.ReasonInfeasibleResources && localFeasibilityReason == constants.ReasonInfeasibleTime {
-			klog.V(4).Info("Both infeasible: Prioritizing edge (time-infeasible) over cloud (resource-infeasible)")
-			l.stats[class].TotalDecisions++
-			l.stats[class].EdgeDecisions++
-			return constants.Edge, localWeight
-		}
-
-		klog.V(4).Info("Both infeasible for similar reasons: Choosing minimum total penalty as fallback")
-		localPenalty := localViolation + localProbability*deadline
-		cloudPenalty := cloudViolation + cloudProbability*deadline
-
-		if localPenalty < cloudPenalty || (localPenalty == cloudPenalty && localCost < cloudCost) {
-			l.stats[class].TotalDecisions++
-			l.stats[class].EdgeDecisions++
-			return constants.Edge, localWeight
-		}
+	// **RULE 1: If the edge is fundamentally too small (Hard Infeasibility), it can NEVER be chosen.**
+	if localFeasibilityReason == constants.ReasonInfeasibleResourcesHard {
+		klog.V(3).Info("Edge is Hard Infeasible due to resource limits. Forcing cloud decision.")
 		l.stats[class].TotalDecisions++
 		l.stats[class].CloudDecisions++
+		// Return cloud, even if the cloud is also infeasible. It's the only option that might run.
 		return constants.Cloud, cloudWeight
 	}
 
+	// At this point, we know the edge is at least physically capable of running the pod eventually.
+
+	// Standard cases where one location is clearly the only feasible option.
 	if localFeasible && !cloudFeasible {
 		l.stats[class].TotalDecisions++
 		l.stats[class].EdgeDecisions++
 		return constants.Edge, localWeight
 	}
-
 	if cloudFeasible && !localFeasible {
 		l.stats[class].TotalDecisions++
 		l.stats[class].CloudDecisions++
 		return constants.Cloud, cloudWeight
 	}
 
-	// Both feasible - choose minimum weight
-	if localWeight <= cloudWeight {
+	// Case: Both locations are feasible. Choose the one with the minimum weight.
+	if localFeasible && cloudFeasible {
+		if localWeight <= cloudWeight {
+			l.stats[class].TotalDecisions++
+			l.stats[class].EdgeDecisions++
+			return constants.Edge, localWeight
+		}
 		l.stats[class].TotalDecisions++
-		l.stats[class].EdgeDecisions++
-		return constants.Edge, localWeight
+		l.stats[class].CloudDecisions++
+		return constants.Cloud, cloudWeight
 	}
 
+	// Case: Both locations are infeasible (but the edge is not Hard-Infeasible).
+	// This means edge might be Soft-Infeasible (queueing) and/or Time-Infeasible.
+	if !localFeasible && !cloudFeasible {
+		klog.V(4).Info("Both locations are infeasible (edge is not hard-infeasible), choosing least bad option...")
+
+		// The original logic is now safe to use because we've already handled the case
+		// where the edge is physically incapable of running the pod.
+		// We can simply pick the option with the lower predicted performance penalty.
+		localPenalty := localViolation + localProbability*deadline
+		cloudPenalty := cloudViolation + cloudProbability*deadline
+
+		if localPenalty <= cloudPenalty {
+			l.stats[class].TotalDecisions++
+			l.stats[class].EdgeDecisions++
+			return constants.Edge, localWeight
+		}
+		l.stats[class].TotalDecisions++
+		l.stats[class].CloudDecisions++
+		return constants.Cloud, cloudWeight
+	}
+
+	// Safeguard for any unhandled logic paths.
+	klog.Error("Reached UNEXPECTED fallthrough in Lyapunov decision logic. Defaulting to cloud.")
 	l.stats[class].TotalDecisions++
 	l.stats[class].CloudDecisions++
 	return constants.Cloud, cloudWeight

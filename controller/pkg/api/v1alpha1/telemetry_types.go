@@ -27,9 +27,11 @@ type LocalState struct {
 
 // BestNode identifies the edge node with the most available resources.
 type BestNode struct {
-	Name    string
-	FreeCPU int64
-	FreeMem int64
+	Name                    string
+	FreeCPU                 int64
+	FreeMem                 int64
+	EffectiveAllocatableCPU int64
+	EffectiveAllocatableMem int64
 }
 
 // WANState represents the observed state of the Wide Area Network link.

@@ -278,7 +278,7 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 		pods = append(pods, p)
 	}
 
-	// Precompute pod requests
+	// Precompute pod requests and group pods by node
 	type podReq struct{ cpuM, memMi int64 }
 	podReqCache := make(map[*corev1.Pod]podReq, len(pods))
 	podsByNode := make(map[string][]*corev1.Pod, len(edgeNodes))
@@ -297,29 +297,44 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 		}
 	}
 
-	// Compute per-node free resources
+	// Compute per-node free AND effective resources
 	var bestName string
-	var bestFreeCPU, bestFreeMemMi int64
+	var bestFreeCPU, bestFreeMemMi, bestEffectiveCPU, bestEffectiveMem int64
 	var sumFreeCPU, sumFreeMemMi int64
+	var totalNonManagedCPU, totalNonManagedMem int64
 
 	for nodeName, snap := range nodeSnapshots {
-		var resCPU, resMemMi int64
+		var usedCPU, usedMem, nonManagedCPU, nonManagedMem int64
 		for _, p := range podsByNode[nodeName] {
 			pr := podReqCache[p]
-			resCPU += pr.cpuM
-			resMemMi += pr.memMi
+			usedCPU += pr.cpuM
+			usedMem += pr.memMi
+			if p.Labels[constants.LabelManaged] != constants.LabelValueTrue {
+				nonManagedCPU += pr.cpuM
+				nonManagedMem += pr.memMi
+			}
 		}
 
-		freeCPU := snap.allocatableCPU - resCPU
-		freeMemMi := snap.allocatableMem - resMemMi
+		// Calculate this node's individual metrics
+		nodeFreeCPU := snap.allocatableCPU - usedCPU
+		nodeFreeMem := snap.allocatableMem - usedMem
+		nodeEffectiveCPU := snap.allocatableCPU - nonManagedCPU
+		nodeEffectiveMem := snap.allocatableMem - nonManagedMem
 
-		sumFreeCPU += freeCPU
-		sumFreeMemMi += freeMemMi
+		// Aggregate cluster-wide totals
+		sumFreeCPU += nodeFreeCPU
+		sumFreeMemMi += nodeFreeMem
+		totalNonManagedCPU += nonManagedCPU
+		totalNonManagedMem += nonManagedMem
 
-		if freeCPU > bestFreeCPU || (freeCPU == bestFreeCPU && freeMemMi > bestFreeMemMi) {
-			bestFreeCPU = freeCPU
-			bestFreeMemMi = freeMemMi
+		// Determine if this is the "best" node (most free resources)
+		if nodeFreeCPU > bestFreeCPU || (nodeFreeCPU == bestFreeCPU && nodeFreeMem > bestFreeMemMi) {
+			bestFreeCPU = nodeFreeCPU
+			bestFreeMemMi = nodeFreeMem
 			bestName = nodeName
+			// When we find a new best node, we also record its effective capacity
+			bestEffectiveCPU = nodeEffectiveCPU
+			bestEffectiveMem = nodeEffectiveMem
 		}
 	}
 
@@ -386,38 +401,10 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 		freeMemMi = 0
 	}
 
-	var totalNonManagedCPU, totalNonManagedMem int64
-	var totalManagedCPU, totalManagedMem int64
-
-	for _, p := range pods {
-		if !edgeNodes[p.Spec.NodeName] {
-			continue
-		}
-
-		// Skip completed pods
-		if p.Status.Phase == corev1.PodSucceeded ||
-			p.Status.Phase == corev1.PodFailed {
-			continue
-		}
-
-		pr := podReqCache[p]
-
-		// Separate managed vs non-managed consumption
-		if p.Labels[constants.LabelManaged] == constants.LabelValueTrue {
-			totalManagedCPU += pr.cpuM
-			totalManagedMem += pr.memMi
-		} else {
-			// Non-managed: treat as permanent capacity reduction
-			totalNonManagedCPU += pr.cpuM
-			totalNonManagedMem += pr.memMi
-		}
-	}
-
 	// Effective capacity = Total - Non-managed (permanent baseline)
 	effectiveAllocCPU := totalAllocCPU - totalNonManagedCPU
 	effectiveAllocMem := totalAllocMem - totalNonManagedMem
 
-	// Prevent negative capacity
 	if effectiveAllocCPU < 0 {
 		effectiveAllocCPU = 0
 	}
@@ -436,9 +423,15 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 		NonManagedMem:           totalNonManagedMem,
 		EffectiveAllocatableCPU: effectiveAllocCPU,
 		EffectiveAllocatableMem: effectiveAllocMem,
+		BestEdgeNode: apis.BestNode{
+			Name:                    bestName,
+			FreeCPU:                 bestFreeCPU,
+			FreeMem:                 bestFreeMemMi,
+			EffectiveAllocatableCPU: bestEffectiveCPU,
+			EffectiveAllocatableMem: bestEffectiveMem,
+		},
 
 		Timestamp:     time.Now(),
-		BestEdgeNode:  apis.BestNode{Name: bestName, FreeCPU: bestFreeCPU, FreeMem: bestFreeMemMi},
 		IsStale:       false,
 		StaleDuration: 0,
 	}, nil

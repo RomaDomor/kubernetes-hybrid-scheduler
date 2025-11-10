@@ -325,7 +325,7 @@ for config_name in "${!CONFIGS[@]}"; do
                 echo "  - Applying WAN profile '${wan_profile}'..."
                 ssh "${WAN_ROUTER}" "sudo -n /usr/local/sbin/wan/apply_wan.sh '${wan_profile}'"
 
-                # <--- MODIFIED: Pass image tag to reset function ---
+                # <--- Pass image tag to reset function ---
                 reset_scheduler_state "${KUBECONFIG}" "${helm_params}" "${IMAGE_TAG}"
 
                 echo "  - Sleeping 15s after scheduler reset..."

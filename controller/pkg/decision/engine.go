@@ -122,13 +122,7 @@ func (e *Engine) Decide(
 		return e.config.ProfileStore.ComputeViolationProbability(stats, threshold)
 	}
 
-	location, weight := e.lyapunov.Decide(
-		slo.Class, deadline, edgeETA, cloudETA,
-		edgeProfile, cloudProfile,
-		edgeFeasible, edgeReason,
-		cloudFeasible, cloudReason,
-		localCost, cloudCost, probCalc,
-	)
+	location, weight := e.lyapunov.Decide(slo.Class, deadline, edgeETA, cloudETA, edgeProfile, cloudProfile, edgeFeasible, edgeReason, cloudFeasible, cloudReason, localCost, cloudCost, probCalc)
 
 	// --- 6. Result Assembly ---
 	reason := e.determineReason(location, edgeFeasible, cloudFeasible, edgeETA, cloudETA)
@@ -209,51 +203,40 @@ func (e *Engine) isEdgeFeasibleWithConfidence(
 ) (bool, string) {
 	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
 
-	// Guard against a non-functional edge cluster.
-	if local.EffectiveAllocatableCPU <= 0 || local.EffectiveAllocatableMem <= 0 {
-		klog.V(5).Infof("%s: Edge feasibility check failed: no effective edge capacity available", podID)
-		return false, constants.ReasonInfeasibleResources
+	// --- HARD RESOURCE CHECKS ---
+	// This is the most important change. We now check against the single best node's
+	// effective capacity, which correctly handles resource fragmentation.
+
+	// 1. Hard Check: Can the pod fit on the best available edge node, even if all managed pods were to finish?
+	if local.BestEdgeNode.Name == "" || local.BestEdgeNode.EffectiveAllocatableCPU < reqCPU || local.BestEdgeNode.EffectiveAllocatableMem < reqMem {
+		klog.V(4).Infof("%s: Edge feasibility check failed (HARD): Pod request (%dm/%dMi) exceeds the effective capacity of the best available edge node '%s' (%dm/%dMi)",
+			podID, reqCPU, reqMem, local.BestEdgeNode.Name, local.BestEdgeNode.EffectiveAllocatableCPU, local.BestEdgeNode.EffectiveAllocatableMem)
+		return false, constants.ReasonInfeasibleResourcesHard
 	}
 
-	// 1. Deadline feasibility: Can the job finish in time?
-	if edgeETA > deadline {
-		klog.V(5).Infof("%s: Edge feasibility check failed: predicted ETA %.0fms exceeds deadline %.0fms", podID, edgeETA, deadline)
-		return false, constants.ReasonInfeasibleTime
-	}
-
-	// 2. Resource availability: Are there enough free resources cluster-wide?
-	if local.FreeCPU < reqCPU || local.FreeMem < reqMem {
-		klog.V(5).Infof("%s: Edge feasibility check failed: insufficient free resources (need %dm/%dMi, have %dm/%dMi)",
-			podID, reqCPU, reqMem, local.FreeCPU, local.FreeMem)
-		return false, constants.ReasonInfeasibleResources
-	}
-
-	// 3. Node-level feasibility: Can the pod fit on the best available node with a safety margin?
-	if local.BestEdgeNode.Name != "" {
-		// Adjust safety margin based on SLO class and telemetry confidence.
-		baseSafetyMargin := 0.20 // Default margin
-		if pod.Annotations[constants.AnnotationSLOClass] == "latency" || pod.Annotations[constants.AnnotationSLOClass] == "interactive" {
-			baseSafetyMargin = 0.10 // Tighter margin for latency-sensitive workloads
-		}
-		safetyFactor := 1.0 + baseSafetyMargin*(1.0-local.MeasurementConfidence)
-
-		requiredCPU := int64(float64(reqCPU) * safetyFactor)
-		requiredMem := int64(float64(reqMem) * safetyFactor)
-
-		if local.BestEdgeNode.FreeCPU < requiredCPU || local.BestEdgeNode.FreeMem < requiredMem {
-			klog.V(5).Infof("%s: Edge feasibility check failed: best node %s cannot fit pod with safety margin %.2fx (conf=%.2f)",
-				podID, local.BestEdgeNode.Name, safetyFactor, local.MeasurementConfidence)
-			return false, constants.ReasonInfeasibleResources
-		}
-	}
-
-	// 4. Cluster-wide admission control: Would scheduling this pod exceed a safe utilization threshold?
+	// The cluster-wide utilization check is still a useful secondary hard check to prevent over-commitment of the whole edge.
 	const utilizationLimit = 0.90
 	utilAfterScheduling := float64(local.EffectiveAllocatableCPU-local.FreeCPU+reqCPU) / float64(local.EffectiveAllocatableCPU)
 	if utilAfterScheduling > utilizationLimit {
-		klog.V(5).Infof("%s: Edge feasibility check failed: would exceed cluster utilization limit (%.1f%% > %.1f%%)",
+		klog.V(4).Infof("%s: Edge feasibility check failed (HARD): Would exceed cluster-wide utilization limit (%.1f%% > %.1f%%)",
 			podID, utilAfterScheduling*100, utilizationLimit*100)
-		return false, constants.ReasonInfeasibleResources
+		return false, constants.ReasonInfeasibleResourcesHard
+	}
+
+	// --- SOFT FEASIBILITY CHECKS ---
+	// These checks are against the *current* state. A failure here means we might need to wait (queue).
+
+	// 2. Soft check (Time): Can the job finish in time, including predicted queue waits?
+	if edgeETA > deadline {
+		klog.V(4).Infof("%s: Edge feasibility check failed (SOFT): predicted ETA %.0fms exceeds deadline %.0fms", podID, edgeETA, deadline)
+		return false, constants.ReasonInfeasibleTime
+	}
+
+	// 3. Soft check (Resources): Are there enough free resources *right now*?
+	if local.FreeCPU < reqCPU || local.FreeMem < reqMem {
+		klog.V(4).Infof("%s: Edge feasibility check failed (SOFT): insufficient free resources right now (need %dm/%dMi, have %dm/%dMi). Pod may be queued.",
+			podID, reqCPU, reqMem, local.FreeCPU, local.FreeMem)
+		return false, constants.ReasonInfeasibleResourcesSoft
 	}
 
 	return true, ""

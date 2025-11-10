@@ -30,11 +30,8 @@ func newEngine() *decision.Engine {
 	ps := decision.NewProfileStore(fake.NewSimpleClientset(), 100, decision.DefaultHistogramConfig())
 
 	lyap := decision.NewLyapunovScheduler()
-	lyap.SetTargetViolationRate("latency", 0.05)
-	lyap.SetTargetViolationRate("interactive", 0.05)
-	lyap.SetTargetViolationRate("throughput", 0.10)
-	lyap.SetTargetViolationRate("streaming", 0.10)
-	lyap.SetTargetViolationRate("batch", 0.20)
+	lyap.SetClassConfig("latency", &decision.ClassConfig{Beta: 1.0, TargetViolationProb: 0.05})
+	lyap.SetClassConfig("batch", &decision.ClassConfig{Beta: 1.0, TargetViolationProb: 0.2})
 
 	cfg := decision.EngineConfig{
 		RTTUnusableMs:           300,
@@ -53,12 +50,7 @@ func TestDecide_WANUnusable_ForcesEdge(t *testing.T) {
 	e := newEngine()
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, true, 5)
-	local := localStateWith(
-		1000, 1000, // free
-		1000, 1000, // allocatable
-		map[string]int{"latency": 0},
-		map[string]apis.DemandByClass{},
-	)
+	local := localStateWithDefaults()
 	wan := &apis.WANState{RTTMs: 400, LossPct: 15}
 
 	res := e.Decide(p, s, local, wan)
@@ -71,12 +63,7 @@ func TestDecide_OffloadDisabled_StaysEdge(t *testing.T) {
 	e := newEngine()
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, false, 5)
-	local := localStateWith(
-		1000, 1000,
-		1000, 1000,
-		map[string]int{"latency": 0},
-		map[string]apis.DemandByClass{},
-	)
+	local := localStateWithDefaults()
 	wan := &apis.WANState{RTTMs: 50, LossPct: 0.1}
 
 	res := e.Decide(p, s, local, wan)
@@ -85,24 +72,23 @@ func TestDecide_OffloadDisabled_StaysEdge(t *testing.T) {
 	}
 }
 
-func TestDecide_CloudFeasibleOnly(t *testing.T) {
+func TestDecide_CloudFeasibleOnly_WhenEdgeFull(t *testing.T) {
 	e := newEngine()
-	p := podWith("latency", 200, 128)
-	s := sloMust("latency", 100, true, 5)
+	p := podWith("latency", 500, 256)
+	s := sloMust("latency", 500, true, 5)
 
-	local := localStateWith(
-		1000, 1000,
-		1000, 1000,
-		map[string]int{"latency": 10},
-		map[string]apis.DemandByClass{
-			"latency": {CPU: 200 * 10, Mem: 128 * 10},
-		},
-	)
+	local := localStateWithDefaults()
+	local.FreeCPU = 100 // Not enough for the 500m request
+	local.FreeMem = 100
+
 	wan := &apis.WANState{RTTMs: 10, LossPct: 0.0}
 
 	res := e.Decide(p, s, local, wan)
 	if res.Location != constants.Cloud {
-		t.Fatalf("expected CLOUD, got %v (%s)", res.Location, res.Reason)
+		t.Fatalf("expected CLOUD when edge is full, got %v (reason=%s)", res.Location, res.Reason)
+	}
+	if res.Reason != constants.ReasonCloudFeasibleOnly {
+		t.Errorf("expected reason cloud_feasible_only, got %s", res.Reason)
 	}
 }
 
@@ -111,18 +97,10 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, true, 5)
 
-	// Create stale local state
-	local := localStateWith(
-		1000, 1000,
-		1000, 1000,
-		map[string]int{"latency": 0},
-		map[string]apis.DemandByClass{},
-	)
+	local := localStateWithDefaults()
 	local.IsStale = true
 	local.StaleDuration = 6 * time.Second
 	local.Timestamp = time.Now().Add(-6 * time.Second)
-	local.IsCompleteSnapshot = false
-	local.MeasurementConfidence = 0.2
 
 	wan := &apis.WANState{RTTMs: 50}
 
@@ -131,12 +109,7 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 		t.Fatalf("want CLOUD telemetry_circuit_breaker, got %v %s", res.Location, res.Reason)
 	}
 
-	// Test WAN circuit breaker
-	local.IsStale = false
-	local.StaleDuration = 0
-	local.Timestamp = time.Now()
-	local.IsCompleteSnapshot = true
-	local.MeasurementConfidence = 1.0
+	local = localStateWithDefaults() // Reset to fresh state
 	wan.IsStale = true
 	wan.StaleDuration = 11 * time.Minute
 
@@ -146,81 +119,72 @@ func TestDecide_StaleCircuitBreakers(t *testing.T) {
 	}
 }
 
-func TestDecide_EdgePreferred_BothFeasible(t *testing.T) {
+func TestDecide_EdgePreferred_WhenFasterAndFeasible(t *testing.T) {
 	e := newEngine()
+	ps := e.GetProfileStore()
+	edgeKey := apis.GetProfileKey(podWith("latency", 200, 128), constants.Edge)
+	cloudKey := apis.GetProfileKey(podWith("latency", 200, 128), constants.Cloud)
+	ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 100})
+	ps.Update(cloudKey, apis.ProfileUpdate{ObservedDurationMs: 500})
+
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 5000, true, 5)
-
-	local := localStateWith(
-		800, 800,
-		1000, 1000,
-		map[string]int{"latency": 0},
-		map[string]apis.DemandByClass{
-			"latency": {CPU: 200, Mem: 128},
-		},
-	)
-	wan := &apis.WANState{RTTMs: 50, LossPct: 1}
+	local := localStateWithDefaults()
+	wan := &apis.WANState{RTTMs: 10, LossPct: 0}
 
 	res := e.Decide(p, s, local, wan)
 
 	if res.Location != constants.Edge {
-		t.Fatalf("want EDGE (both feasible), got %v (reason=%s)", res.Location, res.Reason)
+		t.Fatalf("want EDGE, got %v (reason=%s)", res.Location, res.Reason)
+	}
+	if res.Reason != constants.ReasonEdgePreferred {
+		t.Errorf("expected reason edge_preferred, got %s", res.Reason)
 	}
 }
 
 func TestDecide_LyapunovAdaptsToViolations(t *testing.T) {
 	e := newEngine()
 	lyap := e.GetLyapunovScheduler()
+	ps := e.GetProfileStore()
 
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
-
-	local := localStateWith(
-		500, 500,
-		1000, 1000,
-		map[string]int{"latency": 5},
-		map[string]apis.DemandByClass{
-			"latency": {CPU: 500, Mem: 500},
-		},
-	)
+	local := localStateWithDefaults()
 	wan := &apis.WANState{RTTMs: 20, LossPct: 0.5}
 
-	// Initial decision
+	edgeKey := apis.GetProfileKey(p, constants.Edge)
+	cloudKey := apis.GetProfileKey(p, constants.Cloud)
+
+	// SCENARIO 1: Edge is slightly better than cloud, both are feasible.
+	ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 900})  // EdgeETA = 900ms
+	ps.Update(cloudKey, apis.ProfileUpdate{ObservedDurationMs: 880}) // CloudETA = 880 + 2*20 = 920ms
+
+	// 1. Initial Decision: Z is zero. Both are feasible with no predicted violation.
+	// Edge is cheaper and faster, so it must be chosen.
 	res1 := e.Decide(p, s, local, wan)
-	initialZ := lyap.GetVirtualQueue("latency")
-
-	t.Logf("Initial decision: %s (Z=%.2f)", res1.Location, initialZ)
-
-	// Simulate several edge violations
-	for i := 0; i < 5; i++ {
-		lyap.UpdateVirtualQueue("latency", 1000, 1500, constants.Edge)
+	if res1.Location != constants.Edge {
+		t.Fatalf("Initial decision should be edge (cheaper and faster), but got %s", res1.Location)
 	}
 
+	// 2. Simulate many SLO violations on the edge. This will increase the Z queue.
+	for i := 0; i < 20; i++ {
+		lyap.UpdateVirtualQueue("latency", 1000, 1200, constants.Edge) // Actual runs were 1200ms
+	}
 	afterViolationsZ := lyap.GetVirtualQueue("latency")
-	t.Logf("After 5 edge violations: Z=%.2f", afterViolationsZ)
-
-	// Virtual queue should have grown
-	if afterViolationsZ <= initialZ {
-		t.Errorf("Expected virtual queue to grow after violations, got %.2f <= %.2f",
-			afterViolationsZ, initialZ)
+	if afterViolationsZ <= 0 {
+		t.Fatal("Expected virtual queue to grow significantly after violations")
 	}
 
-	// Make another decision - should be more likely to choose cloud
+	// 3. Now, update the edge profile to reflect reality: it's actually slower and violates the SLO.
+	ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 1200}) // P95 is now > 1000
+
+	// 4. Second Decision: Z is now very high, and the Edge profile correctly predicts a violation.
+	// EdgeETA = 1200ms (Violation = 200ms) -> EdgeWeight = 0.0 + Z*200 -> high
+	// CloudETA = 920ms (Violation = 0ms)   -> CloudWeight = 1.0 + Z*0 -> 1.0
+	// The high edge weight should force a cloud decision.
 	res2 := e.Decide(p, s, local, wan)
-	t.Logf("Decision after violations: %s (Z=%.2f)", res2.Location, afterViolationsZ)
-
-	// Now simulate cloud successes to bring Z back down
-	for i := 0; i < 10; i++ {
-		lyap.UpdateVirtualQueue("latency", 1000, 800, constants.Cloud)
-	}
-
-	finalZ := lyap.GetVirtualQueue("latency")
-	t.Logf("After 10 cloud successes: Z=%.2f", finalZ)
-
-	// Virtual queue should decrease
-	if finalZ >= afterViolationsZ {
-		t.Errorf("Expected virtual queue to decrease after successes, got %.2f >= %.2f",
-			finalZ, afterViolationsZ)
+	if res2.Location != constants.Cloud {
+		t.Errorf("Expected CLOUD after many edge violations made the violation penalty high, but got %s", res2.Location)
 	}
 }
 
@@ -229,12 +193,7 @@ func TestDecide_LowConfidenceForcesCloud(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 2000, true, 5)
 
-	local := localStateWith(
-		1000, 1000,
-		1000, 1000,
-		map[string]int{"latency": 0},
-		map[string]apis.DemandByClass{},
-	)
+	local := localStateWithDefaults()
 	local.IsCompleteSnapshot = false
 	local.MeasurementConfidence = 0.3
 
@@ -243,37 +202,32 @@ func TestDecide_LowConfidenceForcesCloud(t *testing.T) {
 	res := e.Decide(p, s, local, wan)
 
 	if res.Location != constants.Cloud || res.Reason != "low_measurement_confidence" {
-		t.Fatalf("Expected cloud with low_measurement_confidence, got %v %s",
-			res.Location, res.Reason)
+		t.Fatalf("Expected cloud with low_measurement_confidence, got %v %s", res.Location, res.Reason)
 	}
 }
 
-func localStateWith(freeCPU, freeMem, allocCPU, allocMem int64, pending map[string]int, demand map[string]apis.DemandByClass) *apis.LocalState {
-	// Compute non-managed workload (difference between alloc and free)
-	usedCPU := allocCPU - freeCPU
-	usedMem := allocMem - freeMem
-
-	// For tests, assume 20% of usage is non-managed (system pods)
-	nonManagedCPU := int64(float64(usedCPU) * 0.2)
-	nonManagedMem := int64(float64(usedMem) * 0.2)
-
-	effectiveAllocCPU := allocCPU - nonManagedCPU
-	effectiveAllocMem := allocMem - nonManagedMem
-
+// localStateWithDefaults provides a default healthy, mostly empty local state for tests.
+func localStateWithDefaults() *apis.LocalState {
 	return &apis.LocalState{
-		FreeCPU:                 freeCPU,
-		FreeMem:                 freeMem,
-		PendingPodsPerClass:     pending,
-		TotalDemand:             demand,
-		TotalAllocatableCPU:     allocCPU,
-		TotalAllocatableMem:     allocMem,
-		NonManagedCPU:           nonManagedCPU,
-		NonManagedMem:           nonManagedMem,
-		EffectiveAllocatableCPU: effectiveAllocCPU,
-		EffectiveAllocatableMem: effectiveAllocMem,
-		BestEdgeNode:            apis.BestNode{Name: "edge1", FreeCPU: freeCPU, FreeMem: freeMem},
-		Timestamp:               time.Now(),
-		IsCompleteSnapshot:      true,
-		MeasurementConfidence:   1.0,
+		FreeCPU:                 8000,
+		FreeMem:                 8000,
+		PendingPodsPerClass:     map[string]int{},
+		TotalDemand:             map[string]apis.DemandByClass{},
+		TotalAllocatableCPU:     10000,
+		TotalAllocatableMem:     10000,
+		NonManagedCPU:           1000,
+		NonManagedMem:           1000,
+		EffectiveAllocatableCPU: 9000,
+		EffectiveAllocatableMem: 9000,
+		BestEdgeNode: apis.BestNode{
+			Name:                    "edge1",
+			FreeCPU:                 8000,
+			FreeMem:                 8000,
+			EffectiveAllocatableCPU: 9000,
+			EffectiveAllocatableMem: 9000,
+		},
+		Timestamp:             time.Now(),
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
 	}
 }

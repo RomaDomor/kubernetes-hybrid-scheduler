@@ -23,13 +23,8 @@ func TestEngine_ProbabilityBasedDecision(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	// UPDATED: Use helper
-	local := localStateWith(
-		1000, 1000,
-		1000, 1000,
-		map[string]int{"latency": 0},
-		map[string]apis.DemandByClass{},
-	)
+	// Use helper
+	local := localStateWithDefaults()
 	wan := &apis.WANState{RTTMs: 20, LossPct: 0.5}
 
 	// ... rest of test unchanged
@@ -78,13 +73,8 @@ func TestEngine_ProfilesInfluenceDecision(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	// UPDATED: Use helper
-	local := localStateWith(
-		1000, 1000,
-		1000, 1000,
-		map[string]int{"latency": 0},
-		map[string]apis.DemandByClass{},
-	)
+	// Use helper
+	local := localStateWithDefaults()
 	wan := &apis.WANState{RTTMs: 30, LossPct: 0.5}
 
 	edgeKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
