@@ -1,15 +1,13 @@
-package telemetry_test
+package telemetry
 
 import (
 	"testing"
 	"time"
-
-	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
 )
 
 func TestWANProbe_CacheStaleness(t *testing.T) {
 	// Use a short TTL for testing
-	p := telemetry.NewWANProbe("127.0.0.1", 50*time.Millisecond)
+	p := NewWANProbe("127.0.0.1", 50*time.Millisecond)
 
 	// Give it a moment to initialize
 	time.Sleep(100 * time.Millisecond)
@@ -36,8 +34,7 @@ func TestWANProbe_CacheStaleness(t *testing.T) {
 }
 
 func TestWANProbe_DefaultValues(t *testing.T) {
-	p := telemetry.NewWANProbe("192.0.2.1", 1*time.Second) // TEST-NET-1 (unreachable)
-
+	p := NewWANProbe("192.0.2.1", 1*time.Second)
 	time.Sleep(100 * time.Millisecond)
 
 	s := p.GetCachedWANState()

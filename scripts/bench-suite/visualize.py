@@ -205,53 +205,53 @@ def _set_integer_run_ticks(grid, dataframe_with_run):
 
 # --- Plotting Library ---
 
-def plot_1_latency_comparison_bars(df: pd.DataFrame, output_dir: Path):
-    """(Graph 1) Mean latency comparison."""
-    print("Generating: 1. Mean Latency Comparison (Bar Chart)")
-    latency_df = df[
-        df['workload'].isin(['http-latency', 'stream-processor'])
-    ].copy()
-    if latency_df.empty:
-        print("  Skipping: No latency workload data found.")
-        return
-
-    for load_profile in LOAD_ORDER:
-        group = latency_df[latency_df['local_load'] == load_profile]
-        if group.empty:
-            continue
-
-        g = sns.catplot(
-            data=group,
-            x='wan_profile',
-            y='measured_ms',
-            hue='workload',
-            kind='bar',
-            errorbar='sd',
-            capsize=0.15,
-            aspect=1.6,
-            height=5,
-            palette="Set2",
-        )
-        g.set_axis_labels(
-            "WAN Profile",
-            "Mean Latency (ms)",
-            fontsize=12,
-            fontweight='semibold'
-        )
-        g.legend.set_title("Workload")
-        g.figure.suptitle(
-            f'Mean Latency under "{load_profile}" Local Load',
-            fontsize=14,
-            fontweight='bold',
-            y=0.98
-        )
-        g.tight_layout()
-        sns.despine(ax=g.ax)
-
-        path = output_dir / f"A1_mean_latency_bars_load_{load_profile}.png"
-        g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
-        plt.close()
-        print(f"  Saved: {path}")
+# def plot_1_latency_comparison_bars(df: pd.DataFrame, output_dir: Path):
+#     """(Graph 1) Mean latency comparison."""
+#     print("Generating: 1. Mean Latency Comparison (Bar Chart)")
+#     latency_df = df[
+#         df['workload'].isin(['http-latency', 'stream-processor'])
+#     ].copy()
+#     if latency_df.empty:
+#         print("  Skipping: No latency workload data found.")
+#         return
+#
+#     for load_profile in LOAD_ORDER:
+#         group = latency_df[latency_df['local_load'] == load_profile]
+#         if group.empty:
+#             continue
+#
+#         g = sns.catplot(
+#             data=group,
+#             x='wan_profile',
+#             y='measured_ms',
+#             hue='workload',
+#             kind='bar',
+#             errorbar='sd',
+#             capsize=0.15,
+#             aspect=1.6,
+#             height=5,
+#             palette="Set2",
+#         )
+#         g.set_axis_labels(
+#             "WAN Profile",
+#             "Mean Latency (ms)",
+#             fontsize=12,
+#             fontweight='semibold'
+#         )
+#         g.legend.set_title("Workload")
+#         g.figure.suptitle(
+#             f'Mean Latency under "{load_profile}" Local Load',
+#             fontsize=14,
+#             fontweight='bold',
+#             y=0.98
+#         )
+#         g.tight_layout()
+#         sns.despine(ax=g.ax)
+#
+#         path = output_dir / f"A1_mean_latency_bars_load_{load_profile}.png"
+#         g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+#         plt.close()
+#         print(f"  Saved: {path}")
 
 
 def plot_2_job_duration_bars(df: pd.DataFrame, output_dir: Path):
@@ -366,64 +366,64 @@ def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
     print(f"  Saved: {path}")
 
 
-def plot_4_http_latency_full_distribution(df: pd.DataFrame, output_dir: Path):
-    """(Graph 4) HTTP latency distribution."""
-    print("Generating: 4. Full HTTP Latency Distribution (Violin Plot)")
-    plot_df = df[df['workload'] == 'http-latency'].melt(
-        id_vars=['wan_profile', 'local_load'],
-        value_vars=['http_p50_ms', 'http_p95_ms', 'http_p99_ms'],
-        var_name='percentile',
-        value_name='latency_ms'
-    )
-    if plot_df.empty:
-        return
-    plot_df['percentile'] = (
-        plot_df['percentile']
-        .str.replace('http_p', '')
-        .str.replace('_ms', '')
-    )
-
-    available_loads = sorted(
-        plot_df['local_load'].unique(),
-        key=lambda x: LOAD_ORDER.index(str(x)) if str(x) in LOAD_ORDER else 999
-    )
-
-    g = sns.catplot(
-        data=plot_df,
-        x='wan_profile',
-        y='latency_ms',
-        hue='percentile',
-        col='local_load',
-        kind='violin',
-        split=False,
-        inner='quartiles',
-        height=5.5,
-        aspect=1.3,
-        palette='muted',
-        col_order=available_loads,
-    )
-    g.set_axis_labels(
-        "WAN Profile",
-        "Latency (ms)",
-        fontsize=11,
-        fontweight='semibold'
-    )
-    g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
-    g.legend.set_title("Percentile")
-    g.figure.suptitle(
-        "HTTP Latency Distribution by Percentile",
-        fontsize=14,
-        fontweight='bold',
-        y=0.995
-    )
-    for ax in g.axes.flat:
-        sns.despine(ax=ax)
-    g.tight_layout()
-
-    path = output_dir / "B1_http_latency_distribution.png"
-    g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
-    plt.close()
-    print(f"  Saved: {path}")
+# def plot_4_http_latency_full_distribution(df: pd.DataFrame, output_dir: Path):
+#     """(Graph 4) HTTP latency distribution."""
+#     print("Generating: 4. Full HTTP Latency Distribution (Violin Plot)")
+#     plot_df = df[df['workload'] == 'http-latency'].melt(
+#         id_vars=['wan_profile', 'local_load'],
+#         value_vars=['http_p50_ms', 'http_p95_ms', 'http_p99_ms'],
+#         var_name='percentile',
+#         value_name='latency_ms'
+#     )
+#     if plot_df.empty:
+#         return
+#     plot_df['percentile'] = (
+#         plot_df['percentile']
+#         .str.replace('http_p', '')
+#         .str.replace('_ms', '')
+#     )
+#
+#     available_loads = sorted(
+#         plot_df['local_load'].unique(),
+#         key=lambda x: LOAD_ORDER.index(str(x)) if str(x) in LOAD_ORDER else 999
+#     )
+#
+#     g = sns.catplot(
+#         data=plot_df,
+#         x='wan_profile',
+#         y='latency_ms',
+#         hue='percentile',
+#         col='local_load',
+#         kind='violin',
+#         split=False,
+#         inner='quartiles',
+#         height=5.5,
+#         aspect=1.3,
+#         palette='muted',
+#         col_order=available_loads,
+#     )
+#     g.set_axis_labels(
+#         "WAN Profile",
+#         "Latency (ms)",
+#         fontsize=11,
+#         fontweight='semibold'
+#     )
+#     g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
+#     g.legend.set_title("Percentile")
+#     g.figure.suptitle(
+#         "HTTP Latency Distribution by Percentile",
+#         fontsize=14,
+#         fontweight='bold',
+#         y=0.995
+#     )
+#     for ax in g.axes.flat:
+#         sns.despine(ax=ax)
+#     g.tight_layout()
+#
+#     path = output_dir / "B1_http_latency_distribution.png"
+#     g.savefig(path, dpi=300, bbox_inches="tight", facecolor='white')
+#     plt.close()
+#     print(f"  Saved: {path}")
 
 
 def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path):
@@ -1318,10 +1318,10 @@ def main():
     # --- Generate plots for STABLE data ---
     print("\n--- Group A/B/C: Stable-State Performance Analysis ---")
     # Note: Pass the 'df_stable_...' dataframes to the original plotting functions
-    plot_1_latency_comparison_bars(df_stable_slo, output_dir)
+    # plot_1_latency_comparison_bars(df_stable_slo, output_dir)
     plot_2_job_duration_bars(df_stable_slo, output_dir)
     plot_3_slo_pass_rate_heatmap(df_stable_slo, output_dir)
-    plot_4_http_latency_full_distribution(df_stable_slo, output_dir)
+    # plot_4_http_latency_full_distribution(df_stable_slo, output_dir)
     plot_5_performance_interaction(df_stable_slo, output_dir)
     plot_6_slo_failure_magnitude(df_stable_slo, output_dir)
     plot_7_raw_data_variance(df_stable_slo, output_dir)

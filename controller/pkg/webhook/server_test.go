@@ -1,4 +1,4 @@
-package webhook_test
+package webhook
 
 import (
 	"bytes"
@@ -15,33 +15,52 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/decision"
-	"kubernetes-hybrid-scheduler/controller/pkg/slo"
-	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
-	"kubernetes-hybrid-scheduler/controller/pkg/webhook"
 )
 
 type fakeTel struct{}
 
-func (f *fakeTel) GetLocalState(_ context.Context) (*telemetry.LocalState, error) {
-	return &telemetry.LocalState{PendingPodsPerClass: map[string]int{}}, nil
+func (f *fakeTel) GetLocalState(_ context.Context) (*apis.LocalState, error) {
+	return &apis.LocalState{
+		PendingPodsPerClass:   map[string]int{},
+		TotalDemand:           map[string]apis.DemandByClass{},
+		TotalAllocatableCPU:   1000,
+		TotalAllocatableMem:   1000,
+		FreeCPU:               1000,
+		FreeMem:               1000,
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
+	}, nil
 }
-func (f *fakeTel) GetWANState(_ context.Context) (*telemetry.WANState, error) {
-	return &telemetry.WANState{RTTMs: 10}, nil
+func (f *fakeTel) GetWANState(_ context.Context) (*apis.WANState, error) {
+	return &apis.WANState{RTTMs: 10}, nil
 }
-func (f *fakeTel) GetCachedLocalState() *telemetry.LocalState {
-	return &telemetry.LocalState{PendingPodsPerClass: map[string]int{}}
+func (f *fakeTel) GetCachedLocalState() *apis.LocalState {
+	return &apis.LocalState{
+		PendingPodsPerClass:   map[string]int{},
+		TotalDemand:           map[string]apis.DemandByClass{},
+		TotalAllocatableCPU:   1000,
+		TotalAllocatableMem:   1000,
+		FreeCPU:               1000,
+		FreeMem:               1000,
+		IsCompleteSnapshot:    true,
+		MeasurementConfidence: 1.0,
+	}
 }
-func (f *fakeTel) GetCachedWANState() *telemetry.WANState { return &telemetry.WANState{RTTMs: 10} }
-func (f *fakeTel) UpdateMetrics()                         {}
-func (f *fakeTel) LockForDecision()                       {}
-func (f *fakeTel) UnlockForDecision()                     {}
+func (f *fakeTel) GetCachedWANState() *apis.WANState { return &apis.WANState{RTTMs: 10} }
+func (f *fakeTel) UpdateMetrics()                    {}
+func (f *fakeTel) LockForDecision()                  {}
+func (f *fakeTel) UnlockForDecision()                {}
 
-type fakeEngine struct{ res decision.Result }
+type fakeEngine struct{ res apis.Result }
 
-func (f *fakeEngine) Decide(_ *corev1.Pod, _ *slo.SLO, _ *telemetry.LocalState, _ *telemetry.WANState) decision.Result {
+func (f *fakeEngine) Decide(_ *corev1.Pod, _ *apis.SLO, _ *apis.LocalState, _ *apis.WANState) apis.Result {
 	return f.res
+}
+func (f *fakeEngine) GetLyapunovScheduler() *decision.LyapunovScheduler {
+	return decision.NewLyapunovScheduler()
 }
 
 func TestWebhook_ManagedPodPatched(t *testing.T) {
@@ -71,14 +90,14 @@ func TestWebhook_ManagedPodPatched(t *testing.T) {
 	}
 	body, _ := json.Marshal(review)
 
-	eng := &fakeEngine{res: decision.Result{
+	eng := &fakeEngine{res: apis.Result{
 		Location:       constants.Edge,
 		PredictedETAMs: 100,
 		WanRttMs:       10,
 		Reason:         "edge_preferred",
 	}}
 
-	s := webhook.NewServer(eng, &fakeTel{}, rate.NewLimiter(100, 100), fake.NewSimpleClientset())
+	s := NewServer(eng, &fakeTel{}, rate.NewLimiter(100, 100), fake.NewSimpleClientset())
 	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)

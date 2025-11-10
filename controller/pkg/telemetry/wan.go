@@ -10,6 +10,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"k8s.io/klog/v2"
+
+	"kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
 )
 
 var (
@@ -29,7 +31,7 @@ var (
 
 type WANProbe struct {
 	cloudEndpoint string
-	cache         *WANState
+	cache         *v1alpha1.WANState
 	cacheMu       sync.RWMutex
 	cacheTTL      time.Duration
 }
@@ -38,7 +40,7 @@ func NewWANProbe(endpoint string, ttl time.Duration) *WANProbe {
 	p := &WANProbe{
 		cloudEndpoint: endpoint,
 		cacheTTL:      ttl,
-		cache: &WANState{
+		cache: &v1alpha1.WANState{
 			RTTMs:     999,
 			LossPct:   100,
 			Timestamp: time.Now(),
@@ -59,7 +61,6 @@ func (p *WANProbe) startProbeLoopWithJitter() {
 	// Initial jitter: 0-5 seconds
 	time.Sleep(time.Duration(rand.Intn(5000)) * time.Millisecond)
 
-	// 10s base interval with ±2s jitter
 	for {
 		jitter := time.Duration(rand.Intn(4000)-2000) * time.Millisecond
 		time.Sleep(10*time.Second + jitter)
@@ -105,7 +106,7 @@ func (p *WANProbe) refreshWANState(ctx context.Context) error {
 	loss := float64(stats.PacketLoss)
 
 	p.cacheMu.Lock()
-	p.cache = &WANState{
+	p.cache = &v1alpha1.WANState{
 		RTTMs:         rtt,
 		LossPct:       loss,
 		Timestamp:     time.Now(),
@@ -128,17 +129,15 @@ func (p *WANProbe) markStale() {
 	}
 }
 
-func (p *WANProbe) GetWANState(ctx context.Context) (*WANState, error) {
+func (p *WANProbe) GetWANState(ctx context.Context) (*v1alpha1.WANState, error) {
 	p.cacheMu.RLock()
 	defer p.cacheMu.RUnlock()
 
 	if p.cache == nil {
-		return &WANState{RTTMs: 999, LossPct: 100, IsStale: true}, nil
+		return &v1alpha1.WANState{RTTMs: 999, LossPct: 100, IsStale: true}, nil
 	}
-
 	staleDuration := time.Since(p.cache.Timestamp)
-
-	state := &WANState{
+	state := &v1alpha1.WANState{
 		RTTMs:         p.cache.RTTMs,
 		LossPct:       p.cache.LossPct,
 		Timestamp:     p.cache.Timestamp,
@@ -154,17 +153,15 @@ func (p *WANProbe) GetWANState(ctx context.Context) (*WANState, error) {
 	return state, nil
 }
 
-func (p *WANProbe) GetCachedWANState() *WANState {
+func (p *WANProbe) GetCachedWANState() *v1alpha1.WANState {
 	p.cacheMu.RLock()
 	defer p.cacheMu.RUnlock()
 
 	if p.cache == nil {
-		return &WANState{RTTMs: 999, LossPct: 100, IsStale: true}
+		return &v1alpha1.WANState{RTTMs: 999, LossPct: 100, IsStale: true}
 	}
-
 	staleDuration := time.Since(p.cache.Timestamp)
-
-	return &WANState{
+	return &v1alpha1.WANState{
 		RTTMs:         p.cache.RTTMs,
 		LossPct:       p.cache.LossPct,
 		Timestamp:     p.cache.Timestamp,

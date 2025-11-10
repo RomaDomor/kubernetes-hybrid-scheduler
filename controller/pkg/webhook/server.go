@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"kubernetes-hybrid-scheduler/controller/pkg/constants"
-	"kubernetes-hybrid-scheduler/controller/pkg/util"
 	"net/http"
 	"time"
 
@@ -16,14 +14,17 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
-	"kubernetes-hybrid-scheduler/controller/pkg/decision"
+	apis "kubernetes-hybrid-scheduler/controller/pkg/api/v1alpha1"
+	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 	"kubernetes-hybrid-scheduler/controller/pkg/slo"
 	"kubernetes-hybrid-scheduler/controller/pkg/telemetry"
+	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
 
 type decider interface {
-	Decide(pod *corev1.Pod, slo *slo.SLO, local *telemetry.LocalState, wan *telemetry.WANState) decision.Result
+	Decide(pod *corev1.Pod, slo *apis.SLO, local *apis.LocalState, wan *apis.WANState) apis.Result
 }
+
 type Server struct {
 	dec        decider
 	tel        telemetry.Collector
@@ -51,7 +52,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		admissionLatency.Observe(time.Since(start).Seconds())
 	}()
 
-	// Rate limiting
 	if !s.limiter.Allow() {
 		klog.Warning("Admission rate limit exceeded")
 		admissionRateLimited.Inc()
@@ -120,7 +120,6 @@ func (s *Server) processScheduling(
 	ctx context.Context,
 	pod *corev1.Pod,
 ) *admissionv1.AdmissionResponse {
-	// Parse SLO
 	sloData, err := slo.ParseSLO(pod)
 	if err != nil {
 		klog.Warningf("%s: Invalid SLO: %v",
@@ -128,22 +127,31 @@ func (s *Server) processScheduling(
 		return allow()
 	}
 
-	// CRITICAL SECTION START: Lock before reading telemetry
 	s.tel.LockForDecision()
 	defer s.tel.UnlockForDecision()
 
-	// Try a quick refresh (non-blocking if it fails)
-	ctx2, cancel2 := context.WithTimeout(ctx, 300*time.Millisecond)
-	_, _ = s.tel.GetLocalState(ctx2)
+	ctx2, cancel2 := context.WithTimeout(ctx, 500*time.Millisecond)
+	freshLocal, err := s.tel.GetLocalState(ctx2)
 	cancel2()
 
-	local := s.tel.GetCachedLocalState()
+	if err != nil {
+		klog.Warningf("%s: Failed to refresh local state: %v, using cache",
+			util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
+	}
+
+	local := freshLocal
+	if local == nil {
+		local = s.tel.GetCachedLocalState()
+	}
+
 	wan := s.tel.GetCachedWANState()
 
-	// Decide
+	klog.V(4).Infof("%s: Telemetry quality: complete=%v confidence=%.2f age=%v",
+		util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
+		local.IsCompleteSnapshot, local.MeasurementConfidence, local.StaleDuration)
+
 	result := s.dec.Decide(pod, sloData, local, wan)
 
-	// Record event
 	_, err = s.kubeClient.CoreV1().Events(pod.Namespace).Create(ctx, &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s.%x", pod.Name, time.Now().UnixNano()),
@@ -156,8 +164,8 @@ func (s *Server) processScheduling(
 			UID:       pod.UID,
 		},
 		Reason: "SchedulingDecision",
-		Message: fmt.Sprintf("Scheduled to %s: %s (ETA: %.0fms, WAN RTT: %dms)",
-			result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs),
+		Message: fmt.Sprintf("Scheduled to %s: %s (ETA: %.0fms, conf: %.2f, WAN RTT: %dms)",
+			result.Location, result.Reason, result.PredictedETAMs, local.MeasurementConfidence, result.WanRttMs),
 		Type:           corev1.EventTypeNormal,
 		FirstTimestamp: metav1.NewTime(time.Now()),
 		LastTimestamp:  metav1.NewTime(time.Now()),
@@ -167,9 +175,10 @@ func (s *Server) processScheduling(
 		klog.Warningf("%s: Failed to create event", util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 	}
 
-	klog.Infof("%s: Decision: %s (reason=%s, predicted_eta=%.0fms, wan_rtt=%dms)",
+	klog.Infof("%s: Decision: %s (reason=%s, predicted_eta=%.0fms, wan_rtt=%dms, conf=%.2f)",
 		util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
-		result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs)
+		result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs,
+		local.MeasurementConfidence)
 
 	return s.buildPatchResponse(pod, result)
 }

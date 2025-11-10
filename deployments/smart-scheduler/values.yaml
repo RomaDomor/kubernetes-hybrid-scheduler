@@ -137,16 +137,18 @@ config:
   lossUnusablePct: "2.0"
   # -- Cloud endpoint for WAN probe
   cloudEndpoint: "10.20.0.3"
-  # -- Edge locality score bonus
-  localityBonus: "25"
-  # -- Cloud deadline margin override percentage
-  cloudMarginOverridePct: "0.15"
   # -- WAN stale confidence factor
   wanStaleConfFactor: "0.8"
-  # -- Edge headroom override percentage
-  edgeHeadroomOverridePct: "0.1"
   # -- Edge pending pods resource pessimism
   edgePendingPessimismPct: "10"
+
+  # -- Lyapunov optimization parameters
+  # -- Cost-performance tradeoff (0.5-2.0 recommended)
+  lyapunovBeta: "1.0"
+  # --  Relative cost of cloud scheduling
+  cloudCostFactor: "1.0"
+  # -- Relative cost of edge scheduling (0 = prefer edge)
+  edgeCostFactor: "0.0"
 
   # -- Histogram configuration
   histBoundsMode: "explicit"
