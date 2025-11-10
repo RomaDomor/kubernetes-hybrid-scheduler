@@ -167,13 +167,7 @@ func setupFlags() {
 	// Engine config
 	flag.IntVar(&config.RTTUnusableMs, "rtt-unusable", util.GetEnvInt("RTT_UNUSABLE", 300), "WAN RTT unusable threshold (ms).")
 	flag.Float64Var(&config.LossUnusablePct, "loss-unusable", util.GetEnvFloat("LOSS_UNUSABLE", 10.0), "WAN loss unusable threshold (%).")
-	flag.Float64Var(&config.LocalityBonus, "locality-bonus", util.GetEnvFloat("LOCALITY_BONUS", 50.0), "Edge locality score bonus.")
-	flag.Float64Var(&config.ConfidenceWeight, "confidence-weight", util.GetEnvFloat("CONFIDENCE_WEIGHT", 30.0), "Confidence score weight.")
-	flag.Float64Var(&config.ExplorationRate, "exploration-rate", util.GetEnvFloat("EXPLORATION_RATE", 0.2), "Exploration probability (0-1).")
 	flag.IntVar(&config.MaxProfileCount, "max-profiles", util.GetEnvInt("MAX_PROFILES", 100), "Maximum profile entries (LRU).")
-	flag.Float64Var(&config.CloudMarginOverridePct, "cloud-margin-override-pct", util.GetEnvFloat("CLOUD_MARGIN_OVERRIDE_PCT", 0.15), "Cloud deadline margin override % (0-1).")
-	flag.Float64Var(&config.WanStaleConfFactor, "wan-stale-conf-factor", util.GetEnvFloat("WAN_STALE_CONF_FACTOR", 0.8), "WAN stale confidence factor (0-1).")
-	flag.Float64Var(&config.EdgeHeadroomOverridePct, "edge-headroom-override-pct", util.GetEnvFloat("EDGE_HEADROOM_OVERRIDE_PCT", 0.1), "Edge headroom override % (0-1).")
 	flag.IntVar(&config.EdgePendingPessimismPct, "edge-pending-pessimism-pct", util.GetEnvInt("EDGE_PENDING_PESSIMISM_PCT", 10), "Edge pending pod pessimism factor % (0-100).")
 
 	// Lyapunov configuration

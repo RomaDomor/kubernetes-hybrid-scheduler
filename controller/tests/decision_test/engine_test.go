@@ -39,17 +39,11 @@ func newEngine() *decision.Engine {
 	cfg := decision.EngineConfig{
 		RTTUnusableMs:           300,
 		LossUnusablePct:         10,
-		LocalityBonus:           50,
-		ConfidenceWeight:        30,
-		ExplorationRate:         0,
 		MaxProfileCount:         100,
 		ProfileStore:            ps,
 		LyapunovScheduler:       lyap,
 		CloudCostFactor:         1.0,
 		EdgeCostFactor:          0.0,
-		CloudMarginOverridePct:  0.15,
-		WanStaleConfFactor:      0.8,
-		EdgeHeadroomOverridePct: 0.1,
 		EdgePendingPessimismPct: 10,
 	}
 	return decision.NewEngine(cfg)

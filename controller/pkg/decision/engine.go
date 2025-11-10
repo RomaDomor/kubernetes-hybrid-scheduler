@@ -17,13 +17,7 @@ import (
 type EngineConfig struct {
 	RTTUnusableMs           int
 	LossUnusablePct         float64
-	LocalityBonus           float64
-	ConfidenceWeight        float64
-	ExplorationRate         float64
 	MaxProfileCount         int
-	CloudMarginOverridePct  float64
-	WanStaleConfFactor      float64
-	EdgeHeadroomOverridePct float64
 	EdgePendingPessimismPct int
 	ProfileStore            *ProfileStore
 	LyapunovScheduler       *LyapunovScheduler
@@ -355,8 +349,8 @@ func (e *Engine) determineReason(location constants.Location, edgeFeasible, clou
 			return constants.ReasonEdgeFeasibleOnly
 		}
 		if edgeFeasible && cloudFeasible {
-			return_if := edgeETA <= cloudETA
-			if return_if {
+			returnIf := edgeETA <= cloudETA
+			if returnIf {
 				return constants.ReasonEdgePreferred
 			}
 			return constants.ReasonEdgeViolationControl
