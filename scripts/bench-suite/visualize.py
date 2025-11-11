@@ -352,6 +352,31 @@ def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path, c
     g.savefig(output_dir / "D2_learning_curve_performance.png", dpi=300)
     plt.close()
 
+def plot_11_learning_slo_improvement(df: pd.DataFrame, output_dir: Path, config_name: str):
+    """(Graph 11, per-config) SLO pass rate evolution showing learning effect."""
+    print("  - Generating: 11. SLO Improvement Over Runs")
+    if df.empty: return
+
+    pass_by_run = (df.groupby(['wan_profile', 'local_load', 'run'], observed=True)['pass']
+                   .apply(lambda x: (x == True).sum() / len(x) * 100).reset_index(name='pass_rate'))
+
+    g = sns.relplot(
+        data=pass_by_run, x='run', y='pass_rate', hue='wan_profile',
+        col='local_load', kind='line', marker='o', markersize=6, linewidth=2,
+        height=4.5, aspect=1.4, palette='magma',
+        col_order=pass_by_run['local_load'].cat.categories,
+    )
+    g.set_axis_labels("Run Number", "SLO Pass Rate (%)", fontweight='semibold')
+    g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
+    _set_integer_run_ticks(g, pass_by_run)
+    for ax in g.axes.flat:
+        ax.set_ylim(-5, 105)
+        ax.axhline(90, ls='--', color='green', alpha=0.6, lw=1)
+    g.figure.suptitle(f"Reliability Improvement Over Runs ({config_name})", fontsize=14, fontweight='bold', y=0.995)
+    g.tight_layout()
+    g.savefig(output_dir / "D3_slo_improvement_over_runs.png", dpi=300)
+    plt.close()
+
 
 def plot_12_placement_performance_correlation(df_slo: pd.DataFrame, df_placement: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 12. Placement-Performance Correlation")
@@ -376,13 +401,17 @@ def plot_12_placement_performance_correlation(df_slo: pd.DataFrame, df_placement
     if merged.empty: return
 
     g = sns.lmplot(
-        data=merged, x='edge_pct', y='slo_pass_rate', col='local_load', row='wan_profile',
-        height=4, aspect=1.2, scatter_kws={'alpha': 0.6, 's': 40}, line_kws={'linewidth': 2},
-        col_order=merged['local_load'].cat.categories,
-        row_order=merged['wan_profile'].cat.categories
+        data=merged, x='edge_pct', y='slo_pass_rate',
+        hue='wan_profile',
+        col='local_load',
+        height=5, aspect=1.3,
+        scatter_kws={'alpha': 0.6, 's': 50},
+        line_kws={'linewidth': 2},
+        palette='viridis',
+        col_order=merged['local_load'].cat.categories
     )
     g.set_axis_labels("Edge Placement (%)", "SLO Pass Rate (%)", fontweight='semibold')
-    g.set_titles('Load: {col_name} | WAN: {row_name}', fontsize=12, fontweight='semibold')
+    g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
     for ax in g.axes.flat:
         ax.axhline(90, ls='--', color='green', alpha=0.4, lw=1)
         ax.axvline(50, ls='--', color='gray', alpha=0.4, lw=1)
@@ -459,9 +488,6 @@ def plot_compare_key_job_performance(df: pd.DataFrame, output_dir: Path, workloa
     plot_df = df[df['workload'] == workload].copy()
     if plot_df.empty: return
     plot_df['duration_s'] = plot_df['measured_ms'] / 1000.0
-
-    plot_df['local_load'] = plot_df['local_load'].cat.remove_unused_categories()
-    plot_df['wan_profile'] = plot_df['wan_profile'].cat.remove_unused_categories()
 
     g = sns.relplot(
         data=plot_df,
@@ -560,7 +586,7 @@ def plot_9b_overview_placement_trends(df: pd.DataFrame, output_dir: Path):
     plt.close()
 
 
-def plot_11_slo_improvement_over_runs(df: pd.DataFrame, output_dir: Path):
+def plot_compare_slo_improvement_over_runs(df: pd.DataFrame, output_dir: Path):
     print("  - Generating: COMP_5. SLO Improvement Over Runs")
     if df.empty: return
 
@@ -620,13 +646,11 @@ def main():
         df_slo_config_all = df_all_slo[df_all_slo['config_name'] == config_name].copy()
         df_placement_config_all = df_all_placement[df_all_placement['config_name'] == config_name].copy()
 
-        # CORRECTED: Remove unused categories from the filtered dataframes
         for df in [df_slo_config_stable, df_placement_config_stable, df_slo_config_all, df_placement_config_all]:
             for col in ['local_load', 'wan_profile', 'config_name']:
                 if col in df.columns:
                     df[col] = df[col].cat.remove_unused_categories()
 
-        # Pass the config-specific dataframes to the plotting functions
         plot_2_job_duration_bars(df_slo_config_stable, config_output_dir, config_name)
         plot_3_slo_pass_rate_heatmap(df_slo_config_stable, config_output_dir, config_name)
         plot_5_performance_interaction(df_slo_config_stable, config_output_dir, config_name)
@@ -634,6 +658,7 @@ def main():
         plot_7_raw_data_variance(df_slo_config_stable, config_output_dir, config_name)
         plot_8_placement_analysis(df_placement_config_stable, config_output_dir, config_name)
         plot_10_learning_performance_over_runs(df_slo_config_all, config_output_dir, config_name)
+        plot_11_learning_slo_improvement(df_slo_config_all, config_output_dir, config_name)
         plot_12_placement_performance_correlation(df_slo_config_all, df_placement_config_all, config_output_dir, config_name)
         plot_13_workload_preference_heatmap(df_stable_placement, config_output_dir, config_name)
 
@@ -647,7 +672,7 @@ def main():
     plot_compare_key_job_performance(df_stable_slo, comparative_output_dir, 'cpu-batch')
     plot_compare_placement_stability(df_all_placement, comparative_output_dir)
     plot_9b_overview_placement_trends(df_all_placement, comparative_output_dir)
-    plot_11_slo_improvement_over_runs(df_all_slo, comparative_output_dir)
+    plot_compare_slo_improvement_over_runs(df_all_slo, comparative_output_dir)
 
     print("\n✅ Visualization complete!")
     print(f"All graphs saved in: {output_dir}")
