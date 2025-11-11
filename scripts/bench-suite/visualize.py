@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 from matplotlib.ticker import MaxNLocator, FuncFormatter
-from pandas import DataFrame
 
 # --- Global Configuration for Consistency ---
 
@@ -193,7 +192,7 @@ def _set_integer_run_ticks(grid, dataframe_with_run):
 
 # --- PLOTTING LIBRARY (FOR SINGLE CONFIG ANALYSIS) ---
 
-def plot_2_job_duration_bars(df: pd.DataFrame, output_dir: Path):
+def plot_2_job_duration_bars(df: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 2. Mean Job Duration Comparison")
     job_df = df[df['kind'] == 'Job'].copy()
     if job_df.empty: return
@@ -203,7 +202,7 @@ def plot_2_job_duration_bars(df: pd.DataFrame, output_dir: Path):
         data=job_df, x='workload', y='duration_s', hue='wan_profile',
         col='local_load', kind='bar', errorbar='sd', capsize=0.1,
         aspect=1.3, height=5.5, palette="husl",
-        col_order=[c for c in LOAD_ORDER if c in job_df['local_load'].unique()],
+        col_order=job_df['local_load'].cat.categories,
     )
     g.set_axis_labels("Job Name", "Mean Duration (seconds)", fontsize=11, fontweight='semibold')
     g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
@@ -211,13 +210,13 @@ def plot_2_job_duration_bars(df: pd.DataFrame, output_dir: Path):
     for ax in g.axes.flat:
         ax.tick_params(axis='x', rotation=45)
         sns.despine(ax=ax)
-    g.figure.suptitle(f"Mean Job Duration", fontsize=14, fontweight='bold', y=0.995)
+    g.figure.suptitle(f"Mean Job Duration ({config_name})", fontsize=14, fontweight='bold', y=0.995)
     g.tight_layout()
     g.savefig(output_dir / "A2_mean_job_duration_bars.png", dpi=300)
     plt.close()
 
 
-def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
+def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 3. SLO Pass Rate Reliability Heatmap")
     pass_rate = (df.groupby(['wan_profile', 'local_load', 'workload'], observed=True)['pass']
                  .value_counts(normalize=True).unstack(fill_value=0))
@@ -229,7 +228,7 @@ def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
     fig, ax = plt.subplots(figsize=(14, 7))
     sns.heatmap(heatmap_data, annot=True, fmt=".1f", cmap="RdYlGn", linewidths=1,
                 linecolor='white', cbar_kws={'label': 'SLO Pass Rate (%)'}, vmin=0, vmax=100, ax=ax)
-    ax.set_title(f"System Reliability: SLO Pass Rate", fontsize=14, fontweight='bold', pad=20)
+    ax.set_title(f"System Reliability: SLO Pass Rate ({config_name})", fontsize=14, fontweight='bold', pad=20)
     ax.set_xlabel("Load & WAN Profile", fontsize=12, fontweight='semibold')
     ax.set_ylabel("Workload", fontsize=12, fontweight='semibold')
     plt.xticks(rotation=45, ha='right')
@@ -237,7 +236,7 @@ def plot_3_slo_pass_rate_heatmap(df: pd.DataFrame, output_dir: Path):
     plt.close()
 
 
-def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path):
+def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 5. Performance Interaction Plot")
     job_to_plot = 'build-job'
     plot_df = df[df['workload'] == job_to_plot].copy()
@@ -247,8 +246,8 @@ def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path):
     fig, ax = plt.subplots(figsize=(11, 6.5))
     sns.pointplot(data=plot_df, x='wan_profile', y='duration_s', hue='local_load',
                   errorbar='sd', capsize=0.15, palette='Set2', ax=ax, order=WAN_ORDER,
-                  hue_order=[c for c in LOAD_ORDER if c in plot_df['local_load'].unique()])
-    ax.set_title(f"Interaction: WAN & Load on '{job_to_plot}'", fontsize=13, fontweight='bold')
+                  hue_order=plot_df['local_load'].cat.categories)
+    ax.set_title(f"Interaction: WAN & Load on '{job_to_plot}' ({config_name})", fontsize=13, fontweight='bold')
     ax.set_xlabel("WAN Profile", fontsize=11, fontweight='semibold')
     ax.set_ylabel("Mean Duration (s)", fontsize=11, fontweight='semibold')
     ax.legend(title="Local Load")
@@ -256,7 +255,7 @@ def plot_5_performance_interaction(df: pd.DataFrame, output_dir: Path):
     plt.close()
 
 
-def plot_6_slo_failure_magnitude(df: pd.DataFrame, output_dir: Path):
+def plot_6_slo_failure_magnitude(df: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 6. SLO Failure Magnitude Analysis")
     plot_df = df[(df['pass'] == False) & df['measured_ms'].notna() & df['target_ms'].notna()].copy()
     if plot_df.empty: return
@@ -265,18 +264,18 @@ def plot_6_slo_failure_magnitude(df: pd.DataFrame, output_dir: Path):
     g = sns.catplot(data=plot_df, x='workload', y='overshoot_pct', hue='wan_profile',
                     col='local_load', kind='bar', errorbar='sd', capsize=0.08, height=5.5,
                     aspect=1.3, palette="OrRd",
-                    col_order=[c for c in LOAD_ORDER if c in plot_df['local_load'].unique()])
+                    col_order=plot_df['local_load'].cat.categories)
     g.set_axis_labels("Workload", "Deadline Overshoot (%)", fontsize=11, fontweight='semibold')
     g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
     g.legend.set_title("WAN Profile")
     for ax in g.axes.flat: ax.tick_params(axis='x', rotation=30)
-    g.figure.suptitle(f"Magnitude of SLO Failures", fontsize=14, fontweight='bold', y=0.995)
+    g.figure.suptitle(f"Magnitude of SLO Failures ({config_name})", fontsize=14, fontweight='bold', y=0.995)
     g.tight_layout()
     g.savefig(output_dir / "B3_slo_failure_magnitude.png", dpi=300)
     plt.close()
 
 
-def plot_7_raw_data_variance(df: pd.DataFrame, output_dir: Path):
+def plot_7_raw_data_variance(df: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 7. Raw Data Point Variance Plot")
     job_to_plot = 'cpu-batch'
     plot_df = df[df['workload'] == job_to_plot].copy()
@@ -285,49 +284,50 @@ def plot_7_raw_data_variance(df: pd.DataFrame, output_dir: Path):
 
     fig, ax = plt.subplots(figsize=(13, 7))
     sns.boxplot(data=plot_df, x='wan_profile', y='duration_s', hue='local_load', showfliers=False,
-                palette='Set2', ax=ax, order=WAN_ORDER,
-                hue_order=[c for c in LOAD_ORDER if c in plot_df['local_load'].unique()])
+                palette='Set2', ax=ax, order=WAN_ORDER, hue_order=plot_df['local_load'].cat.categories)
     sns.stripplot(data=plot_df, x='wan_profile', y='duration_s', hue='local_load', dodge=True,
                   ax=ax, alpha=0.4, size=5, palette='Set2', legend=False, order=WAN_ORDER,
-                  hue_order=[c for c in LOAD_ORDER if c in plot_df['local_load'].unique()])
-    ax.set_title(f"Runtime Variance of '{job_to_plot}'", fontsize=13, fontweight='bold')
+                  hue_order=plot_df['local_load'].cat.categories)
+
+    ax.set_title(f"Runtime Variance of '{job_to_plot}' ({config_name})", fontsize=13, fontweight='bold')
     ax.set_xlabel("WAN Profile", fontsize=11, fontweight='semibold')
     ax.set_ylabel("Duration (s)", fontsize=11, fontweight='semibold')
+
     handles, labels = ax.get_legend_handles_labels()
-    ax.legend(handles[:len(plot_df['local_load'].unique())], labels[:len(plot_df['local_load'].unique())], title='Local Load')
+    if handles:
+        ax.legend(handles, labels, title='Local Load')
+
     plt.savefig(output_dir / "B4_raw_data_variance.png", dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path):
+def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 8. Workload Placement Analysis")
     if df.empty: return
 
-    placement_counts = df.groupby(['wan_profile', 'local_load', 'workload', 'node_type'],
-                                  observed=True).size().reset_index(name='count')
-    mean_counts = placement_counts.groupby(['wan_profile', 'local_load', 'workload', 'node_type'],
-                                           observed=True)['count'].mean().reset_index()
+    mean_counts = df.groupby(['wan_profile', 'local_load', 'workload', 'node_type'],
+                             observed=True).size().reset_index(name='count')
     if mean_counts.empty: return
 
     g = sns.catplot(
         data=mean_counts, x='workload', y='count', hue='node_type', col='local_load',
         row='wan_profile', kind='bar', height=4.5, aspect=1.6,
         palette={'cloud': '#4A90E2', 'edge': '#F5A623'}, legend=False,
-        row_order=[c for c in WAN_ORDER if c in df['wan_profile'].unique()],
-        col_order=[c for c in LOAD_ORDER if c in df['local_load'].unique()],
+        row_order=df['wan_profile'].cat.categories,
+        col_order=df['local_load'].cat.categories,
     )
     g.set_axis_labels("Workload", "Mean Pod Count", fontsize=11, fontweight='semibold')
     g.set_titles(row_template="WAN: {row_name}", col_template="Load: {col_name}", fontsize=11)
     handles = [plt.Rectangle((0, 0), 1, 1, fc='#4A90E2'), plt.Rectangle((0, 0), 1, 1, fc='#F5A623')]
     g.figure.legend(handles, ['cloud', 'edge'], title='Node Type', loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=2)
     for ax in g.axes.flat: ax.tick_params(axis='x', rotation=45)
-    g.figure.suptitle(f"Workload Placement", fontsize=14, fontweight='bold', y=0.995)
+    g.figure.suptitle(f"Workload Placement ({config_name})", fontsize=14, fontweight='bold', y=0.995)
     g.tight_layout()
     g.savefig(output_dir / "C1_workload_placement_matrix.png", dpi=300)
     plt.close()
 
 
-def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path):
+def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 10. Learning Curve: Job Performance")
     workload_to_plot = 'cpu-batch'
     plot_df = df[df['workload'] == workload_to_plot].copy()
@@ -337,12 +337,12 @@ def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path):
     g = sns.relplot(
         data=plot_df, x='run', y='duration_s', col='local_load', row='wan_profile',
         kind='line', marker='o', errorbar='sd', height=4, aspect=1.5,
-        row_order=[c for c in WAN_ORDER if c in plot_df['wan_profile'].unique()],
-        col_order=[c for c in LOAD_ORDER if c in plot_df['local_load'].unique()],
+        row_order=plot_df['wan_profile'].cat.categories,
+        col_order=plot_df['local_load'].cat.categories,
     )
     g.set_axis_labels("Run Number", f"{workload_to_plot} Duration (s)", fontweight='semibold')
     g.set_titles(row_template="WAN: {row_name}", col_template="Load: {col_name}", fontweight='semibold')
-    g.figure.suptitle(f"Scheduler Learning: '{workload_to_plot}' Performance", fontsize=14, fontweight='bold', y=0.995)
+    g.figure.suptitle(f"Scheduler Learning: '{workload_to_plot}' Performance ({config_name})", fontsize=14, fontweight='bold', y=0.995)
     _set_integer_run_ticks(g, plot_df)
     slo_target_ms = plot_df['target_ms'].max()
     if pd.notna(slo_target_ms):
@@ -353,7 +353,7 @@ def plot_10_learning_performance_over_runs(df: pd.DataFrame, output_dir: Path):
     plt.close()
 
 
-def plot_12_placement_performance_correlation(df_slo: pd.DataFrame, df_placement: pd.DataFrame, output_dir: Path):
+def plot_12_placement_performance_correlation(df_slo: pd.DataFrame, df_placement: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 12. Placement-Performance Correlation")
     if df_slo.empty or df_placement.empty: return
 
@@ -378,20 +378,20 @@ def plot_12_placement_performance_correlation(df_slo: pd.DataFrame, df_placement
     g = sns.lmplot(
         data=merged, x='edge_pct', y='slo_pass_rate', col='local_load', row='wan_profile',
         height=4, aspect=1.2, scatter_kws={'alpha': 0.6, 's': 40}, line_kws={'linewidth': 2},
-        col_order=[c for c in LOAD_ORDER if c in merged['local_load'].unique()],
-        row_order=[c for c in WAN_ORDER if c in merged['wan_profile'].unique()]
+        col_order=merged['local_load'].cat.categories,
+        row_order=merged['wan_profile'].cat.categories
     )
     g.set_axis_labels("Edge Placement (%)", "SLO Pass Rate (%)", fontweight='semibold')
     g.set_titles('Load: {col_name} | WAN: {row_name}', fontsize=12, fontweight='semibold')
     for ax in g.axes.flat:
         ax.axhline(90, ls='--', color='green', alpha=0.4, lw=1)
         ax.axvline(50, ls='--', color='gray', alpha=0.4, lw=1)
-    g.figure.suptitle("Correlation Between Edge Placement and SLO Pass Rate", fontsize=14, fontweight='bold', y=1.02)
+    g.figure.suptitle(f"Correlation: Edge Placement vs. SLO Pass Rate ({config_name})", fontsize=14, fontweight='bold', y=1.02)
     g.savefig(output_dir / "E1_placement_performance_correlation.png", dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def plot_13_workload_preference_heatmap(df: pd.DataFrame, output_dir: Path):
+def plot_13_workload_preference_heatmap(df: pd.DataFrame, output_dir: Path, config_name: str):
     print("  - Generating: 13. Workload Preference Heatmap")
     if df.empty: return
 
@@ -413,7 +413,7 @@ def plot_13_workload_preference_heatmap(df: pd.DataFrame, output_dir: Path):
     fig, ax = plt.subplots(figsize=(16, 8))
     sns.heatmap(heatmap_data, annot=True, fmt=".0f", cmap="RdYlBu_r", center=50, linewidths=1,
                 linecolor='white', cbar_kws={'label': 'Edge Placement (%)'}, vmin=0, vmax=100, ax=ax)
-    ax.set_title("Workload Preference: Edge Placement % by Condition", fontsize=14, fontweight='bold', pad=20)
+    ax.set_title(f"Workload Preference: Edge Placement % ({config_name})", fontsize=14, fontweight='bold', pad=20)
     ax.set_xlabel("WAN / Load Profile", fontsize=12, fontweight='semibold')
     ax.set_ylabel("Workload", fontsize=12, fontweight='semibold')
     plt.xticks(rotation=45, ha='right')
@@ -440,8 +440,8 @@ def plot_compare_overall_slo_rate(df: pd.DataFrame, output_dir: Path):
         height=5,
         aspect=1,
         palette='YlGnBu',
-        col_order=[c for c in WAN_ORDER if c in df['wan_profile'].unique()],
-        hue_order=[c for c in LOAD_ORDER if c in df['local_load'].unique()]
+        col_order=df['wan_profile'].cat.categories,
+        hue_order=df['local_load'].cat.categories
     )
     g.set_axis_labels("Scheduler Configuration", "Mean SLO Pass Rate (%)")
     g.set_titles("WAN Profile: {col_name}")
@@ -460,6 +460,9 @@ def plot_compare_key_job_performance(df: pd.DataFrame, output_dir: Path, workloa
     if plot_df.empty: return
     plot_df['duration_s'] = plot_df['measured_ms'] / 1000.0
 
+    plot_df['local_load'] = plot_df['local_load'].cat.remove_unused_categories()
+    plot_df['wan_profile'] = plot_df['wan_profile'].cat.remove_unused_categories()
+
     g = sns.relplot(
         data=plot_df,
         x='wan_profile',
@@ -473,8 +476,7 @@ def plot_compare_key_job_performance(df: pd.DataFrame, output_dir: Path, workloa
         height=5,
         aspect=1.2,
         palette='viridis',
-        col_order=[c for c in LOAD_ORDER if c in plot_df['local_load'].unique()],
-        order=[c for c in WAN_ORDER if c in plot_df['wan_profile'].unique()]
+        col_order=plot_df['local_load'].cat.categories,
     )
     g.set_axis_labels("WAN Profile", f"Mean '{workload}' Duration (s)")
     g.set_titles("Local Load: {col_name}")
@@ -512,7 +514,7 @@ def plot_compare_placement_stability(df: pd.DataFrame, output_dir: Path):
         height=5,
         aspect=1,
         palette='YlOrRd',
-        col_order=[c for c in WAN_ORDER if c in switches['wan_profile'].unique()]
+        col_order=switches['wan_profile'].cat.categories
     )
     g.set_axis_labels("Scheduler Configuration", "Total Placement Switches (Lower is Better)")
     g.set_titles("WAN Profile: {col_name}")
@@ -544,7 +546,7 @@ def plot_9b_overview_placement_trends(df: pd.DataFrame, output_dir: Path):
         data=pivot, x='run', y='edge_pct', hue='config_name', style='wan_profile',
         col='local_load', kind='line', marker='o', markersize=6, linewidth=2.5,
         height=4.5, aspect=1.4, palette='viridis', legend='full',
-        col_order=[c for c in LOAD_ORDER if c in pivot['local_load'].cat.categories],
+        col_order=pivot['local_load'].cat.categories,
     )
     g.set_axis_labels("Run Number", "Edge Placement (%)", fontweight='semibold')
     g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
@@ -569,7 +571,7 @@ def plot_11_slo_improvement_over_runs(df: pd.DataFrame, output_dir: Path):
         data=pass_by_run, x='run', y='pass_rate', hue='config_name', style='wan_profile',
         col='local_load', kind='line', marker='o', markersize=6, linewidth=2,
         height=4.5, aspect=1.4, palette='magma',
-        col_order=[c for c in LOAD_ORDER if c in pass_by_run['local_load'].unique()],
+        col_order=pass_by_run['local_load'].cat.categories,
     )
     g.set_axis_labels("Run Number", "SLO Pass Rate (%)", fontweight='semibold')
     g.set_titles('Load: {col_name}', fontsize=12, fontweight='semibold')
@@ -607,26 +609,33 @@ def main():
     print(f"\n✅ Aggregated data for ALL and STABLE runs saved.")
 
     # --- Generate Per-Configuration Plots ---
-    for config_name in df_stable_slo['config_name'].unique():
+    for config_name in df_stable_slo['config_name'].cat.categories:
         print(f"\n--- Generating detailed report for configuration: {config_name} ---")
         config_output_dir = output_dir / f"config-{config_name}"
         config_output_dir.mkdir(exist_ok=True)
 
-        df_slo_config_stable: DataFrame = df_stable_slo[df_stable_slo['config_name'] == config_name]
-        df_placement_config_stable: DataFrame = df_stable_placement[df_stable_placement['config_name'] == config_name]
-        df_slo_config_all: DataFrame = df_all_slo[df_all_slo['config_name'] == config_name]
-        df_placement_config_all: DataFrame = df_all_placement[df_all_placement['config_name'] == config_name]
+        # Filter data for the current configuration
+        df_slo_config_stable = df_stable_slo[df_stable_slo['config_name'] == config_name].copy()
+        df_placement_config_stable = df_stable_placement[df_stable_placement['config_name'] == config_name].copy()
+        df_slo_config_all = df_all_slo[df_all_slo['config_name'] == config_name].copy()
+        df_placement_config_all = df_all_placement[df_all_placement['config_name'] == config_name].copy()
 
-        plot_2_job_duration_bars(df_slo_config_stable, config_output_dir)
-        plot_3_slo_pass_rate_heatmap(df_slo_config_stable, config_output_dir)
-        plot_5_performance_interaction(df_slo_config_stable, config_output_dir)
-        plot_6_slo_failure_magnitude(df_slo_config_stable, config_output_dir)
-        plot_7_raw_data_variance(df_slo_config_stable, config_output_dir)
-        plot_8_placement_analysis(df_placement_config_stable, config_output_dir)
-        plot_10_learning_performance_over_runs(df_slo_config_all, config_output_dir)
-        plot_12_placement_performance_correlation(df_slo_config_all, df_placement_config_all, config_output_dir)
-        plot_13_workload_preference_heatmap(df_stable_placement, config_output_dir)
+        # CORRECTED: Remove unused categories from the filtered dataframes
+        for df in [df_slo_config_stable, df_placement_config_stable, df_slo_config_all, df_placement_config_all]:
+            for col in ['local_load', 'wan_profile', 'config_name']:
+                if col in df.columns:
+                    df[col] = df[col].cat.remove_unused_categories()
 
+        # Pass the config-specific dataframes to the plotting functions
+        plot_2_job_duration_bars(df_slo_config_stable, config_output_dir, config_name)
+        plot_3_slo_pass_rate_heatmap(df_slo_config_stable, config_output_dir, config_name)
+        plot_5_performance_interaction(df_slo_config_stable, config_output_dir, config_name)
+        plot_6_slo_failure_magnitude(df_slo_config_stable, config_output_dir, config_name)
+        plot_7_raw_data_variance(df_slo_config_stable, config_output_dir, config_name)
+        plot_8_placement_analysis(df_placement_config_stable, config_output_dir, config_name)
+        plot_10_learning_performance_over_runs(df_slo_config_all, config_output_dir, config_name)
+        plot_12_placement_performance_correlation(df_slo_config_all, df_placement_config_all, config_output_dir, config_name)
+        plot_13_workload_preference_heatmap(df_stable_placement, config_output_dir, config_name)
 
     # --- Generate Comparative Plots ---
     print("\n--- Generating Comparative Plots Across All Configurations ---")
