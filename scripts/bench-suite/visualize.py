@@ -310,17 +310,25 @@ def plot_8_placement_analysis(df: pd.DataFrame, output_dir: Path, config_name: s
     if mean_counts.empty: return
 
     g = sns.catplot(
-        data=mean_counts, x='workload', y='count', hue='node_type', col='local_load',
-        row='wan_profile', kind='bar', height=4.5, aspect=1.6,
+        data=mean_counts, x='workload', y='count', hue='node_type',
+        col='wan_profile',
+        row='local_load',
+        kind='bar', height=4.5, aspect=1.6,
         palette={'cloud': '#4A90E2', 'edge': '#F5A623'}, legend=False,
-        row_order=df['wan_profile'].cat.categories,
-        col_order=df['local_load'].cat.categories,
+        row_order=df['local_load'].cat.categories,
+        col_order=df['wan_profile'].cat.categories,
     )
     g.set_axis_labels("Workload", "Mean Pod Count", fontsize=11, fontweight='semibold')
-    g.set_titles(row_template="WAN: {row_name}", col_template="Load: {col_name}", fontsize=11)
+
+    g.set_titles(row_template="Load: {row_name}", col_template="WAN: {col_name}", fontsize=11)
+
     handles = [plt.Rectangle((0, 0), 1, 1, fc='#4A90E2'), plt.Rectangle((0, 0), 1, 1, fc='#F5A623')]
     g.figure.legend(handles, ['cloud', 'edge'], title='Node Type', loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=2)
-    for ax in g.axes.flat: ax.tick_params(axis='x', rotation=45)
+
+    for ax in g.axes.flat:
+        ax.tick_params(axis='x', rotation=45)
+        sns.despine(ax=ax)
+
     g.figure.suptitle(f"Workload Placement ({config_name})", fontsize=14, fontweight='bold', y=0.995)
     g.tight_layout()
     g.savefig(output_dir / "C1_workload_placement_matrix.png", dpi=300)
