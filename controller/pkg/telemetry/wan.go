@@ -63,7 +63,7 @@ func (p *WANProbe) startProbeLoopWithJitter() {
 
 	for {
 		jitter := time.Duration(rand.Intn(4000)-2000) * time.Millisecond
-		time.Sleep(10*time.Second + jitter)
+		time.Sleep(5*time.Second + jitter)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = p.refreshWANState(ctx)

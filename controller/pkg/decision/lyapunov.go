@@ -58,11 +58,11 @@ type ClassConfig struct {
 }
 
 type LyapunovStats struct {
-	TotalDecisions  int64
-	EdgeDecisions   int64
-	CloudDecisions  int64
-	ViolationsEdge  int64
-	ViolationsCloud int64
+	TotalDecisions   int64
+	LocalDecisions   int64
+	RemoteDecisions  int64
+	ViolationsLocal  int64
+	ViolationsRemote int64
 
 	// Magnitude queue stats
 	AvgVirtualQueue float64
@@ -283,9 +283,9 @@ func (l *LyapunovScheduler) DecideN(
 
 	l.stats[class].TotalDecisions++
 	if constants.IsLocal(candidates[bestIdx].clusterID) {
-		l.stats[class].EdgeDecisions++
+		l.stats[class].LocalDecisions++
 	} else {
-		l.stats[class].CloudDecisions++
+		l.stats[class].RemoteDecisions++
 	}
 
 	return bestIdx, bestWeight
@@ -352,9 +352,9 @@ func (l *LyapunovScheduler) UpdateVirtualQueue(
 	if actualViolation > 0 {
 		stats.ViolationCount++
 		if location == constants.LocalCluster {
-			stats.ViolationsEdge++
+			stats.ViolationsLocal++
 		} else {
-			stats.ViolationsCloud++
+			stats.ViolationsRemote++
 		}
 	}
 
@@ -445,10 +445,10 @@ func (l *LyapunovScheduler) GetStats(class string) *LyapunovStats {
 	// Return a copy
 	return &LyapunovStats{
 		TotalDecisions:     stats.TotalDecisions,
-		EdgeDecisions:      stats.EdgeDecisions,
-		CloudDecisions:     stats.CloudDecisions,
-		ViolationsEdge:     stats.ViolationsEdge,
-		ViolationsCloud:    stats.ViolationsCloud,
+		LocalDecisions:     stats.LocalDecisions,
+		RemoteDecisions:    stats.RemoteDecisions,
+		ViolationsLocal:    stats.ViolationsLocal,
+		ViolationsRemote:   stats.ViolationsRemote,
 		AvgVirtualQueue:    stats.AvgVirtualQueue,
 		MaxVirtualQueue:    stats.MaxVirtualQueue,
 		AvgProbQueue:       stats.AvgProbQueue,
@@ -491,10 +491,10 @@ func (l *LyapunovScheduler) ExportState() map[string]interface{} {
 	for k, v := range l.stats {
 		statsMap[k] = &LyapunovStats{
 			TotalDecisions:     v.TotalDecisions,
-			EdgeDecisions:      v.EdgeDecisions,
-			CloudDecisions:     v.CloudDecisions,
-			ViolationsEdge:     v.ViolationsEdge,
-			ViolationsCloud:    v.ViolationsCloud,
+			LocalDecisions:     v.LocalDecisions,
+			RemoteDecisions:    v.RemoteDecisions,
+			ViolationsLocal:    v.ViolationsLocal,
+			ViolationsRemote:   v.ViolationsRemote,
 			AvgVirtualQueue:    v.AvgVirtualQueue,
 			MaxVirtualQueue:    v.MaxVirtualQueue,
 			AvgProbQueue:       v.AvgProbQueue,

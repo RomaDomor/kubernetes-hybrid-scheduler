@@ -277,7 +277,7 @@ func (e *Engine) isFeasible(
 	if constants.IsLocal(clusterID) {
 		return e.isLocalFeasible(pod, state, reqCPU, reqMem, eta, deadline)
 	}
-	return e.isRemoteFeasible(eta, deadline)
+	return e.isRemoteFeasible(state, reqCPU, reqMem, eta, deadline)
 }
 
 // isLocalFeasible checks hard and soft resource constraints for the local cluster.
@@ -321,8 +321,12 @@ func (e *Engine) isLocalFeasible(
 	return true, ""
 }
 
-// isRemoteFeasible checks if the pod can meet its deadline on a remote cluster.
-func (e *Engine) isRemoteFeasible(eta, deadline float64) (bool, string) {
+// isRemoteFeasible checks if the pod can be scheduled on a remote cluster.
+func (e *Engine) isRemoteFeasible(state *apis.ClusterState, reqCPU, reqMem int64, eta, deadline float64) (bool, string) {
+	// Resource check: reqCPU ≤ AvailableCPU_k(t) (thesis §1.2, K_valid)
+	if state.FreeCPU < reqCPU || state.FreeMem < reqMem {
+		return false, constants.ReasonInfeasibleResourcesSoft
+	}
 	if eta > deadline {
 		return false, constants.ReasonInfeasibleTime
 	}

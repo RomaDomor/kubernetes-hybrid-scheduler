@@ -74,7 +74,7 @@ func (c *CombinedCollector) GetClusterState(ctx context.Context, id constants.Cl
 	if err != nil {
 		return nil, err
 	}
-	return &v1alpha1.ClusterState{
+	state := &v1alpha1.ClusterState{
 		ClusterID:             id,
 		RTTMs:                 wan.RTTMs,
 		LossPct:               wan.LossPct,
@@ -85,7 +85,9 @@ func (c *CombinedCollector) GetClusterState(ctx context.Context, id constants.Cl
 		MeasurementConfidence: 1.0,
 		PendingPodsPerClass:   make(map[string]int),
 		TotalDemand:           make(map[string]v1alpha1.DemandByClass),
-	}, nil
+	}
+	c.enrichWithVirtualNodeResources(id, state)
+	return state, nil
 }
 
 func (c *CombinedCollector) GetCachedClusterState(id constants.ClusterID) *v1alpha1.ClusterState {
@@ -102,7 +104,7 @@ func (c *CombinedCollector) GetCachedClusterState(id constants.ClusterID) *v1alp
 		}
 	}
 	wan := probe.GetCachedWANState()
-	return &v1alpha1.ClusterState{
+	state := &v1alpha1.ClusterState{
 		ClusterID:             id,
 		RTTMs:                 wan.RTTMs,
 		LossPct:               wan.LossPct,
@@ -113,6 +115,30 @@ func (c *CombinedCollector) GetCachedClusterState(id constants.ClusterID) *v1alp
 		MeasurementConfidence: 1.0,
 		PendingPodsPerClass:   make(map[string]int),
 		TotalDemand:           make(map[string]v1alpha1.DemandByClass),
+	}
+	c.enrichWithVirtualNodeResources(id, state)
+	return state
+}
+
+// enrichWithVirtualNodeResources populates resource fields on a remote
+// ClusterState from the corresponding Liqo virtual node.
+func (c *CombinedCollector) enrichWithVirtualNodeResources(id constants.ClusterID, state *v1alpha1.ClusterState) {
+	freeCPU, freeMem, allocCPU, allocMem, found := c.local.GetVirtualNodeResources(id)
+	if !found {
+		return
+	}
+	state.FreeCPU = freeCPU
+	state.FreeMem = freeMem
+	state.TotalAllocatableCPU = allocCPU
+	state.TotalAllocatableMem = allocMem
+	state.EffectiveAllocatableCPU = allocCPU
+	state.EffectiveAllocatableMem = allocMem
+	state.BestNode = v1alpha1.BestNode{
+		Name:                    string(id),
+		FreeCPU:                 freeCPU,
+		FreeMem:                 freeMem,
+		EffectiveAllocatableCPU: allocCPU,
+		EffectiveAllocatableMem: allocMem,
 	}
 }
 

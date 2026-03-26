@@ -22,16 +22,6 @@ const (
 	ReasonInfeasibleResourcesHard = "infeasible_resources_hard"
 	ReasonInfeasibleResourcesSoft = "infeasible_resources_soft"
 	ReasonInfeasibleTime          = "infeasible_time"
-
-	// --- Legacy aliases (keep until all references are migrated) ---
-	ReasonEdgeFeasibleOnly      = ReasonLocalFeasibleOnly
-	ReasonEdgePreferred         = ReasonLocalPreferred
-	ReasonEdgeViolationControl  = ReasonLocalViolationControl
-	ReasonEdgeBestEffort        = ReasonLocalBestEffort
-	ReasonCloudFeasibleOnly     = ReasonRemoteFeasibleOnly
-	ReasonCloudFaster           = ReasonRemoteFaster
-	ReasonCloudViolationControl = ReasonRemoteViolationControl
-	ReasonCloudBestEffort       = ReasonRemoteBestEffort
 )
 
 // Priority class names for Kubernetes
@@ -40,9 +30,4 @@ const (
 	PriorityClassLocalPref   = "local-preferred"
 	PriorityClassBestEffort  = "best-effort"
 	PriorityClassRemote      = "remote-workload"
-
-	// Legacy aliases
-	PriorityClassQueuedEdge = PriorityClassQueuedLocal
-	PriorityClassEdgePref   = PriorityClassLocalPref
-	PriorityClassCloud      = PriorityClassRemote
 )

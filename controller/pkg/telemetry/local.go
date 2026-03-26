@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -180,6 +181,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*apis.LocalState, e
 
 	if len(nodeSnapshots) == 0 {
 		st := &apis.LocalState{
+			ClusterID:             constants.LocalCluster,
 			FreeCPU:               0,
 			FreeMem:               0,
 			PendingPodsPerClass:   make(map[string]int),
@@ -413,6 +415,7 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 	}
 
 	return &apis.LocalState{
+		ClusterID:               constants.LocalCluster,
 		FreeCPU:                 freeCPU,
 		FreeMem:                 freeMemMi,
 		PendingPodsPerClass:     pendingPerClass,
@@ -443,6 +446,7 @@ func (l *LocalCollector) GetCachedLocalState() *apis.LocalState {
 
 	if l.cache == nil {
 		return &apis.LocalState{
+			ClusterID:             constants.LocalCluster,
 			PendingPodsPerClass:   make(map[string]int),
 			TotalDemand:           make(map[string]apis.DemandByClass),
 			IsStale:               true,
@@ -521,3 +525,48 @@ func wantsEdge(pod *corev1.Pod) bool {
 
 func (l *LocalCollector) LockForDecision()   { l.decisionMu.Lock() }
 func (l *LocalCollector) UnlockForDecision() { l.decisionMu.Unlock() }
+
+// GetVirtualNodeResources computes free resources for a Liqo virtual node
+// identified by the node.cluster/id label. Returns zero values and found=false
+// if no matching node exists.
+func (l *LocalCollector) GetVirtualNodeResources(clusterID constants.ClusterID) (freeCPU, freeMem, allocCPU, allocMem int64, found bool) {
+	selector := labels.SelectorFromSet(labels.Set{
+		constants.NodeClusterLabel: string(clusterID),
+	})
+	nodes, err := l.nodeLister.List(selector)
+	if err != nil || len(nodes) == 0 {
+		return 0, 0, 0, 0, false
+	}
+	node := nodes[0]
+
+	allocCPU = node.Status.Allocatable.Cpu().MilliValue()
+	allocMem = node.Status.Allocatable.Memory().Value() / (1024 * 1024)
+
+	podObjs, err := l.podIndexer.ByIndex("nodeName", node.Name)
+	if err != nil {
+		return allocCPU, allocMem, allocCPU, allocMem, true
+	}
+
+	var usedCPU, usedMem int64
+	for _, obj := range podObjs {
+		pod := obj.(*corev1.Pod)
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		for _, c := range pod.Spec.Containers {
+			usedCPU += c.Resources.Requests.Cpu().MilliValue()
+			usedMem += c.Resources.Requests.Memory().Value() / (1024 * 1024)
+		}
+	}
+
+	freeCPU = allocCPU - usedCPU
+	if freeCPU < 0 {
+		freeCPU = 0
+	}
+	freeMem = allocMem - usedMem
+	if freeMem < 0 {
+		freeMem = 0
+	}
+
+	return freeCPU, freeMem, allocCPU, allocMem, true
+}
