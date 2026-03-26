@@ -20,7 +20,41 @@ var dummyProbCalc apis.ProbabilityCalculator = func(stats *apis.ProfileStats, th
 	return 0.1 // low chance of violation
 }
 
-// TestLyapunov_InfeasibleTieBreaking tests the new logic for when both locations are infeasible.
+// lyapDecide2 wraps DecideN for the common 2-cluster (local + remote) test pattern,
+// preserving the old Decide call structure for readability.
+func lyapDecide2(
+	lyap *LyapunovScheduler,
+	class string, deadline float64,
+	localETA, remoteETA float64,
+	localProfile, remoteProfile *apis.ProfileStats,
+	localFeasible bool, localFeasReason string,
+	remoteFeasible bool, remoteFeasReason string,
+	localCost, remoteCost float64,
+	probCalc apis.ProbabilityCalculator,
+) (constants.ClusterID, float64) {
+	candidates := []candidateEval{
+		{
+			clusterID:         constants.LocalCluster,
+			eta:               localETA,
+			profile:           localProfile,
+			feasible:          localFeasible,
+			feasibilityReason: localFeasReason,
+			cost:              localCost,
+		},
+		{
+			clusterID:         cloudCluster,
+			eta:               remoteETA,
+			profile:           remoteProfile,
+			feasible:          remoteFeasible,
+			feasibilityReason: remoteFeasReason,
+			cost:              remoteCost,
+		},
+	}
+	idx, weight := lyap.DecideN(class, deadline, candidates, probCalc)
+	return candidates[idx].clusterID, weight
+}
+
+// TestLyapunov_InfeasibleTieBreaking tests the logic for when both locations are infeasible.
 func TestLyapunov_InfeasibleTieBreaking(t *testing.T) {
 	lyap := NewLyapunovScheduler()
 	lyap.SetClassConfig("batch", &ClassConfig{
@@ -29,48 +63,48 @@ func TestLyapunov_InfeasibleTieBreaking(t *testing.T) {
 
 	profile := &apis.ProfileStats{Count: 100, MeanDurationMs: 1000}
 
-	// SCENARIO 1: Edge is Hard-Infeasible (resource-constrained), Cloud is Time-Infeasible.
-	// The scheduler MUST choose cloud, as the edge is not a real option.
-	loc1, _ := lyap.Decide(
+	// SCENARIO 1: Local is Hard-Infeasible (resource-constrained), Remote is Time-Infeasible.
+	// The scheduler MUST choose remote, as the local is not a real option.
+	loc1, _ := lyapDecide2(lyap,
 		"batch", 1000,
-		500, 1200, // Edge is faster, Cloud is slower than deadline
+		500, 1200, // Local is faster, Remote is slower than deadline
 		profile, profile,
-		false, constants.ReasonInfeasibleResourcesHard, // Edge fails HARD check
-		false, constants.ReasonInfeasibleTime, // Cloud fails time check
+		false, constants.ReasonInfeasibleResourcesHard, // Local fails HARD check
+		false, constants.ReasonInfeasibleTime, // Remote fails time check
 		0.0, 1.0, dummyProbCalc,
 	)
-	if loc1 != constants.Cloud {
-		t.Errorf("Scenario 1 failed: Expected CLOUD when edge is hard-infeasible, but got %s", loc1)
+	if loc1 != cloudCluster {
+		t.Errorf("Scenario 1 failed: Expected remote when local is hard-infeasible, but got %s", loc1)
 	}
 
-	// SCENARIO 2: Edge is Soft-Infeasible (temporarily full), Cloud is Time-Infeasible.
+	// SCENARIO 2: Local is Soft-Infeasible (temporarily full), Remote is Time-Infeasible.
 	// Both are "bad" options, so it should fall back to the one with the lower performance penalty.
-	// Edge penalty is lower (ETA is within deadline), so it should choose Edge (i.e., decide to wait in the queue).
-	loc2, _ := lyap.Decide(
+	// Local penalty is lower (ETA is within deadline), so it should choose Local.
+	loc2, _ := lyapDecide2(lyap,
 		"batch", 1000,
-		500, 1200, // Edge ETA < deadline, Cloud ETA > deadline
+		500, 1200, // Local ETA < deadline, Remote ETA > deadline
 		profile, profile,
-		false, constants.ReasonInfeasibleResourcesSoft, // Edge is SOFT-infeasible
-		false, constants.ReasonInfeasibleTime, // Cloud is time-infeasible
+		false, constants.ReasonInfeasibleResourcesSoft, // Local is SOFT-infeasible
+		false, constants.ReasonInfeasibleTime, // Remote is time-infeasible
 		0.0, 1.0, dummyProbCalc,
 	)
-	if loc2 != constants.Edge {
-		t.Errorf("Scenario 2 failed: Expected EDGE when edge is soft-infeasible and has lower penalty, but got %s", loc2)
+	if loc2 != constants.LocalCluster {
+		t.Errorf("Scenario 2 failed: Expected LOCAL when local is soft-infeasible and has lower penalty, but got %s", loc2)
 	}
 
 	// SCENARIO 3: Both are Time-Infeasible.
 	// It should fall back to the one with the lower performance penalty.
-	// Cloud is slightly less bad (1200ms vs 1300ms), so it should be chosen.
-	loc3, _ := lyap.Decide(
+	// Remote is slightly less bad (1200ms vs 1300ms), so it should be chosen.
+	loc3, _ := lyapDecide2(lyap,
 		"batch", 1000,
 		1300, 1200, // Both ETAs > deadline
 		profile, profile,
-		false, constants.ReasonInfeasibleTime, // Edge is time-infeasible
-		false, constants.ReasonInfeasibleTime, // Cloud is time-infeasible
+		false, constants.ReasonInfeasibleTime, // Local is time-infeasible
+		false, constants.ReasonInfeasibleTime, // Remote is time-infeasible
 		0.0, 1.0, dummyProbCalc,
 	)
-	if loc3 != constants.Cloud {
-		t.Errorf("Scenario 3 failed: Expected CLOUD when both are time-infeasible and cloud has lower violation, but got %s", loc3)
+	if loc3 != cloudCluster {
+		t.Errorf("Scenario 3 failed: Expected remote when both are time-infeasible and remote has lower violation, but got %s", loc3)
 	}
 }
 
@@ -127,8 +161,8 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 
 	// Simulate 10 violations out of 20 jobs (50% violation rate)
 	for i := 0; i < 10; i++ {
-		lyap.UpdateVirtualQueue(class, deadline, 1200, constants.Edge)
-		lyap.UpdateVirtualQueue(class, deadline, 800, constants.Edge)
+		lyap.UpdateVirtualQueue(class, deadline, 1200, constants.LocalCluster)
+		lyap.UpdateVirtualQueue(class, deadline, 800, constants.LocalCluster)
 	}
 
 	Zp := lyap.GetVirtualProbQueue(class)
@@ -144,7 +178,7 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 	}
 
 	// Now test decision with profiles
-	loc, weight := lyap.Decide(
+	loc, weight := lyapDecide2(lyap,
 		class, deadline,
 		1000, 900,
 		edgeProfile, cloudProfile,
@@ -155,8 +189,8 @@ func TestLyapunov_ProbabilityQueue(t *testing.T) {
 
 	t.Logf("Decision after violations: location=%s weight=%.2f", loc, weight)
 
-	if loc != constants.Cloud {
-		t.Logf("Warning: Expected cloud due to high Zp, got %s (may be OK depending on Z)", loc)
+	if loc != cloudCluster {
+		t.Logf("Warning: Expected remote due to high Zp, got %s (may be OK depending on Z)", loc)
 	}
 }
 
@@ -168,15 +202,15 @@ func TestLyapunov_PerClassBeta(t *testing.T) {
 	profile := &apis.ProfileStats{Count: 100, MeanDurationMs: 900}
 
 	// TEST 1: Latency (low beta)
-	loc1, _ := lyap.Decide("latency", 1000, 800, 900, profile, profile, true, "", true, "", 2.0, 1.0, dummyProbCalc)
-	if loc1 != constants.Cloud {
-		t.Errorf("With equal violations and low beta, should choose cheaper cloud, got %v", loc1)
+	loc1, _ := lyapDecide2(lyap, "latency", 1000, 800, 900, profile, profile, true, "", true, "", 2.0, 1.0, dummyProbCalc)
+	if loc1 != cloudCluster {
+		t.Errorf("With equal violations and low beta, should choose cheaper remote, got %v", loc1)
 	}
 
 	// TEST 2: Batch (high beta)
-	loc2, _ := lyap.Decide("batch", 1000, 700, 800, profile, profile, true, "", true, "", 2.0, 1.0, dummyProbCalc)
-	if loc2 != constants.Cloud {
-		t.Errorf("With high beta, cost dominates, should choose cheaper cloud, got %v", loc2)
+	loc2, _ := lyapDecide2(lyap, "batch", 1000, 700, 800, profile, profile, true, "", true, "", 2.0, 1.0, dummyProbCalc)
+	if loc2 != cloudCluster {
+		t.Errorf("With high beta, cost dominates, should choose cheaper remote, got %v", loc2)
 	}
 }
 
@@ -187,13 +221,13 @@ func TestLyapunov_PerClassDecay(t *testing.T) {
 	})
 
 	for i := 0; i < 5; i++ {
-		lyap.UpdateVirtualQueue("batch", 1000, 1500, constants.Edge)
+		lyap.UpdateVirtualQueue("batch", 1000, 1500, constants.LocalCluster)
 	}
 	Z1 := lyap.GetVirtualQueue("batch")
 
 	time.Sleep(150 * time.Millisecond)
 	profile := &apis.ProfileStats{Count: 100, MeanDurationMs: 500}
-	_, _ = lyap.Decide("batch", 1000, 500, 500, profile, profile, true, "", true, "", 0, 0, dummyProbCalc)
+	lyapDecide2(lyap, "batch", 1000, 500, 500, profile, profile, true, "", true, "", 0, 0, dummyProbCalc)
 
 	Z2 := lyap.GetVirtualQueue("batch")
 	if Z2 >= Z1 {
@@ -213,13 +247,13 @@ func TestLyapunov_ProbabilityQueueInfluencesDecision(t *testing.T) {
 
 	// Build up Zp through violations
 	for i := 0; i < 10; i++ {
-		lyap.UpdateVirtualQueue("latency", deadline, 1200, constants.Edge)
+		lyap.UpdateVirtualQueue("latency", deadline, 1200, constants.LocalCluster)
 	}
 
 	Zp := lyap.GetVirtualProbQueue("latency")
 	t.Logf("Zp after violations: %.2f", Zp)
 
-	loc, _ := lyap.Decide(
+	loc, _ := lyapDecide2(lyap,
 		"latency", deadline,
 		700, 800,
 		safeProfile, riskyProfile,
@@ -227,7 +261,7 @@ func TestLyapunov_ProbabilityQueueInfluencesDecision(t *testing.T) {
 		0, 0, dummyProbCalc,
 	)
 
-	if loc != constants.Edge {
-		t.Errorf("With high Zp, should prefer safe edge profile (low violation prob), got %v", loc)
+	if loc != constants.LocalCluster {
+		t.Errorf("With high Zp, should prefer safe local profile (low violation prob), got %v", loc)
 	}
 }

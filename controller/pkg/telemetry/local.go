@@ -187,7 +187,7 @@ func (l *LocalCollector) GetLocalState(ctx context.Context) (*apis.LocalState, e
 			TotalAllocatableCPU:   0,
 			TotalAllocatableMem:   0,
 			Timestamp:             time.Now(),
-			BestEdgeNode:          apis.BestNode{},
+			BestNode:              apis.BestNode{},
 			IsCompleteSnapshot:    true,
 			MeasurementConfidence: 1.0,
 		}
@@ -423,7 +423,7 @@ func (l *LocalCollector) computeState(nodeSnapshots map[string]*nodeSnapshot) (*
 		NonManagedMem:           totalNonManagedMem,
 		EffectiveAllocatableCPU: effectiveAllocCPU,
 		EffectiveAllocatableMem: effectiveAllocMem,
-		BestEdgeNode: apis.BestNode{
+		BestNode: apis.BestNode{
 			Name:                    bestName,
 			FreeCPU:                 bestFreeCPU,
 			FreeMem:                 bestFreeMemMi,

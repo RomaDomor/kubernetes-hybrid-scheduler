@@ -1,12 +1,12 @@
 package constants
 
-// This file centralizes node-related constants, such as labels and taints.
-
 const (
-	// NodeRoleLabelEdge is the label key for identifying edge nodes.
+	// NodeRoleLabelEdge is the label key for identifying local (edge) nodes.
 	NodeRoleLabelEdge = "node.role/edge"
-	// NodeRoleLabelCloud is the label key for identifying cloud nodes.
-	NodeRoleLabelCloud = "node.role/cloud"
+
+	// NodeClusterLabel identifies which remote cluster a virtual node represents.
+	// Value is the ClusterID (e.g., "cloud-1", "cloud-2").
+	NodeClusterLabel = "node.cluster/id"
 
 	// LabelValueTrue is a common value for boolean-like labels.
 	LabelValueTrue = "true"

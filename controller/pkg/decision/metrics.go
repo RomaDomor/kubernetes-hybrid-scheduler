@@ -176,7 +176,7 @@ func recordPredictionError(key apis.ProfileKey, errorMs float64) {
 	labels := prometheus.Labels{
 		"class":    key.Class,
 		"tier":     key.CPUTier,
-		"location": string(key.Location),
+		"location": string(key.ClusterID),
 	}
 	predictionError.With(labels).Observe(errorMs)
 }

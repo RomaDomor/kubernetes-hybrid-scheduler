@@ -21,8 +21,9 @@ type EngineConfig struct {
 	EdgePendingPessimismPct int
 	ProfileStore            *ProfileStore
 	LyapunovScheduler       *LyapunovScheduler
-	CloudCostFactor         float64
-	EdgeCostFactor          float64
+	// CostFactors maps ClusterID → relative cost.
+	// Local cluster defaults to 0, remote defaults to 1.
+	CostFactors map[constants.ClusterID]float64
 }
 
 // Engine implements the core scheduling logic.
@@ -31,273 +32,210 @@ type Engine struct {
 	lyapunov *LyapunovScheduler
 }
 
-// NewEngine creates a new decision engine.
 func NewEngine(config EngineConfig) *Engine {
 	if config.ProfileStore == nil {
 		klog.Fatal("ProfileStore must be provided in EngineConfig")
 	}
-
 	if config.LyapunovScheduler == nil {
 		klog.Fatal("LyapunovScheduler must be provided in EngineConfig")
 	}
-
-	// Set cost defaults if not provided.
-	if config.CloudCostFactor == 0 {
-		config.CloudCostFactor = 1.0
+	if config.CostFactors == nil {
+		config.CostFactors = make(map[constants.ClusterID]float64)
 	}
-
 	return &Engine{
 		config:   config,
 		lyapunov: config.LyapunovScheduler,
 	}
 }
 
-// Decide determines the optimal placement for a pod based on SLOs, telemetry, and profiles.
+// clusterCost returns the cost factor for a cluster.
+func (e *Engine) clusterCost(id constants.ClusterID) float64 {
+	if cost, ok := e.config.CostFactors[id]; ok {
+		return cost
+	}
+	if constants.IsLocal(id) {
+		return 0.0
+	}
+	return 1.0
+}
+
+// candidateEval holds per-cluster evaluation data.
+type candidateEval struct {
+	clusterID         constants.ClusterID
+	state             *apis.ClusterState
+	profile           *apis.ProfileStats
+	eta               float64
+	feasible          bool
+	feasibilityReason string
+	cost              float64
+	weight            float64
+}
+
+// Decide determines the optimal placement for a pod across all clusters.
 func (e *Engine) Decide(
 	pod *corev1.Pod,
 	slo *apis.SLO,
-	local *apis.LocalState,
-	wan *apis.WANState,
+	clusterStates map[constants.ClusterID]*apis.ClusterState,
 ) apis.Result {
 	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
 
-	// --- 1. Safety Checks and Circuit Breakers ---
-	if result, ok := e.runSafetyChecks(podID, slo, local, wan); ok {
+	// --- 1. Safety checks ---
+	localState := clusterStates[constants.LocalCluster]
+	if localState == nil {
+		klog.Warningf("%s: Local state is nil, forcing to local with best-effort", podID)
+		return apis.Result{
+			Location: constants.LocalCluster,
+			Reason:   constants.ReasonTelemetryCircuitBreaker,
+		}
+	}
+
+	// --- 2. Hard constraints ---
+	if !slo.OffloadAllowed {
+		klog.V(4).Infof("%s: Offload disabled by SLO, forcing to local", podID)
+		result := apis.Result{Location: constants.LocalCluster, Reason: constants.ReasonOffloadDisabled}
 		recordDecision(result, slo.Class)
 		return result
 	}
 
 	reqCPU := util.GetCPURequest(pod)
 	reqMem := util.GetMemRequestMi(pod)
-
-	klog.V(4).Infof(
-		"%s: Deciding: req={cpu=%dm mem=%dMi} class=%s deadline=%dms offload=%v | wan={rtt=%dms loss=%.1f%%} | edge={free_cpu=%dm free_mem=%dMi conf=%.2f} | lyapunov={Z=%.2f Zp=%.2f}",
-		podID, reqCPU, reqMem, slo.Class, slo.DeadlineMs, slo.OffloadAllowed,
-		wan.RTTMs, wan.LossPct,
-		local.FreeCPU, local.FreeMem, local.MeasurementConfidence,
-		e.lyapunov.GetVirtualQueue(slo.Class),
-		e.lyapunov.GetVirtualProbQueue(slo.Class),
-	)
-
-	// --- 2. Hard Constraints ---
-	if !slo.OffloadAllowed {
-		klog.V(4).Infof("%s: Offload disabled by SLO, forcing to edge", podID)
-		result := apis.Result{Location: constants.Edge, Reason: constants.ReasonOffloadDisabled, WanRttMs: wan.RTTMs}
-		recordDecision(result, slo.Class)
-		return result
-	}
-
-	if wan.RTTMs > e.config.RTTUnusableMs || wan.LossPct > e.config.LossUnusablePct {
-		klog.V(4).Infof("%s: WAN is unusable (rtt=%dms loss=%.1f%%), forcing to edge", podID, wan.RTTMs, wan.LossPct)
-		result := apis.Result{Location: constants.Edge, Reason: constants.ReasonWANUnusable, WanRttMs: wan.RTTMs}
-		recordDecision(result, slo.Class)
-		return result
-	}
-
-	// --- 3. Profile Loading and ETA Prediction ---
-	edgeKey := apis.GetProfileKey(pod, constants.Edge)
-	cloudKey := apis.GetProfileKey(pod, constants.Cloud)
-	edgeProfile := e.config.ProfileStore.GetOrDefault(edgeKey)
-	cloudProfile := e.config.ProfileStore.GetOrDefault(cloudKey)
-	klog.V(4).Infof("%s: Profiles edge[%s]: %s | cloud[%s]: %s",
-		podID, edgeKey.String(), fmtProfile(edgeProfile),
-		cloudKey.String(), fmtProfile(cloudProfile))
-
-	edgeETA := e.predictEdgeETA(edgeProfile, local, slo)
-	cloudETA := e.predictCloudETA(cloudProfile, wan)
-	klog.V(4).Infof("%s: Predicted ETA: edge=%.0fms, cloud=%.0fms (deadline=%dms)",
-		podID, edgeETA, cloudETA, slo.DeadlineMs)
-
-	// --- 4. Feasibility Analysis ---
 	deadline := float64(slo.DeadlineMs)
-	edgeFeasible, edgeReason := e.isEdgeFeasibleWithConfidence(pod, local, reqCPU, reqMem, edgeETA, deadline)
-	cloudFeasible, cloudReason := e.isCloudFeasible(cloudETA, deadline)
-	klog.V(4).Infof("%s: Feasibility: edge=%v (reason: %s), cloud=%v (reason: %s)", podID, edgeFeasible, edgeReason, cloudFeasible, cloudReason)
 
-	// --- 5. Lyapunov-based Decision ---
-	localCost := e.config.EdgeCostFactor
-	cloudCost := e.config.CloudCostFactor
+	// --- 3. Evaluate each cluster ---
+	candidates := make([]candidateEval, 0, len(clusterStates))
 
+	for clusterID, state := range clusterStates {
+		if state == nil {
+			continue
+		}
+
+		// Safety: check WAN for remote clusters
+		if !constants.IsLocal(clusterID) {
+			if result, skip := e.checkRemoteSafety(podID, clusterID, state, slo); skip {
+				klog.V(4).Infof("%s: Cluster %s failed safety check: %s", podID, clusterID, result.Reason)
+				continue // skip this cluster
+			}
+		} else {
+			// Check local telemetry staleness
+			if result, skip := e.checkLocalSafety(podID, state, slo); skip {
+				// If local is unsafe, we still want to consider remotes
+				klog.V(4).Infof("%s: Local cluster failed safety: %s", podID, result.Reason)
+				// Don't add local as candidate
+				continue
+			}
+		}
+
+		profileKey := apis.GetProfileKey(pod, clusterID)
+		profile := e.config.ProfileStore.GetOrDefault(profileKey)
+		eta := e.predictETA(clusterID, profile, state, slo)
+
+		feasible, reason := e.isFeasible(clusterID, pod, state, reqCPU, reqMem, eta, deadline)
+
+		candidates = append(candidates, candidateEval{
+			clusterID:         clusterID,
+			state:             state,
+			profile:           profile,
+			eta:               eta,
+			feasible:          feasible,
+			feasibilityReason: reason,
+			cost:              e.clusterCost(clusterID),
+		})
+
+		klog.V(4).Infof("%s: Cluster %s: ETA=%.0fms feasible=%v reason=%s cost=%.2f",
+			podID, clusterID, eta, feasible, reason, e.clusterCost(clusterID))
+	}
+
+	// --- 4. Fallback: no candidates at all ---
+	if len(candidates) == 0 {
+		klog.Warningf("%s: No viable clusters, fallback to local", podID)
+		return apis.Result{
+			Location: constants.LocalCluster,
+			Reason:   constants.ReasonLocalBestEffort,
+		}
+	}
+
+	// --- 5. Lyapunov optimization across all candidates ---
 	probCalc := func(stats *apis.ProfileStats, threshold float64) float64 {
 		return e.config.ProfileStore.ComputeViolationProbability(stats, threshold)
 	}
 
-	location, weight := e.lyapunov.Decide(slo.Class, deadline, edgeETA, cloudETA, edgeProfile, cloudProfile, edgeFeasible, edgeReason, cloudFeasible, cloudReason, localCost, cloudCost, probCalc)
+	bestIdx, bestWeight := e.lyapunov.DecideN(slo.Class, deadline, candidates, probCalc)
+	chosen := candidates[bestIdx]
 
-	// --- 6. Result Assembly ---
-	reason := e.determineReason(location, edgeFeasible, cloudFeasible, edgeETA, cloudETA)
-	predictedETA := cloudETA
-	if location == constants.Edge {
-		predictedETA = edgeETA
+	// --- 6. Result assembly ---
+	reason := e.determineReason(chosen, candidates)
+	wanRtt := 0
+	if !constants.IsLocal(chosen.clusterID) {
+		wanRtt = chosen.state.RTTMs
 	}
 
 	result := apis.Result{
-		Location:       location,
+		Location:       chosen.clusterID,
 		Reason:         reason,
-		PredictedETAMs: predictedETA,
-		WanRttMs:       wan.RTTMs,
-		LyapunovWeight: weight,
+		PredictedETAMs: chosen.eta,
+		WanRttMs:       wanRtt,
+		LyapunovWeight: bestWeight,
 	}
 
 	recordDecision(result, slo.Class)
-	klog.V(3).Infof("%s: Final Decision: %s (reason=%s, eta=%.0fms, weight=%.2f, conf=%.2f)",
-		podID, result.Location, result.Reason, result.PredictedETAMs,
-		weight, local.MeasurementConfidence)
+	klog.V(3).Infof("%s: Decision: cluster=%s reason=%s eta=%.0fms weight=%.2f",
+		podID, result.Location, result.Reason, result.PredictedETAMs, bestWeight)
 
 	return result
 }
 
-// runSafetyChecks performs initial validation and handles telemetry issues.
-func (e *Engine) runSafetyChecks(podID string, slo *apis.SLO, local *apis.LocalState, wan *apis.WANState) (apis.Result, bool) {
-	if wan == nil {
-		klog.Warningf("%s: WAN state is nil, using pessimistic defaults and forcing to edge", podID)
-		return apis.Result{Location: constants.Edge, Reason: constants.ReasonWANCircuitBreaker, WanRttMs: 999}, true
+// predictETA computes the predicted total time for a cluster.
+func (e *Engine) predictETA(
+	clusterID constants.ClusterID,
+	profile *apis.ProfileStats,
+	state *apis.ClusterState,
+	slo *apis.SLO,
+) float64 {
+	if constants.IsLocal(clusterID) {
+		return e.predictLocalETA(profile, state, slo)
 	}
-	if local == nil {
-		klog.Warningf("%s: Local state is nil, using empty state and forcing to cloud", podID)
-		return apis.Result{Location: constants.Cloud, Reason: constants.ReasonTelemetryCircuitBreaker, WanRttMs: wan.RTTMs}, true
-	}
-
-	// Class-specific staleness thresholds
-	staleThresholds := map[string]time.Duration{
-		"latency":     5 * time.Second,
-		"interactive": 10 * time.Second,
-		"throughput":  30 * time.Second,
-		"streaming":   20 * time.Second,
-		"batch":       120 * time.Second,
-	}
-	threshold := staleThresholds[slo.Class]
-	if threshold == 0 {
-		threshold = 30 * time.Second
-	}
-
-	if wan.StaleDuration > 10*time.Minute {
-		klog.Errorf("%s: WAN telemetry stale for >10min, circuit breaker triggered. Forcing to edge.", podID)
-		return apis.Result{Location: constants.Edge, Reason: constants.ReasonWANCircuitBreaker, WanRttMs: 999}, true
-	}
-
-	if local.StaleDuration > threshold {
-		klog.Errorf("%s: Local telemetry stale for >%v for class %s, circuit breaker triggered. Forcing to cloud.",
-			podID, threshold, slo.Class)
-		return apis.Result{Location: constants.Cloud, Reason: constants.ReasonTelemetryCircuitBreaker, WanRttMs: wan.RTTMs}, true
-	}
-
-	if (!local.IsCompleteSnapshot || local.MeasurementConfidence < 0.5) &&
-		(slo.Class == "latency" || slo.Class == "interactive") {
-		klog.Warningf("%s: Low measurement confidence (%.2f) for critical class, forcing conservative cloud decision",
-			podID, local.MeasurementConfidence)
-		return apis.Result{Location: constants.Cloud, Reason: constants.ReasonLowMeasurementConf, WanRttMs: wan.RTTMs}, true
-	}
-
-	return apis.Result{}, false
+	return e.predictRemoteETA(profile, state)
 }
 
-// isEdgeFeasibleWithConfidence checks if the pod can be scheduled on the edge, considering resources and confidence.
-func (e *Engine) isEdgeFeasibleWithConfidence(
-	pod *corev1.Pod,
-	local *apis.LocalState,
-	reqCPU int64,
-	reqMem int64,
-	edgeETA float64,
-	deadline float64,
-) (bool, string) {
-	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
-
-	// --- HARD RESOURCE CHECKS ---
-	// This is the most important change. We now check against the single best node's
-	// effective capacity, which correctly handles resource fragmentation.
-
-	// 1. Hard Check: Can the pod fit on the best available edge node, even if all managed pods were to finish?
-	if local.BestEdgeNode.Name == "" || local.BestEdgeNode.EffectiveAllocatableCPU < reqCPU || local.BestEdgeNode.EffectiveAllocatableMem < reqMem {
-		klog.V(4).Infof("%s: Edge feasibility check failed (HARD): Pod request (%dm/%dMi) exceeds the effective capacity of the best available edge node '%s' (%dm/%dMi)",
-			podID, reqCPU, reqMem, local.BestEdgeNode.Name, local.BestEdgeNode.EffectiveAllocatableCPU, local.BestEdgeNode.EffectiveAllocatableMem)
-		return false, constants.ReasonInfeasibleResourcesHard
-	}
-
-	// The cluster-wide utilization check is still a useful secondary hard check to prevent over-commitment of the whole edge.
-	const utilizationLimit = 0.90
-	utilAfterScheduling := float64(local.EffectiveAllocatableCPU-local.FreeCPU+reqCPU) / float64(local.EffectiveAllocatableCPU)
-	if utilAfterScheduling > utilizationLimit {
-		klog.V(4).Infof("%s: Edge feasibility check failed (HARD): Would exceed cluster-wide utilization limit (%.1f%% > %.1f%%)",
-			podID, utilAfterScheduling*100, utilizationLimit*100)
-		return false, constants.ReasonInfeasibleResourcesHard
-	}
-
-	// --- SOFT FEASIBILITY CHECKS ---
-	// These checks are against the *current* state. A failure here means we might need to wait (queue).
-
-	// 2. Soft check (Time): Can the job finish in time, including predicted queue waits?
-	if edgeETA > deadline {
-		klog.V(4).Infof("%s: Edge feasibility check failed (SOFT): predicted ETA %.0fms exceeds deadline %.0fms", podID, edgeETA, deadline)
-		return false, constants.ReasonInfeasibleTime
-	}
-
-	// 3. Soft check (Resources): Are there enough free resources *right now*?
-	if local.FreeCPU < reqCPU || local.FreeMem < reqMem {
-		klog.V(4).Infof("%s: Edge feasibility check failed (SOFT): insufficient free resources right now (need %dm/%dMi, have %dm/%dMi). Pod may be queued.",
-			podID, reqCPU, reqMem, local.FreeCPU, local.FreeMem)
-		return false, constants.ReasonInfeasibleResourcesSoft
-	}
-
-	return true, ""
-}
-
-// isCloudFeasible checks if the pod is predicted to meet its deadline on the cloud.
-func (e *Engine) isCloudFeasible(cloudETA, deadline float64) (bool, string) {
-	if cloudETA > deadline {
-		return false, constants.ReasonInfeasibleTime
-	}
-
-	return true, ""
-}
-
-// predictEdgeETA predicts the end-to-end completion time for a pod on the edge.
-func (e *Engine) predictEdgeETA(profile *apis.ProfileStats, local *apis.LocalState, slo *apis.SLO) float64 {
-	// Base time is the P95 execution duration from the profile.
+// predictLocalETA = Twait + Texec (Tnet ≈ 0 for local cluster).
+func (e *Engine) predictLocalETA(profile *apis.ProfileStats, state *apis.ClusterState, slo *apis.SLO) float64 {
 	execTime := profile.P95DurationMs
 
-	// If no pending pressure, return execution time only
-	pendingCount := local.PendingPodsPerClass[slo.Class]
+	pendingCount := state.PendingPodsPerClass[slo.Class]
 	if pendingCount == 0 {
-		return execTime // No queue, just execution time.
+		return execTime
 	}
 
-	classDemand := local.TotalDemand[slo.Class]
+	classDemand := state.TotalDemand[slo.Class]
 	if classDemand.CPU == 0 {
-		return execTime // No recorded demand for this class, assume no queue.
+		return execTime
 	}
 
-	// Estimate parallelism based on available resources and average pod size for the class.
 	avgPodCPU := classDemand.CPU / int64(pendingCount)
 	if avgPodCPU == 0 {
-		avgPodCPU = 100 // Avoid division by zero with a small default.
+		avgPodCPU = 100
 	}
 	cpuParallelism := int64(1)
-	if local.FreeCPU > 0 {
-		cpuParallelism = local.FreeCPU / avgPodCPU
+	if state.FreeCPU > 0 {
+		cpuParallelism = state.FreeCPU / avgPodCPU
 		if cpuParallelism < 1 {
 			cpuParallelism = 1
 		}
 	}
 
-	// Effective parallelism is bottlenecked by the most constrained resource (CPU).
 	parallelism := cpuParallelism
-	// Cap parallelism to a realistic maximum to avoid over-optimistic predictions.
 	const maxParallelism = 64
 	if parallelism > maxParallelism {
 		parallelism = maxParallelism
 	}
 
-	// Estimate queue wait time using a simplified queueing model.
-	// 1. Deterministic drain time: How long to clear the existing queue.
 	queueDrainTime := float64(pendingCount) * profile.MeanDurationMs / float64(parallelism)
 
-	// 2. Variance buffer: Add a buffer for variability, based on Kingman's approximation.
 	varianceBuffer := 0.0
 	managedUtilization := 0.0
-	if local.EffectiveAllocatableCPU > 0 {
-		managedActiveCPU := local.EffectiveAllocatableCPU - local.FreeCPU
-		managedUtilization = float64(managedActiveCPU) / float64(local.EffectiveAllocatableCPU)
+	if state.EffectiveAllocatableCPU > 0 {
+		managedActiveCPU := state.EffectiveAllocatableCPU - state.FreeCPU
+		managedUtilization = float64(managedActiveCPU) / float64(state.EffectiveAllocatableCPU)
 	}
 
 	if managedUtilization < 0.95 && profile.MeanDurationMs > 0 {
@@ -305,78 +243,175 @@ func (e *Engine) predictEdgeETA(profile *apis.ProfileStats, local *apis.LocalSta
 		rho := managedUtilization
 		varianceBuffer = (cv2 / 2.0) * (rho / (1.0 - rho)) * profile.MeanDurationMs
 		if parallelism > 1 {
-			varianceBuffer /= math.Sqrt(float64(parallelism)) // Reduce variance for multi-server queue
+			varianceBuffer /= math.Sqrt(float64(parallelism))
 		}
 	} else if managedUtilization >= 0.95 {
-		// System is near saturation, use a more pessimistic buffer.
 		varianceBuffer = profile.StdDevDurationMs * 2.0
 	}
 
 	queueWait := queueDrainTime + varianceBuffer
 
-	// 3. Confidence penalty: Increase predicted wait time if telemetry is stale.
-	if local.MeasurementConfidence < 1.0 {
-		uncertaintyPenalty := queueWait * (1.0 - local.MeasurementConfidence) * 0.5
+	if state.MeasurementConfidence < 1.0 {
+		uncertaintyPenalty := queueWait * (1.0 - state.MeasurementConfidence) * 0.5
 		queueWait += uncertaintyPenalty
 	}
 
 	totalETA := queueWait + execTime
-	klog.V(4).Infof(
-		"Edge ETA breakdown: exec=%.0fms queue_wait=%.0fms (drain=%.0fms variance=%.0fms) total=%.0fms",
-		execTime, queueWait, queueDrainTime, varianceBuffer, totalETA,
-	)
-
+	klog.V(4).Infof("Local ETA: exec=%.0fms queue=%.0fms total=%.0fms", execTime, queueWait, totalETA)
 	return totalETA
 }
 
-// predictCloudETA predicts completion time on the cloud.
-func (e *Engine) predictCloudETA(profile *apis.ProfileStats, wan *apis.WANState) float64 {
-	// Cloud ETA = Network transfer time (round trip) + P95 execution time.
-	// Assumes the cloud has infinite capacity (no queueing).
-	return 2.0*float64(wan.RTTMs) + profile.P95DurationMs
+// predictRemoteETA = Tnet + Texec (Twait ≈ 0 per assumption 5, section 1.2).
+func (e *Engine) predictRemoteETA(profile *apis.ProfileStats, state *apis.ClusterState) float64 {
+	return 2.0*float64(state.RTTMs) + profile.P95DurationMs
 }
 
-// determineReason translates the decision logic into a human-readable reason string.
-func (e *Engine) determineReason(location constants.Location, edgeFeasible, cloudFeasible bool, edgeETA, cloudETA float64) string {
-	if location == constants.Edge {
-		if edgeFeasible && !cloudFeasible {
-			return constants.ReasonEdgeFeasibleOnly
-		}
-		if edgeFeasible && cloudFeasible {
-			returnIf := edgeETA <= cloudETA
-			if returnIf {
-				return constants.ReasonEdgePreferred
-			}
-			return constants.ReasonEdgeViolationControl
-		}
-		return constants.ReasonEdgeBestEffort
+// isFeasible checks if the pod can be scheduled on a given cluster.
+func (e *Engine) isFeasible(
+	clusterID constants.ClusterID,
+	pod *corev1.Pod,
+	state *apis.ClusterState,
+	reqCPU, reqMem int64,
+	eta, deadline float64,
+) (bool, string) {
+	if constants.IsLocal(clusterID) {
+		return e.isLocalFeasible(pod, state, reqCPU, reqMem, eta, deadline)
+	}
+	return e.isRemoteFeasible(eta, deadline)
+}
+
+// isLocalFeasible checks hard and soft resource constraints for the local cluster.
+func (e *Engine) isLocalFeasible(
+	pod *corev1.Pod,
+	state *apis.ClusterState,
+	reqCPU, reqMem int64,
+	eta, deadline float64,
+) (bool, string) {
+	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
+
+	// Hard: can the pod fit on the best node at all?
+	if state.BestNode.Name == "" ||
+		state.BestNode.EffectiveAllocatableCPU < reqCPU ||
+		state.BestNode.EffectiveAllocatableMem < reqMem {
+		klog.V(4).Infof("%s: Local HARD infeasible: best node can't fit pod", podID)
+		return false, constants.ReasonInfeasibleResourcesHard
 	}
 
-	// Cloud decision
-	if cloudFeasible && !edgeFeasible {
-		return constants.ReasonCloudFeasibleOnly
-	}
-	if cloudFeasible && edgeFeasible {
-		returnIf := cloudETA < edgeETA
-		if returnIf {
-			return constants.ReasonCloudFaster
+	// Hard: cluster-wide utilization limit
+	const utilizationLimit = 0.90
+	if state.EffectiveAllocatableCPU > 0 {
+		utilAfter := float64(state.EffectiveAllocatableCPU-state.FreeCPU+reqCPU) / float64(state.EffectiveAllocatableCPU)
+		if utilAfter > utilizationLimit {
+			klog.V(4).Infof("%s: Local HARD infeasible: utilization %.1f%% > %.1f%%",
+				podID, utilAfter*100, utilizationLimit*100)
+			return false, constants.ReasonInfeasibleResourcesHard
 		}
-		return constants.ReasonCloudViolationControl
 	}
-	return constants.ReasonCloudBestEffort
+
+	// Soft: time
+	if eta > deadline {
+		return false, constants.ReasonInfeasibleTime
+	}
+
+	// Soft: current resources
+	if state.FreeCPU < reqCPU || state.FreeMem < reqMem {
+		return false, constants.ReasonInfeasibleResourcesSoft
+	}
+
+	return true, ""
 }
 
-// GetLyapunovScheduler exposes the Lyapunov scheduler for observer updates.
-func (e *Engine) GetLyapunovScheduler() *LyapunovScheduler {
-	return e.lyapunov
+// isRemoteFeasible checks if the pod can meet its deadline on a remote cluster.
+func (e *Engine) isRemoteFeasible(eta, deadline float64) (bool, string) {
+	if eta > deadline {
+		return false, constants.ReasonInfeasibleTime
+	}
+	return true, ""
 }
 
-// GetProfileStore exposes the profile store for testing.
-func (e *Engine) GetProfileStore() *ProfileStore {
-	return e.config.ProfileStore
+// checkRemoteSafety checks WAN health for a remote cluster.
+func (e *Engine) checkRemoteSafety(
+	podID string,
+	clusterID constants.ClusterID,
+	state *apis.ClusterState,
+	slo *apis.SLO,
+) (apis.Result, bool) {
+	if state.RTTMs > e.config.RTTUnusableMs || state.LossPct > e.config.LossUnusablePct {
+		return apis.Result{}, true // skip this cluster
+	}
+	if state.StaleDuration > 10*time.Minute {
+		return apis.Result{}, true // skip
+	}
+	return apis.Result{}, false
 }
 
-// fmtProfile provides a compact string representation of profile stats for logging.
+// checkLocalSafety checks local telemetry health.
+func (e *Engine) checkLocalSafety(
+	podID string,
+	state *apis.ClusterState,
+	slo *apis.SLO,
+) (apis.Result, bool) {
+	staleThresholds := map[string]time.Duration{
+		"latency": 5 * time.Second, "interactive": 10 * time.Second,
+		"throughput": 30 * time.Second, "streaming": 20 * time.Second,
+		"batch": 120 * time.Second,
+	}
+	threshold := staleThresholds[slo.Class]
+	if threshold == 0 {
+		threshold = 30 * time.Second
+	}
+
+	if state.StaleDuration > threshold {
+		return apis.Result{
+			Location: constants.LocalCluster,
+			Reason:   constants.ReasonTelemetryCircuitBreaker,
+		}, true
+	}
+
+	if (!state.IsCompleteSnapshot || state.MeasurementConfidence < 0.5) &&
+		(slo.Class == "latency" || slo.Class == "interactive") {
+		return apis.Result{
+			Location: constants.LocalCluster,
+			Reason:   constants.ReasonLowMeasurementConf,
+		}, true
+	}
+
+	return apis.Result{}, false
+}
+
+// determineReason provides a human-readable reason for the decision.
+func (e *Engine) determineReason(chosen candidateEval, all []candidateEval) string {
+	// Count how many candidates are feasible
+	feasibleCount := 0
+	for _, c := range all {
+		if c.feasible {
+			feasibleCount++
+		}
+	}
+
+	if constants.IsLocal(chosen.clusterID) {
+		if !chosen.feasible {
+			return constants.ReasonLocalBestEffort
+		}
+		if feasibleCount == 1 {
+			return constants.ReasonLocalFeasibleOnly
+		}
+		return constants.ReasonLocalPreferred
+	}
+
+	// Remote
+	if !chosen.feasible {
+		return constants.ReasonRemoteBestEffort
+	}
+	if feasibleCount == 1 {
+		return constants.ReasonRemoteFeasibleOnly
+	}
+	return constants.ReasonRemoteFaster
+}
+
+func (e *Engine) GetLyapunovScheduler() *LyapunovScheduler { return e.lyapunov }
+func (e *Engine) GetProfileStore() *ProfileStore           { return e.config.ProfileStore }
+
 func fmtProfile(p *apis.ProfileStats) string {
 	if p == nil {
 		return "nil"
