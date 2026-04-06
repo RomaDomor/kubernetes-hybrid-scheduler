@@ -131,24 +131,20 @@ enableAppArmor: false
 # -- Configuration data for the smart-scheduler ConfigMap.
 # -- These values will populate the environment variables of the controller.
 config:
-  # -- WAN RTT unusable threshold in milliseconds
-  rttUnusableMs: "100"
-  # -- WAN packet loss unusable threshold in percent
-  lossUnusablePct: "2.0"
-  # -- Cloud endpoint for WAN probe
-  cloudEndpoint: "10.20.0.3"
-  # -- WAN stale confidence factor
-  wanStaleConfFactor: "0.8"
+  # -- WAN RTT unusable threshold in milliseconds (env: RTT_UNUSABLE)
+  rttUnusable: "100"
+  # -- WAN packet loss unusable threshold in percent (env: LOSS_UNUSABLE)
+  lossUnusable: "2.0"
   # -- Edge pending pods resource pessimism
   edgePendingPessimismPct: "10"
 
   # -- Lyapunov optimization parameters
   # -- Cost-performance tradeoff (0.5-2.0 recommended)
   lyapunovBeta: "1.0"
-  # --  Relative cost of cloud scheduling
-  cloudCostFactor: "1.0"
-  # -- Relative cost of edge scheduling (0 = prefer edge)
-  edgeCostFactor: "0.0"
+  # -- Per-cluster cost factors CSV: "local=0,cloud-1=1.0,cloud-2=1.5"
+  costFactors: "local=0"
+  # -- Remote cluster endpoints CSV: "cloud-1=10.0.1.100,cloud-2=10.0.2.100"
+  remoteEndpoints: ""
 
   # -- Histogram configuration
   histBoundsMode: "explicit"
