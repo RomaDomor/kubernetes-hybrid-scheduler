@@ -22,21 +22,19 @@ func TestEngine_ProbabilityBasedDecision(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	// Use helper
 	local := localStateWithDefaults()
 	wan := &apis.WANState{RTTMs: 20, LossPct: 0.5}
 
-	// ... rest of test unchanged
 	ps := e.GetProfileStore()
-	edgeKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
-	cloudKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Cloud}
+	localKey := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: constants.LocalCluster}
+	cloudKey := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: cloudCluster}
 
-	// Edge: fast but risky (high variance)
+	// Local: fast but risky (high variance)
 	for i := 0; i < 50; i++ {
-		ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 700, SLOMet: true})
+		ps.Update(localKey, apis.ProfileUpdate{ObservedDurationMs: 700, SLOMet: true})
 	}
 	for i := 0; i < 50; i++ {
-		ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 1200, SLOMet: false})
+		ps.Update(localKey, apis.ProfileUpdate{ObservedDurationMs: 1200, SLOMet: false})
 	}
 
 	// Cloud: slower but consistent
@@ -45,23 +43,23 @@ func TestEngine_ProbabilityBasedDecision(t *testing.T) {
 	}
 
 	// Initial decision (no Zp buildup)
-	res1 := e.Decide(p, s, local, wan)
+	res1 := e.Decide(p, s, statesMap(local, wan))
 	t.Logf("Initial decision (no Zp): %s", res1.Location)
 
-	// Build up Zp by simulating edge violations
+	// Build up Zp by simulating local violations
 	for i := 0; i < 20; i++ {
-		lyap.UpdateVirtualQueue("latency", 1000, 1200, constants.Edge)
+		lyap.UpdateVirtualQueue("latency", 1000, 1200, constants.LocalCluster)
 	}
 
 	Zp := lyap.GetVirtualProbQueue("latency")
 	t.Logf("Zp after violations: %.2f", Zp)
 
 	// Second decision (high Zp should prefer consistent cloud)
-	res2 := e.Decide(p, s, local, wan)
+	res2 := e.Decide(p, s, statesMap(local, wan))
 	t.Logf("Decision with high Zp: %s", res2.Location)
 
-	if res2.Location != constants.Cloud {
-		t.Errorf("With high Zp and risky edge, expected cloud, got %v", res2.Location)
+	if res2.Location == constants.LocalCluster {
+		t.Errorf("With high Zp and risky local, expected remote, got %v", res2.Location)
 	}
 }
 
@@ -72,40 +70,39 @@ func TestEngine_ProfilesInfluenceDecision(t *testing.T) {
 	p := podWith("latency", 200, 128)
 	s := sloMust("latency", 1000, true, 5)
 
-	// Use helper
 	local := localStateWithDefaults()
 	wan := &apis.WANState{RTTMs: 30, LossPct: 0.5}
 
-	edgeKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
-	cloudKey := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Cloud}
+	localKey := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: constants.LocalCluster}
+	cloudKey := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: cloudCluster}
 
-	// Scenario: Edge historically violates, cloud is safe
+	// Scenario: Local historically violates, cloud is safe
 	for i := 0; i < 100; i++ {
-		ps.Update(edgeKey, apis.ProfileUpdate{ObservedDurationMs: 1200, SLOMet: false})
+		ps.Update(localKey, apis.ProfileUpdate{ObservedDurationMs: 1200, SLOMet: false})
 	}
 	for i := 0; i < 100; i++ {
 		ps.Update(cloudKey, apis.ProfileUpdate{ObservedDurationMs: 800, SLOMet: true})
 	}
 
-	edgeProf := ps.GetOrDefault(edgeKey)
+	localProf := ps.GetOrDefault(localKey)
 	cloudProf := ps.GetOrDefault(cloudKey)
 
-	edgeViolProb := ps.ComputeViolationProbability(edgeProf, 1000)
+	localViolProb := ps.ComputeViolationProbability(localProf, 1000)
 	cloudViolProb := ps.ComputeViolationProbability(cloudProf, 1000)
 
-	t.Logf("Edge violation probability: %.3f", edgeViolProb)
+	t.Logf("Local violation probability: %.3f", localViolProb)
 	t.Logf("Cloud violation probability: %.3f", cloudViolProb)
 
-	if edgeViolProb <= cloudViolProb {
-		t.Errorf("Expected edge to have higher violation prob, got edge=%.3f cloud=%.3f",
-			edgeViolProb, cloudViolProb)
+	if localViolProb <= cloudViolProb {
+		t.Errorf("Expected local to have higher violation prob, got local=%.3f cloud=%.3f",
+			localViolProb, cloudViolProb)
 	}
 
-	res := e.Decide(p, s, local, wan)
+	res := e.Decide(p, s, statesMap(local, wan))
 	t.Logf("Decision based on profiles: %s", res.Location)
 
 	// Should prefer cloud due to better historical compliance
-	if res.Location != constants.Cloud {
+	if res.Location == constants.LocalCluster {
 		t.Logf("Note: Decision was %s (may be OK if other factors dominate)", res.Location)
 	}
 }

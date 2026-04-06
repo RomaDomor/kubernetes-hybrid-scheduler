@@ -1,34 +1,33 @@
 package constants
 
-// This file contains constants for scheduling decision reasons.
 const (
-	// Edge placement reasons
-	ReasonEdgeFeasibleOnly     = "edge_feasible_only"
-	ReasonEdgePreferred        = "edge_preferred"
-	ReasonEdgeViolationControl = "edge_violation_control"
-	ReasonEdgeBestEffort       = "edge_best_effort"
-	ReasonOffloadDisabled      = "offload_disabled"
-	ReasonWANUnusable          = "wan_unusable"
-	ReasonWANCircuitBreaker    = "wan_circuit_breaker"
+	// Local cluster placement reasons
+	ReasonLocalFeasibleOnly     = "local_feasible_only"
+	ReasonLocalPreferred        = "local_preferred"
+	ReasonLocalViolationControl = "local_violation_control"
+	ReasonLocalBestEffort       = "local_best_effort"
+	ReasonOffloadDisabled       = "offload_disabled"
+	ReasonWANUnusable           = "wan_unusable"
+	ReasonWANCircuitBreaker     = "wan_circuit_breaker"
 
-	// Cloud placement reasons
-	ReasonCloudFeasibleOnly       = "cloud_feasible_only"
-	ReasonCloudFaster             = "cloud_faster"
-	ReasonCloudViolationControl   = "cloud_violation_control"
-	ReasonCloudBestEffort         = "cloud_best_effort"
+	// Remote cluster placement reasons
+	ReasonRemoteFeasibleOnly      = "remote_feasible_only"
+	ReasonRemoteFaster            = "remote_faster"
+	ReasonRemoteViolationControl  = "remote_violation_control"
+	ReasonRemoteBestEffort        = "remote_best_effort"
 	ReasonTelemetryCircuitBreaker = "telemetry_circuit_breaker"
 	ReasonLowMeasurementConf      = "low_measurement_confidence"
 
-	// Infeasibility reasons (internal to decision engine)
-	ReasonInfeasibleResourcesHard = "infeasible_resources_hard" // Not enough capacity even if all managed pods finish
-	ReasonInfeasibleResourcesSoft = "infeasible_resources_soft" // Temporarily occupied with other managed pods
+	// Infeasibility reasons
+	ReasonInfeasibleResourcesHard = "infeasible_resources_hard"
+	ReasonInfeasibleResourcesSoft = "infeasible_resources_soft"
 	ReasonInfeasibleTime          = "infeasible_time"
 )
 
 // Priority class names for Kubernetes
 const (
-	PriorityClassQueuedEdge = "queued-edge-workload"
-	PriorityClassEdgePref   = "edge-preferred"
-	PriorityClassBestEffort = "edge-best-effort"
-	PriorityClassCloud      = "cloud-workload"
+	PriorityClassQueuedLocal = "queued-local-workload"
+	PriorityClassLocalPref   = "local-preferred"
+	PriorityClassBestEffort  = "best-effort"
+	PriorityClassRemote      = "remote-workload"
 )

@@ -11,10 +11,10 @@ import (
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 )
 
-func TestBuildPatchResponse_Edge(t *testing.T) {
-	s := NewServer(nil, nil, nil, fake.NewSimpleClientset())
+func TestBuildPatchResponse_Local(t *testing.T) {
+	s := NewServer(nil, nil, nil, fake.NewClientset())
 	pod := &corev1.Pod{}
-	res := apis.Result{Location: constants.Edge, PredictedETAMs: 123, WanRttMs: 10, Reason: "edge_preferred"}
+	res := apis.Result{Location: constants.LocalCluster, PredictedETAMs: 123, WanRttMs: 0, Reason: constants.ReasonLocalPreferred}
 
 	resp := s.BuildPatchResponseForTest(pod, res)
 	if resp.Patch == nil {
@@ -29,29 +29,59 @@ func TestBuildPatchResponse_Edge(t *testing.T) {
 		}
 	}
 	if !foundNodeSel {
-		t.Fatalf("edge nodeSelector not added")
+		t.Fatalf("local nodeSelector not added")
 	}
 }
 
-func TestGetPriorityClassForEdgeReason(t *testing.T) {
-	s := NewServer(nil, nil, nil, fake.NewSimpleClientset())
+func TestBuildPatchResponse_Remote(t *testing.T) {
+	s := NewServer(nil, nil, nil, fake.NewClientset())
+	pod := &corev1.Pod{}
+	res := apis.Result{Location: "cloud-1", PredictedETAMs: 200, WanRttMs: 50, Reason: constants.ReasonRemoteFaster}
+
+	resp := s.BuildPatchResponseForTest(pod, res)
+	if resp.Patch == nil {
+		t.Fatalf("patch nil")
+	}
+	var ops []map[string]interface{}
+	_ = json.Unmarshal(resp.Patch, &ops)
+
+	foundClusterSel := false
+	foundPriority := false
+	for _, op := range ops {
+		if op["path"] == "/spec/nodeSelector/node.cluster~1id" && op["value"] == "cloud-1" {
+			foundClusterSel = true
+		}
+		if op["path"] == "/spec/priorityClassName" && op["value"] == constants.PriorityClassRemote {
+			foundPriority = true
+		}
+	}
+	if !foundClusterSel {
+		t.Fatalf("remote cluster nodeSelector not added")
+	}
+	if !foundPriority {
+		t.Fatalf("remote priority class not added")
+	}
+}
+
+func TestGetPriorityClassForLocalReason(t *testing.T) {
+	s := NewServer(nil, nil, nil, fake.NewClientset())
 	pod := &corev1.Pod{}
 
 	testCases := []struct {
 		reason   string
 		expected string
 	}{
-		{constants.ReasonEdgePreferred, constants.PriorityClassEdgePref},
-		{constants.ReasonEdgeFeasibleOnly, constants.PriorityClassEdgePref},
-		{"edge_queue_preferred", constants.PriorityClassQueuedEdge},
-		{"edge_queue_marginal", constants.PriorityClassQueuedEdge},
-		{constants.ReasonEdgeBestEffort, constants.PriorityClassBestEffort},
-		{"unknown_reason", ""}, // Default case
+		{constants.ReasonLocalPreferred, constants.PriorityClassLocalPref},
+		{constants.ReasonLocalFeasibleOnly, constants.PriorityClassLocalPref},
+		{"local_queue_preferred", constants.PriorityClassQueuedLocal},
+		{"local_queue_marginal", constants.PriorityClassQueuedLocal},
+		{constants.ReasonLocalBestEffort, constants.PriorityClassBestEffort},
+		{"unknown_reason", ""},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.reason, func(t *testing.T) {
-			res := apis.Result{Location: constants.Edge, Reason: tc.reason}
+			res := apis.Result{Location: constants.LocalCluster, Reason: tc.reason}
 			resp := s.BuildPatchResponseForTest(pod, res)
 
 			var ops []map[string]interface{}

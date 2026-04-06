@@ -14,7 +14,7 @@ import (
 
 // Result represents the outcome of a scheduling decision.
 type Result struct {
-	Location       constants.Location
+	Location       constants.ClusterID
 	Reason         string
 	PredictedETAMs float64
 	WanRttMs       int
@@ -23,13 +23,13 @@ type Result struct {
 
 // ProfileKey uniquely identifies a workload profile.
 type ProfileKey struct {
-	Class    string
-	CPUTier  string
-	Location constants.Location
+	Class     string
+	CPUTier   string
+	ClusterID constants.ClusterID
 }
 
 func (pk ProfileKey) String() string {
-	return fmt.Sprintf("%s-%s-%s", pk.Class, pk.CPUTier, pk.Location)
+	return fmt.Sprintf("%s-%s-%s", pk.Class, pk.CPUTier, pk.ClusterID)
 }
 
 // ProfileStats holds the statistical data for a workload profile.
@@ -77,12 +77,12 @@ type ProfileUpdate struct {
 	SLOMet             bool
 }
 
-// ProbabilityCalculator defines the function signature for a capability that can
-// compute a violation probability from profile statistics.
+// ProbabilityCalculator defines the function signature for computing
+// a violation probability from profile statistics.
 type ProbabilityCalculator func(stats *ProfileStats, threshold float64) float64
 
 // GetProfileKey generates a unique key for a pod's profile based on its characteristics.
-func GetProfileKey(pod *corev1.Pod, loc constants.Location) ProfileKey {
+func GetProfileKey(pod *corev1.Pod, clusterID constants.ClusterID) ProfileKey {
 	cpuMillis := util.GetCPURequest(pod)
 
 	tier := "medium"
@@ -96,17 +96,15 @@ func GetProfileKey(pod *corev1.Pod, loc constants.Location) ProfileKey {
 	if class == "" {
 		class = "batch"
 	}
-
 	class = normalizeClass(class)
 
 	return ProfileKey{
-		Class:    class,
-		CPUTier:  tier,
-		Location: loc,
+		Class:     class,
+		CPUTier:   tier,
+		ClusterID: clusterID,
 	}
 }
 
-// normalizeClass ensures the pod's SLO class is a known, valid value.
 func normalizeClass(class string) string {
 	if constants.ValidSLOClasses[class] {
 		return class

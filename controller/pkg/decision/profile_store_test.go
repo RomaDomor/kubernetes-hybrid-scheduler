@@ -13,6 +13,9 @@ import (
 	"kubernetes-hybrid-scheduler/controller/pkg/constants"
 )
 
+// cloudCluster is the remote cluster ID used across all decision package tests.
+const cloudCluster = constants.ClusterID("cloud-1")
+
 func testPod(cpuMillis, memMi int64, class string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -48,20 +51,20 @@ func resourceMi(mi int64) resource.Quantity {
 
 func TestProfileKey_TieringAndClass(t *testing.T) {
 	p := testPod(250, 128, "latency")
-	key := apis.GetProfileKey(p, constants.Edge)
-	if key.CPUTier != "small" || key.Class != "latency" || key.Location != constants.Edge {
+	key := apis.GetProfileKey(p, constants.LocalCluster)
+	if key.CPUTier != "small" || key.Class != "latency" || key.ClusterID != constants.LocalCluster {
 		t.Fatalf("unexpected key: %+v", key)
 	}
 	p2 := testPod(2500, 1024, "unknown")
-	key2 := apis.GetProfileKey(p2, constants.Cloud)
+	key2 := apis.GetProfileKey(p2, cloudCluster)
 	if key2.CPUTier != "large" || key2.Class != "batch" {
 		t.Fatalf("class normalization failed: %+v", key2)
 	}
 }
 
 func TestProfileStore_UpdateAndHistogram(t *testing.T) {
-	ps := NewProfileStore(fake.NewSimpleClientset(), 100, DefaultHistogramConfig())
-	key := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
+	ps := NewProfileStore(fake.NewClientset(), 100, DefaultHistogramConfig())
+	key := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: constants.LocalCluster}
 
 	// Feed some durations
 	for _, v := range []float64{40, 45, 50, 55, 60, 100, 150} {
@@ -77,11 +80,11 @@ func TestProfileStore_UpdateAndHistogram(t *testing.T) {
 }
 
 func TestProfileStore_LRUEviction(t *testing.T) {
-	ps := NewProfileStore(fake.NewSimpleClientset(), 2, DefaultHistogramConfig())
+	ps := NewProfileStore(fake.NewClientset(), 2, DefaultHistogramConfig())
 	keys := []apis.ProfileKey{
-		{Class: "latency", CPUTier: "small", Location: constants.Edge},
-		{Class: "batch", CPUTier: "small", Location: constants.Edge},
-		{Class: "throughput", CPUTier: "small", Location: constants.Edge},
+		{Class: "latency", CPUTier: "small", ClusterID: constants.LocalCluster},
+		{Class: "batch", CPUTier: "small", ClusterID: constants.LocalCluster},
+		{Class: "throughput", CPUTier: "small", ClusterID: constants.LocalCluster},
 	}
 	for _, k := range keys {
 		ps.Update(k, apis.ProfileUpdate{ObservedDurationMs: 10})
@@ -98,8 +101,8 @@ func TestProfileStore_LRUEviction(t *testing.T) {
 }
 
 func TestProfileStore_Serialization(t *testing.T) {
-	ps := NewProfileStore(fake.NewSimpleClientset(), 10, DefaultHistogramConfig())
-	k := apis.ProfileKey{Class: "latency", CPUTier: "small", Location: constants.Edge}
+	ps := NewProfileStore(fake.NewClientset(), 10, DefaultHistogramConfig())
+	k := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: constants.LocalCluster}
 	ps.Update(k, apis.ProfileUpdate{ObservedDurationMs: 42, SLOMet: true})
 
 	// Export and check we have data

@@ -21,19 +21,20 @@ import (
 	"kubernetes-hybrid-scheduler/controller/pkg/util"
 )
 
-type decider interface {
-	Decide(pod *corev1.Pod, slo *apis.SLO, local *apis.LocalState, wan *apis.WANState) apis.Result
+//go:generate mockery --name=Decider --output=../../gen/mocks
+type Decider interface {
+	Decide(pod *corev1.Pod, slo *apis.SLO, states map[constants.ClusterID]*apis.ClusterState) apis.Result
 }
 
 type Server struct {
-	dec        decider
+	dec        Decider
 	tel        telemetry.Collector
 	limiter    *rate.Limiter
 	kubeClient kubernetes.Interface
 }
 
 func NewServer(
-	dec decider,
+	dec Decider,
 	tel telemetry.Collector,
 	limiter *rate.Limiter,
 	kubeClient kubernetes.Interface,
@@ -48,9 +49,7 @@ func NewServer(
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	defer func() {
-		admissionLatency.Observe(time.Since(start).Seconds())
-	}()
+	defer func() { admissionLatency.Observe(time.Since(start).Seconds()) }()
 
 	if !s.limiter.Allow() {
 		klog.Warning("Admission rate limit exceeded")
@@ -59,31 +58,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	klog.V(4).Infof("Webhook request from %s", r.RemoteAddr)
-
 	if r.Method != http.MethodPost {
-		klog.Warning("Received non-POST request")
 		http.Error(w, "invalid method", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var review admissionv1.AdmissionReview
 	if err := json.NewDecoder(r.Body).Decode(&review); err != nil {
-		klog.Errorf("Failed to decode admission review: %v", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	req := review.Request
 	if req == nil {
-		klog.Error("Admission request is nil")
 		writeResponse(w, review, deny(fmt.Errorf("nil request")))
 		return
 	}
-
-	klog.V(3).Infof(
-		"Processing %s %s/%s (UID=%s)",
-		req.Operation, req.Kind.Kind, req.Name, req.UID)
 
 	if req.Kind.Kind != "Pod" || req.Operation != admissionv1.Create {
 		writeResponse(w, review, allow())
@@ -92,22 +82,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var pod corev1.Pod
 	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
-		klog.Errorf("Failed to decode pod: %v", err)
 		writeResponse(w, review, deny(err))
 		return
 	}
 
 	if pod.Labels[constants.LabelManaged] != "true" {
-		klog.V(4).Infof("%s: Not managed, skipping",
-			util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
 		writeResponse(w, review, allow())
 		return
 	}
 
-	if pod.Annotations != nil &&
-		pod.Annotations[constants.AnnotationDecision] != "" {
-		klog.V(4).Infof("%s: Already decided, skipping",
-			util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
+	if pod.Annotations != nil && pod.Annotations[constants.AnnotationDecision] != "" {
 		writeResponse(w, review, allow())
 		return
 	}
@@ -130,28 +114,25 @@ func (s *Server) processScheduling(
 	s.tel.LockForDecision()
 	defer s.tel.UnlockForDecision()
 
-	ctx2, cancel2 := context.WithTimeout(ctx, 500*time.Millisecond)
-	freshLocal, err := s.tel.GetLocalState(ctx2)
-	cancel2()
-
-	if err != nil {
-		klog.Warningf("%s: Failed to refresh local state: %v, using cache",
-			util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)), err)
+	// Collect state for all clusters
+	clusterStates := make(map[constants.ClusterID]*apis.ClusterState)
+	for _, id := range s.tel.GetAllClusterIDs() {
+		ctx2, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		state, err := s.tel.GetClusterState(ctx2, id)
+		cancel()
+		if err != nil {
+			klog.Warningf("Failed to get state for cluster %s: %v, using cache", id, err)
+			state = s.tel.GetCachedClusterState(id)
+		}
+		if state != nil {
+			clusterStates[id] = state
+		}
 	}
 
-	local := freshLocal
-	if local == nil {
-		local = s.tel.GetCachedLocalState()
-	}
+	result := s.dec.Decide(pod, sloData, clusterStates)
 
-	wan := s.tel.GetCachedWANState()
-
-	klog.V(4).Infof("%s: Telemetry quality: complete=%v confidence=%.2f age=%v",
-		util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
-		local.IsCompleteSnapshot, local.MeasurementConfidence, local.StaleDuration)
-
-	result := s.dec.Decide(pod, sloData, local, wan)
-
+	// Create event
+	podID := util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID))
 	_, err = s.kubeClient.CoreV1().Events(pod.Namespace).Create(ctx, &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s.%x", pod.Name, time.Now().UnixNano()),
@@ -163,48 +144,29 @@ func (s *Server) processScheduling(
 			Name:      pod.Name,
 			UID:       pod.UID,
 		},
-		Reason: "SchedulingDecision",
-		Message: fmt.Sprintf("Scheduled to %s: %s (ETA: %.0fms, conf: %.2f, WAN RTT: %dms)",
-			result.Location, result.Reason, result.PredictedETAMs, local.MeasurementConfidence, result.WanRttMs),
+		Reason:         "SchedulingDecision",
+		Message:        fmt.Sprintf("Scheduled to %s: %s (ETA: %.0fms)", result.Location, result.Reason, result.PredictedETAMs),
 		Type:           corev1.EventTypeNormal,
 		FirstTimestamp: metav1.NewTime(time.Now()),
 		LastTimestamp:  metav1.NewTime(time.Now()),
 		Count:          1,
 	}, metav1.CreateOptions{})
 	if err != nil {
-		klog.Warningf("%s: Failed to create event", util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)))
+		klog.Warningf("%s: Failed to create event", podID)
 	}
 
-	klog.Infof("%s: Decision: %s (reason=%s, predicted_eta=%.0fms, wan_rtt=%dms, conf=%.2f)",
-		util.PodID(pod.Namespace, pod.Name, pod.GenerateName, string(pod.UID)),
-		result.Location, result.Reason, result.PredictedETAMs, result.WanRttMs,
-		local.MeasurementConfidence)
-
+	klog.Infof("%s: Decision: %s (reason=%s, eta=%.0fms)", podID, result.Location, result.Reason, result.PredictedETAMs)
 	return s.buildPatchResponse(pod, result)
 }
 
-func writeResponse(
-	w http.ResponseWriter,
-	in admissionv1.AdmissionReview,
-	resp *admissionv1.AdmissionResponse,
-) {
+func writeResponse(w http.ResponseWriter, in admissionv1.AdmissionReview, resp *admissionv1.AdmissionResponse) {
 	resp.UID = in.Request.UID
-	out := admissionv1.AdmissionReview{
-		TypeMeta: in.TypeMeta,
-		Response: resp,
-	}
-
+	out := admissionv1.AdmissionReview{TypeMeta: in.TypeMeta, Response: resp}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-func allow() *admissionv1.AdmissionResponse {
-	return &admissionv1.AdmissionResponse{Allowed: true}
-}
-
+func allow() *admissionv1.AdmissionResponse { return &admissionv1.AdmissionResponse{Allowed: true} }
 func deny(err error) *admissionv1.AdmissionResponse {
-	return &admissionv1.AdmissionResponse{
-		Allowed: false,
-		Result:  &metav1.Status{Message: err.Error()},
-	}
+	return &admissionv1.AdmissionResponse{Allowed: false, Result: &metav1.Status{Message: err.Error()}}
 }

@@ -58,11 +58,11 @@ type ClassConfig struct {
 }
 
 type LyapunovStats struct {
-	TotalDecisions  int64
-	EdgeDecisions   int64
-	CloudDecisions  int64
-	ViolationsEdge  int64
-	ViolationsCloud int64
+	TotalDecisions   int64
+	LocalDecisions   int64
+	RemoteDecisions  int64
+	ViolationsLocal  int64
+	ViolationsRemote int64
 
 	// Magnitude queue stats
 	AvgVirtualQueue float64
@@ -194,126 +194,101 @@ func (l *LyapunovScheduler) getClassConfig(class string) *ClassConfig {
 //     - W_local = β*localCost + Z_c*localViolation + Zp_c*localProbability
 //     - W_cloud = β*cloudCost + Z_c*cloudViolation + Zp_c*cloudProbability
 //  4. Choose location with minimum weight (respecting feasibility)
-func (l *LyapunovScheduler) Decide(
+//
+// DecideN selects the best cluster from N candidates using Drift-plus-Penalty.
+//
+// Returns the index into candidates and the chosen weight.
+func (l *LyapunovScheduler) DecideN(
 	class string,
 	deadline float64,
-	localETA float64,
-	cloudETA float64,
-	localProfile *apis.ProfileStats,
-	cloudProfile *apis.ProfileStats,
-	localFeasible bool,
-	localFeasibilityReason string,
-	cloudFeasible bool,
-	cloudFeasibilityReason string,
-	localCost float64,
-	cloudCost float64,
+	candidates []candidateEval,
 	probCalc apis.ProbabilityCalculator,
-) (location constants.Location, weight float64) {
+) (bestIdx int, bestWeight float64) {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Periodic decay
 	cfg := l.getClassConfig(class)
 	if time.Since(l.lastDecay) > cfg.DecayInterval {
 		l.applyDecay()
 	}
 
-	// Get virtual queues
 	Z := l.virtualQueues[class]
 	Zp := l.virtualProbQueues[class]
 
-	// Initialize stats
 	if l.stats[class] == nil {
 		l.stats[class] = &LyapunovStats{LastUpdated: time.Now()}
 	}
 
-	// Compute expected violations (magnitude)
-	localViolation := math.Max(0, localETA-deadline)
-	cloudViolation := math.Max(0, cloudETA-deadline)
-
-	// Compute violation probabilities from profile histograms
-	localProbability := probCalc(localProfile, deadline)
-	cloudProbability := probCalc(cloudProfile, deadline)
-
-	// Compute drift-plus-penalty weights
-	// Weight = β*Cost + Z*Violation_magnitude + Zp*Violation_probability
 	beta := cfg.Beta
 	probWeight := cfg.ProbabilityWeight
 
-	localWeight := beta*localCost + Z*localViolation + probWeight*Zp*localProbability
-	cloudWeight := beta*cloudCost + Z*cloudViolation + probWeight*Zp*cloudProbability
+	bestIdx = -1
+	bestWeight = math.Inf(1)
 
-	klog.V(5).Infof(
-		"Lyapunov decision: class=%s Z=%.2f Zp=%.2f deadline=%.0fms β=%.2f | "+
-			"Edge: ETA=%.0fms viol=%.0fms prob=%.3f (n=%d conf=%.2f) cost=%.2f weight=%.2f | "+
-			"Cloud: ETA=%.0fms viol=%.0fms prob=%.3f (n=%d conf=%.2f) cost=%.2f weight=%.2f",
-		class, Z, Zp, deadline, beta,
-		localETA, localViolation, localProbability, localProfile.Count, localProfile.ConfidenceScore, localCost, localWeight,
-		cloudETA, cloudViolation, cloudProbability, cloudProfile.Count, cloudProfile.ConfidenceScore, cloudCost, cloudWeight,
-	)
-
-	// **RULE 1: If the edge is fundamentally too small (Hard Infeasibility), it can NEVER be chosen.**
-	if localFeasibilityReason == constants.ReasonInfeasibleResourcesHard {
-		klog.V(3).Info("Edge is Hard Infeasible due to resource limits. Forcing cloud decision.")
-		l.stats[class].TotalDecisions++
-		l.stats[class].CloudDecisions++
-		// Return cloud, even if the cloud is also infeasible. It's the only option that might run.
-		return constants.Cloud, cloudWeight
+	// Track which candidates have hard infeasibility
+	type evaluated struct {
+		weight         float64
+		feasible       bool
+		hardInfeasible bool
+		penalty        float64 // for all-infeasible tiebreaker
 	}
+	evals := make([]evaluated, len(candidates))
 
-	// At this point, we know the edge is at least physically capable of running the pod eventually.
+	for i, c := range candidates {
+		violation := math.Max(0, c.eta-deadline)
+		probability := probCalc(c.profile, deadline)
+		w := beta*c.cost + Z*violation + probWeight*Zp*probability
 
-	// Standard cases where one location is clearly the only feasible option.
-	if localFeasible && !cloudFeasible {
-		l.stats[class].TotalDecisions++
-		l.stats[class].EdgeDecisions++
-		return constants.Edge, localWeight
-	}
-	if cloudFeasible && !localFeasible {
-		l.stats[class].TotalDecisions++
-		l.stats[class].CloudDecisions++
-		return constants.Cloud, cloudWeight
-	}
-
-	// Case: Both locations are feasible. Choose the one with the minimum weight.
-	if localFeasible && cloudFeasible {
-		if localWeight <= cloudWeight {
-			l.stats[class].TotalDecisions++
-			l.stats[class].EdgeDecisions++
-			return constants.Edge, localWeight
+		hardInfeasible := c.feasibilityReason == constants.ReasonInfeasibleResourcesHard
+		evals[i] = evaluated{
+			weight:         w,
+			feasible:       c.feasible,
+			hardInfeasible: hardInfeasible,
+			penalty:        violation + probability*deadline,
 		}
-		l.stats[class].TotalDecisions++
-		l.stats[class].CloudDecisions++
-		return constants.Cloud, cloudWeight
+
+		klog.V(5).Infof(
+			"Lyapunov [%s] cluster=%s ETA=%.0fms viol=%.0fms prob=%.3f cost=%.2f weight=%.2f feasible=%v",
+			class, c.clusterID, c.eta, violation, probability, c.cost, w, c.feasible,
+		)
 	}
 
-	// Case: Both locations are infeasible (but the edge is not Hard-Infeasible).
-	// This means edge might be Soft-Infeasible (queueing) and/or Time-Infeasible.
-	if !localFeasible && !cloudFeasible {
-		klog.V(4).Info("Both locations are infeasible (edge is not hard-infeasible), choosing least bad option...")
-
-		// The original logic is now safe to use because we've already handled the case
-		// where the edge is physically incapable of running the pod.
-		// We can simply pick the option with the lower predicted performance penalty.
-		localPenalty := localViolation + localProbability*deadline
-		cloudPenalty := cloudViolation + cloudProbability*deadline
-
-		if localPenalty <= cloudPenalty {
-			l.stats[class].TotalDecisions++
-			l.stats[class].EdgeDecisions++
-			return constants.Edge, localWeight
+	// Pass 1: pick best feasible candidate (excluding hard-infeasible)
+	for i, ev := range evals {
+		if ev.feasible && !ev.hardInfeasible && ev.weight < bestWeight {
+			bestIdx = i
+			bestWeight = ev.weight
 		}
-		l.stats[class].TotalDecisions++
-		l.stats[class].CloudDecisions++
-		return constants.Cloud, cloudWeight
 	}
 
-	// Safeguard for any unhandled logic paths.
-	klog.Error("Reached UNEXPECTED fallthrough in Lyapunov decision logic. Defaulting to cloud.")
+	// Pass 2: if no feasible, pick best non-hard-infeasible by penalty
+	if bestIdx == -1 {
+		bestPenalty := math.Inf(1)
+		for i, ev := range evals {
+			if !ev.hardInfeasible && ev.penalty < bestPenalty {
+				bestIdx = i
+				bestPenalty = ev.penalty
+				bestWeight = ev.weight
+			}
+		}
+	}
+
+	// Pass 3: absolute fallback (all hard-infeasible — shouldn't happen)
+	if bestIdx == -1 {
+		klog.Error("All clusters are hard-infeasible, picking first candidate")
+		bestIdx = 0
+		bestWeight = evals[0].weight
+	}
+
 	l.stats[class].TotalDecisions++
-	l.stats[class].CloudDecisions++
-	return constants.Cloud, cloudWeight
+	if constants.IsLocal(candidates[bestIdx].clusterID) {
+		l.stats[class].LocalDecisions++
+	} else {
+		l.stats[class].RemoteDecisions++
+	}
+
+	return bestIdx, bestWeight
 }
 
 // UpdateVirtualQueue updates virtual queues after observing actual completion.
@@ -376,10 +351,10 @@ func (l *LyapunovScheduler) UpdateVirtualQueue(
 	stats.CompletionCount++
 	if actualViolation > 0 {
 		stats.ViolationCount++
-		if location == constants.Edge {
-			stats.ViolationsEdge++
+		if location == constants.LocalCluster {
+			stats.ViolationsLocal++
 		} else {
-			stats.ViolationsCloud++
+			stats.ViolationsRemote++
 		}
 	}
 
@@ -470,10 +445,10 @@ func (l *LyapunovScheduler) GetStats(class string) *LyapunovStats {
 	// Return a copy
 	return &LyapunovStats{
 		TotalDecisions:     stats.TotalDecisions,
-		EdgeDecisions:      stats.EdgeDecisions,
-		CloudDecisions:     stats.CloudDecisions,
-		ViolationsEdge:     stats.ViolationsEdge,
-		ViolationsCloud:    stats.ViolationsCloud,
+		LocalDecisions:     stats.LocalDecisions,
+		RemoteDecisions:    stats.RemoteDecisions,
+		ViolationsLocal:    stats.ViolationsLocal,
+		ViolationsRemote:   stats.ViolationsRemote,
 		AvgVirtualQueue:    stats.AvgVirtualQueue,
 		MaxVirtualQueue:    stats.MaxVirtualQueue,
 		AvgProbQueue:       stats.AvgProbQueue,
@@ -516,10 +491,10 @@ func (l *LyapunovScheduler) ExportState() map[string]interface{} {
 	for k, v := range l.stats {
 		statsMap[k] = &LyapunovStats{
 			TotalDecisions:     v.TotalDecisions,
-			EdgeDecisions:      v.EdgeDecisions,
-			CloudDecisions:     v.CloudDecisions,
-			ViolationsEdge:     v.ViolationsEdge,
-			ViolationsCloud:    v.ViolationsCloud,
+			LocalDecisions:     v.LocalDecisions,
+			RemoteDecisions:    v.RemoteDecisions,
+			ViolationsLocal:    v.ViolationsLocal,
+			ViolationsRemote:   v.ViolationsRemote,
 			AvgVirtualQueue:    v.AvgVirtualQueue,
 			MaxVirtualQueue:    v.MaxVirtualQueue,
 			AvgProbQueue:       v.AvgProbQueue,
