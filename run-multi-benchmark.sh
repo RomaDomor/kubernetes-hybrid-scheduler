@@ -28,8 +28,8 @@ RR_NODE_LABEL_KEY="node.hybrid.io/location"
 RR_CLUSTERS="edge,fog,cloud"
 
 # Default benchmark parameters (can be overridden by command-line flags)
-DEFAULT_NAMESPACE="cloud"
-DEFAULT_LOCAL_NAMESPACE="local-clients"
+DEFAULT_NAMESPACE="offload"
+DEFAULT_LOCAL_NAMESPACE="local"
 DEFAULT_MANIFESTS_DIR="./manifests/workloads"
 DEFAULT_RESULTS_ROOT="./results"
 DEFAULT_KUBECONFIG="$HOME/.kube/config"
