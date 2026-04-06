@@ -5,8 +5,12 @@ metadata:
   labels:
     app: stream-batch-job
   annotations:
+    # Latency-class: should stay on edge to avoid WAN hop overhead.
+    # Under round-robin or single-cluster, this may land on cloud/fog, adding
+    # scheduling overhead and potential resource contention.
     slo.hybrid.io/class: "latency"
-    slo.hybrid.io/deadlineMs: "60000" # 60-second deadline to process the entire batch
+    slo.hybrid.io/deadlineMs: "60000"
+    slo.hybrid.io/preferEdge: "true"
 spec:
   backoffLimit: 0
   template:
@@ -15,8 +19,9 @@ spec:
         app: stream-batch-job
         scheduling.hybrid.io/managed: "true"
       annotations:
-        slo.hybrid.io/class: "latency" # Class is 'latency' because each individual operation is latency-sensitive
+        slo.hybrid.io/class: "latency"
         slo.hybrid.io/deadlineMs: "60000"
+        slo.hybrid.io/preferEdge: "true"
     spec:
       restartPolicy: Never
       containers:

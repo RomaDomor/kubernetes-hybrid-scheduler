@@ -5,9 +5,14 @@ metadata:
   labels:
     app: ml-infer
   annotations:
+    # Increased model size (800MB) and matrix (800x800 × 12 reps) so that
+    # cloud (24GB RAM, 8 CPUs) finishes well within deadline while edge
+    # (8GB RAM, 4 CPUs under contention) struggles more.
+    # Deadline extended to 90s to account for pip install startup overhead.
     slo.hybrid.io/class: "batch"
-    slo.hybrid.io/latencyTargetMs: "250"
-    slo.hybrid.io/deadlineMs: "30000"
+    slo.hybrid.io/latencyTargetMs: "350"
+    slo.hybrid.io/deadlineMs: "90000"
+    slo.hybrid.io/preferCloud: "true"
 spec:
   backoffLimit: 0
   template:
@@ -17,8 +22,9 @@ spec:
         app: ml-infer
       annotations:
         slo.hybrid.io/class: "batch"
-        slo.hybrid.io/latencyTargetMs: "250"
-        slo.hybrid.io/deadlineMs: "30000"
+        slo.hybrid.io/latencyTargetMs: "350"
+        slo.hybrid.io/deadlineMs: "90000"
+        slo.hybrid.io/preferCloud: "true"
     spec:
       restartPolicy: Never
       containers:
@@ -26,13 +32,13 @@ spec:
           image: python:3.11-slim
           env:
             - name: MAT
-              value: "600"
+              value: "800"
             - name: REPS
-              value: "8"
+              value: "12"
             - name: MODEL_MB
-              value: "200"
+              value: "800"
             - name: THREADS
-              value: "1"
+              value: "2"
           command:
             - bash
             - -c
@@ -58,8 +64,8 @@ spec:
               PY
           resources:
             requests:
-              cpu: "1000m"
-              memory: "1Gi"
-            limits:
-              cpu: "2000m"
+              cpu: "1500m"
               memory: "2Gi"
+            limits:
+              cpu: "3000m"
+              memory: "3Gi"
