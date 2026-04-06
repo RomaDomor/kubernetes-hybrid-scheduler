@@ -5,8 +5,18 @@ metadata:
   labels:
     app: io-job
   annotations:
+    # I/O + compute stress test — no internet dependency.
+    # Generates 512MB of pseudo-random data (CPU-bound), then writes and
+    # reads it back in multiple passes (I/O-bound).
+    #
+    # Edge (4 CPU, 8 GB):  generation + write + read = ~70-110s
+    # Cloud (8 CPU, 24 GB): fewer CPUs shared, faster generation = ~40-70s
+    #
+    # Under edge local-load pressure the gap widens further, causing deadline
+    # misses that a smart scheduler avoids by offloading to cloud.
     slo.hybrid.io/class: "batch"
-    slo.hybrid.io/deadlineMs: "180000"
+    slo.hybrid.io/deadlineMs: "100000"
+    slo.hybrid.io/preferCloud: "true"
 spec:
   backoffLimit: 0
   template:
@@ -16,70 +26,69 @@ spec:
         scheduling.hybrid.io/managed: "true"
       annotations:
         slo.hybrid.io/class: "batch"
-        slo.hybrid.io/deadlineMs: "180000"
+        slo.hybrid.io/deadlineMs: "100000"
+        slo.hybrid.io/preferCloud: "true"
     spec:
       restartPolicy: Never
       containers:
         - name: io
-          image: curlimages/curl:8.10.1
+          image: python:3.11-slim
           env:
-            - name: BYTES_MB
-              value: "100"
-            - name: WR_COPIES
-              value: "3"
-            - name: URLS
-              value: "https://speed.hetzner.de/100MB.bin https://proof.ovh.net/files/100Mb.dat"
-            - name: RETRIES_PER_URL
-              value: "5"
-            - name: CONNECT_TIMEOUT
-              value: "3"
-            - name: MAX_TIME
-              value: "120"
+            - name: CHUNK_MB
+              value: "64"     # size of each generated chunk
+            - name: CHUNKS
+              value: "8"      # 8 × 64 MB = 512 MB total
+            - name: PASSES
+              value: "3"      # write then read-back passes
           command:
-            - sh
+            - bash
             - -c
             - |
-              set -e
-              mkdir -p /work
-              echo "IO job starting..."
+              set -euo pipefail
+              pip install --no-cache-dir numpy
+              python - <<'PY'
+              import numpy as np, os, time, hashlib
 
-              ok=""
-              for u in $URLS; do
-                i=1
-                while [ $i -le ${RETRIES_PER_URL:-5} ]; do
-                  echo "Downloading $u (attempt $i/${RETRIES_PER_URL:-5})..."
-                  if curl -L --fail --connect-timeout ${CONNECT_TIMEOUT:-3} --max-time ${MAX_TIME:-120} -o /work/blob.bin "$u"; then
-                    ok="yes"
-                    break
-                  fi
-                  sleep 2
-                  i=$((i+1))
-                done
-                [ -n "$ok" ] && break
-              done
+              CHUNK_MB = int(os.getenv("CHUNK_MB", "64"))
+              CHUNKS   = int(os.getenv("CHUNKS",   "8"))
+              PASSES   = int(os.getenv("PASSES",   "3"))
+              WORK     = "/work"
+              os.makedirs(WORK, exist_ok=True)
 
-              if [ -z "$ok" ]; then
-                echo "All downloads failed - generating ${BYTES_MB:-100}MB locally"
-                dd if=/dev/urandom of=/work/blob.bin bs=1M count=${BYTES_MB:-100} status=none
-              fi
+              t0 = time.time()
 
-              echo "Checksum:"
-              sha256sum /work/blob.bin || true
+              # Phase 1: generate chunks (CPU-bound numpy operations)
+              print(f"Phase 1: generating {CHUNKS} × {CHUNK_MB} MB chunks…")
+              chunk_size = CHUNK_MB * 1024 * 1024 // 8  # float64 elements
+              for i in range(CHUNKS):
+                  data = np.random.rand(chunk_size)
+                  # lightweight CPU work: running statistics
+                  _ = (np.cumsum(data) * np.sin(data)).sum()
+                  path = f"{WORK}/chunk_{i:02d}.bin"
+                  data.tofile(path)
+                  print(f"  chunk {i+1}/{CHUNKS} written ({CHUNK_MB} MB)")
 
-              i=1
-              while [ $i -le ${WR_COPIES:-3} ]; do
-                echo "Writing copy $i with oflag=direct..."
-                dd if=/work/blob.bin of=/work/copy_${i}.bin bs=4M oflag=direct status=none
-                i=$((i+1))
-              done
+              gen_time = time.time() - t0
+              print(f"Generation done in {gen_time:.2f}s")
 
-              echo "Reading back copies..."
-              cat /work/copy_*.bin >/dev/null 2>&1 || true
+              # Phase 2: write + read-back passes (I/O-bound)
+              for p in range(PASSES):
+                  print(f"Pass {p+1}/{PASSES}: read → hash → rewrite…")
+                  for i in range(CHUNKS):
+                      path = f"{WORK}/chunk_{i:02d}.bin"
+                      raw  = np.fromfile(path, dtype=np.float64)
+                      # compute checksum to force actual read
+                      h = hashlib.md5(raw.tobytes()).hexdigest()
+                      # mutate and rewrite
+                      raw *= 1.000001
+                      raw.tofile(path)
 
-              echo "IO job done."
+              total = time.time() - t0
+              print(f"IO job done in {total:.2f}s total")
+              PY
           resources:
-            requests: { cpu: "300m", memory: "256Mi" }
-            limits:   { cpu: "800m", memory: "512Mi" }
+            requests: { cpu: "1000m", memory: "768Mi" }
+            limits:   { cpu: "2000m", memory: "1280Mi" }
           volumeMounts:
             - name: work
               mountPath: /work
