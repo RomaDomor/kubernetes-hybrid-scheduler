@@ -13,7 +13,7 @@ JITTER=20
 
 ONE_WAY=$(( RTT / 2 ))
 
-# Egress: only edge->cloud and cloud->edge
+# Shapes all three WAN links: edge↔cloud and edge↔fog
 apply_shape_simple "$RATE" "$ONE_WAY" "$JITTER" "$LOSS"
 
 show_qdisc
