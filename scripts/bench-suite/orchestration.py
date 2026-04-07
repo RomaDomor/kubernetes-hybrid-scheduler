@@ -91,13 +91,15 @@ def parse_args() -> argparse.Namespace:
     )
     sched.add_argument(
         "--rr-node-label-key",
-        default="node.hybrid.io/location",
-        help="Node label key used for round-robin nodeSelector.",
+        default="node.cluster/id",
+        help="Node label key used for round-robin nodeSelector. Must match labels on target nodes. "
+             "Use 'node.cluster/id' to match the controller's remote-cluster label.",
     )
     sched.add_argument(
         "--rr-clusters",
-        default="edge,fog,cloud",
-        help="Comma-separated ordered list of cluster-location label values for round-robin.",
+        default="cloud-1",
+        help="Comma-separated ordered list of node label values for round-robin. "
+             "Must match 'node.cluster/id' values on virtual nodes (e.g. 'cloud-1,cloud-2').",
     )
 
     # WAN Emulation
@@ -123,9 +125,9 @@ class RoundRobinPlacer:
     Assigns each submitted workload manifest to the next cluster location in
     a fixed rotation by injecting a nodeSelector into the pod template spec.
 
-    The rotation order is determined by ``clusters`` (e.g. ["edge","fog","cloud"]).
+    The rotation order is determined by ``clusters`` (e.g. ["cloud-1","cloud-2"]).
     The ``label_key`` must match a real node label on your clusters
-    (default: ``node.hybrid.io/location``).
+    (default: ``node.cluster/id``, matching the controller's remote-cluster label).
     """
 
     def __init__(self, clusters: list[str], label_key: str):
@@ -352,11 +354,6 @@ def wait_for_all_jobs(
             record_job(batch_v1, v1, ns_offloaded, results_dir, job_name, args.timeout_job_sec)
         except (TimeoutError, RuntimeError) as e:
             log(f"ERROR: Job {job_name} in {ns_offloaded} failed or timed out: {e}")
-
-    try:
-        record_job(batch_v1, v1, ns_local, results_dir, "stream-data-generator", args.timeout_job_sec)
-    except (TimeoutError, RuntimeError) as e:
-        log(f"ERROR: Job stream-data-generator in {ns_local} failed or timed out: {e}")
 
 
 # ---------------------------------------------------------------------------

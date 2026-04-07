@@ -7,7 +7,7 @@ from kubernetes.client import ApiException, V1DeleteOptions
 from kubernetes.stream import stream
 from utils import log, read_yaml_multi
 
-CLIENT_WORKLOADS = {("Pod", "toolbox"), ("Job", "stream-data-generator")}
+CLIENT_WORKLOADS = {("Pod", "toolbox")}
 
 def kube_init(context: str, kubeconfig_path: str):
     """Initializes Kubernetes client from kubeconfig or in-cluster config."""
@@ -40,12 +40,6 @@ def k_apply(ns_offloaded: str, ns_local: str, file_path: Path):
     for doc in docs:
         kind, name = doc.get("kind"), (doc.get("metadata") or {}).get("name")
         if (kind, name) in CLIENT_WORKLOADS:
-            if name == "stream-data-generator" and kind == "Job":
-                # Special handling for stream-data-generator env var
-                for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
-                    for env_var in container.get("env", []):
-                        if env_var.get("name") == "PROCESSOR_URL":
-                            env_var["value"] = f"http://stream-processor.{ns_offloaded}:8080"
             local_docs.append(doc)
         else:
             offloaded_docs.append(doc)
@@ -108,11 +102,16 @@ def get_job_logs(v1: client.CoreV1Api, ns: str, job_name: str) -> str:
         pods = v1.list_namespaced_pod(namespace=ns, label_selector=f"job-name={job_name}")
         logs = []
         for pod in pods.items:
-            try:
-                pod_logs = v1.read_namespaced_pod_log(name=pod.metadata.name, namespace=ns)
-                logs.append(f"=== Pod {pod.metadata.name} ===\n{pod_logs}")
-            except ApiException as e:
-                logs.append(f"=== Pod {pod.metadata.name} === ERROR: {e}")
+            containers = [c.name for c in (pod.spec.containers or [])]
+            for container in containers:
+                try:
+                    pod_logs = v1.read_namespaced_pod_log(
+                        name=pod.metadata.name, namespace=ns, container=container
+                    )
+                    header = f"=== Pod {pod.metadata.name}" + (f" [{container}]" if len(containers) > 1 else "") + " ==="
+                    logs.append(f"{header}\n{pod_logs}")
+                except ApiException as e:
+                    logs.append(f"=== Pod {pod.metadata.name} [{container}] === ERROR: {e}")
         result = "\n".join(logs)
         sys.stdout.write(result)
         return result
