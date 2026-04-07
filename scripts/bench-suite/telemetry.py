@@ -146,6 +146,8 @@ def get_nodes_info(v1: client.CoreV1Api, out_path: Path):
             mem     = n.status.allocatable.get("memory", "?")
             # Show only hybrid/liqo-related labels to keep the line readable
             interesting_keys = {
+                "node.role/edge",
+                "node.cluster/id",
                 "node.hybrid.io/location",
                 "liqo.io/remote-cluster",
                 "topology.kubernetes.io/zone",
@@ -171,24 +173,31 @@ def _detect_cluster_type(
     rr_node_label: str,
 ) -> str:
     """
-    Classify a node as edge / fog / cloud using the following heuristics
+    Classify a node as edge / cloud / etc. using the following heuristics
     (first match wins):
 
-    1. The label key given by *rr_node_label* (e.g. ``node.hybrid.io/location``).
-    2. ``liqo.io/remote-cluster`` = "true"  → "remote"
-    3. Node name contains "cloud" / "fog" / "edge" substrings.
-    4. Fallback: "edge" (assume local cluster if nothing matches).
+    1. Controller-native labels: ``node.role/edge=true`` → "edge",
+       ``node.cluster/id`` → its value (e.g. "cloud-1").
+    2. Explicit RR location label (e.g. ``node.hybrid.io/location``).
+    3. ``liqo.io/remote-cluster`` = "true"  → derived from cluster-id or "remote".
+    4. Node name contains "cloud" / "fog" / "edge" substrings.
+    5. Fallback: "edge" (assume local cluster if nothing matches).
     """
     labels = (node.metadata.labels or {}) if node else {}
     node_name = (node.metadata.name or "").lower() if node else ""
 
-    # 1. Explicit location label
+    # 1. Controller-native node labels (most reliable for smart-scheduler mode)
+    if labels.get("node.role/edge") == "true":
+        return "edge"
+    if "node.cluster/id" in labels:
+        return labels["node.cluster/id"]
+
+    # 2. Explicit RR location label
     if rr_node_label and rr_node_label in labels:
         return labels[rr_node_label]
 
-    # 2. Liqo remote-cluster label
+    # 3. Liqo remote-cluster label
     if labels.get("liqo.io/remote-cluster") == "true":
-        # Try to get a more specific name from the remote cluster ID
         cluster_id = labels.get("liqo.io/remote-cluster-id", "")
         if "cloud" in cluster_id.lower():
             return "cloud"
@@ -196,12 +205,12 @@ def _detect_cluster_type(
             return "fog"
         return "remote"
 
-    # 3. Node name heuristics
+    # 4. Node name heuristics
     for keyword in ("cloud", "fog", "edge"):
         if keyword in node_name:
             return keyword
 
-    # 4. Fallback
+    # 5. Fallback
     return "edge"
 
 

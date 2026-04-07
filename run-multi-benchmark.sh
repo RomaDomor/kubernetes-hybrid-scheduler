@@ -16,16 +16,20 @@ SCHEDULER_MODES=("smart" "single-cluster" "liqo-native" "round-robin")
 
 # Helm args used when deploying the smart scheduler (tuned-aggressive).
 # Only applied for the "smart" mode; the others uninstall the webhook.
-SMART_HELM_PARAMS="--set config.edgeCostFactor='0.1' --set config.cloudCostFactor='0.5' --set config.lyapunovBeta='0.8'"
+# costFactors format: "local=0,<cluster-id>=<cost>" matching REMOTE_ENDPOINTS IDs.
+SMART_HELM_PARAMS="--set config.costFactors='local=0,cloud-1=1.0,fog-1=0.5' --set config.lyapunovBeta='0.8'"
 
-# Node-location label key on your nodes (used by round-robin nodeSelector).
-# Change this to match whatever label your cluster nodes carry.
-# Example: "liqo.io/remote-cluster", "topology.kubernetes.io/zone"
-RR_NODE_LABEL_KEY="node.hybrid.io/location"
+# Remote cluster endpoints passed to the controller: "cloud-1=<ip>,cloud-2=<ip>"
+# These IDs must match the node.cluster/id labels on the virtual nodes.
+REMOTE_ENDPOINTS="cloud-1=10.20.0.3,fog-1=10.30.0.3"
 
-# Ordered list of cluster-location label values for round-robin cycling.
-# Must match the actual values on your nodes.
-RR_CLUSTERS="edge,fog,cloud"
+# Node label key on virtual nodes used by round-robin nodeSelector.
+# Must match the node.cluster/id label key set by the controller on virtual nodes.
+RR_NODE_LABEL_KEY="node.cluster/id"
+
+# Ordered list of cluster IDs for round-robin cycling.
+# Must match the actual node.cluster/id label values on virtual nodes.
+RR_CLUSTERS="cloud-1,fog-1"
 
 # Default benchmark parameters (can be overridden by command-line flags)
 DEFAULT_NAMESPACE="offload"
@@ -37,6 +41,7 @@ DEFAULT_WAN_ROUTER="router"
 DEFAULT_PROFILES="clear,good,moderate,poor"
 DEFAULT_LOCAL_LOAD_PROFILES="none,low,medium"
 DEFAULT_VENV_PATH="scripts/bench-suite/.venv"
+DEFAULT_HELM_CHART="./deployments/smart-scheduler"
 DEFAULT_PRE_CLEAN=true
 DEFAULT_RUNS=15
 DEFAULT_IMAGE_TAG="latest"
@@ -67,6 +72,8 @@ OPTIONS:
         --runs N                    Runs per combination (default: ${DEFAULT_RUNS})
         --image-tag TAG             Docker image tag for the smart scheduler (default: ${DEFAULT_IMAGE_TAG})
     -v, --venv-path PATH            Python virtual environment path (default: ${DEFAULT_VENV_PATH})
+        --helm-chart PATH           Path or repo/chart for smart-scheduler Helm chart (default: ${DEFAULT_HELM_CHART})
+        --remote-endpoints CSV      Remote cluster endpoints: "cloud-1=ip,cloud-2=ip" (default: ${REMOTE_ENDPOINTS})
     -s, --sleep SECONDS             Sleep between runs (default: 30)
     -t, --timeout SECONDS           Per-job timeout in seconds (default: 600)
         --pre-clean                 Clean namespaces before each run
@@ -95,6 +102,7 @@ PROFILES_STR="${DEFAULT_PROFILES}"
 LOCAL_LOAD_PROFILES_STR="${DEFAULT_LOCAL_LOAD_PROFILES}"
 MODES_STR="${SCHEDULER_MODES[*]}"  # all modes by default
 VENV_PATH="${DEFAULT_VENV_PATH}"
+HELM_CHART="${DEFAULT_HELM_CHART}"
 SLEEP_BETWEEN=30
 JOB_TIMEOUT=600
 PRE_CLEAN="${DEFAULT_PRE_CLEAN}"
@@ -117,6 +125,8 @@ while [[ $# -gt 0 ]]; do
         --runs)                    RUNS="$2";                     shift 2 ;;
         --image-tag)               IMAGE_TAG="$2";                shift 2 ;;
         -v|--venv-path)            VENV_PATH="$2";                shift 2 ;;
+        --helm-chart)              HELM_CHART="$2";               shift 2 ;;
+        --remote-endpoints)        REMOTE_ENDPOINTS="$2";         shift 2 ;;
         -s|--sleep)                SLEEP_BETWEEN="$2";            shift 2 ;;
         -t|--timeout)              JOB_TIMEOUT="$2";              shift 2 ;;
         --pre-clean)               PRE_CLEAN=true;                shift ;;
@@ -187,6 +197,8 @@ echo "Pre-Clean (pre-run):   ${PRE_CLEAN}"
 echo "Collect Ctrl Metrics:  ${COLLECT_CONTROLLER_METRICS}"
 echo "Dry Run:               ${DRY_RUN}"
 echo "Scheduler Image Tag:   ${IMAGE_TAG}"
+echo "Helm Chart:            ${HELM_CHART}"
+echo "Remote Endpoints:      ${REMOTE_ENDPOINTS}"
 echo "RR Node Label:         ${RR_NODE_LABEL_KEY}"
 echo "RR Clusters:           ${RR_CLUSTERS}"
 echo "========================================="
@@ -278,9 +290,10 @@ configure_scheduler_for_mode() {
     --kubeconfig "${kubeconfig_path}" --ignore-not-found 2>/dev/null || true
 
   if [[ "${mode}" == "smart" ]]; then
-    local helm_cmd="helm install smart-scheduler smart-scheduler/smart-scheduler \
+    local helm_cmd="helm install smart-scheduler '${HELM_CHART}' \
       --set image.tag='${image_tag}' \
       --set logLevel=5 \
+      --set config.remoteEndpoints='${REMOTE_ENDPOINTS}' \
       -n kube-system \
       --kubeconfig '${kubeconfig_path}' \
       ${SMART_HELM_PARAMS} \
