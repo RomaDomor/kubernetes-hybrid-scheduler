@@ -334,17 +334,23 @@ func (e *Engine) isRemoteFeasible(state *apis.ClusterState, reqCPU, reqMem int64
 }
 
 // checkRemoteSafety checks WAN health for a remote cluster.
+// Latency-sensitive SLO classes apply a hard RTT/loss gate since they cannot
+// tolerate WAN jitter. Batch-oriented classes skip the hard gate and let the
+// Lyapunov optimizer weigh WAN overhead against edge resource saturation.
 func (e *Engine) checkRemoteSafety(
 	podID string,
 	clusterID constants.ClusterID,
 	state *apis.ClusterState,
 	slo *apis.SLO,
 ) (apis.Result, bool) {
-	if state.RTTMs > e.config.RTTUnusableMs || state.LossPct > e.config.LossUnusablePct {
-		return apis.Result{}, true // skip this cluster
-	}
 	if state.StaleDuration > 10*time.Minute {
-		return apis.Result{}, true // skip
+		return apis.Result{}, true // skip stale clusters regardless of class
+	}
+	switch slo.Class {
+	case "latency", "interactive":
+		if state.RTTMs > e.config.RTTUnusableMs || state.LossPct > e.config.LossUnusablePct {
+			return apis.Result{}, true
+		}
 	}
 	return apis.Result{}, false
 }
