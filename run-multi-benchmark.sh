@@ -290,13 +290,17 @@ configure_scheduler_for_mode() {
     --kubeconfig "${kubeconfig_path}" --ignore-not-found 2>/dev/null || true
 
   if [[ "${mode}" == "smart" ]]; then
+    # Helm --set uses commas to delimit multiple key=value pairs, so commas
+    # inside a value must be escaped as \, to be treated as literals.
+    local escaped_endpoints="${REMOTE_ENDPOINTS//,/\\,}"
+    local escaped_helm_params="${SMART_HELM_PARAMS//,/\\,}"
     local helm_cmd="helm install smart-scheduler '${HELM_CHART}' \
       --set image.tag='${image_tag}' \
       --set logLevel=5 \
-      --set config.remoteEndpoints='${REMOTE_ENDPOINTS}' \
+      --set config.remoteEndpoints='${escaped_endpoints}' \
       -n kube-system \
       --kubeconfig '${kubeconfig_path}' \
-      ${SMART_HELM_PARAMS} \
+      ${escaped_helm_params} \
       --wait"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
