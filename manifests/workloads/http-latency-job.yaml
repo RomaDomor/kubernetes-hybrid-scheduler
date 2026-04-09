@@ -7,7 +7,7 @@ metadata:
   annotations:
     # This is a throughput-oriented task with a tight deadline
     slo.hybrid.io/class: "throughput"
-    slo.hybrid.io/deadlineMs: "45000" # 45 seconds to complete the whole test
+    slo.hybrid.io/deadlineMs: "50000" # 50 seconds to complete the whole test
 spec:
   activeDeadlineSeconds: 120
   backoffLimit: 0
@@ -18,7 +18,7 @@ spec:
         scheduling.hybrid.io/managed: "true"
       annotations:
         slo.hybrid.io/class: "throughput"
-        slo.hybrid.io/deadlineMs: "45000"
+        slo.hybrid.io/deadlineMs: "50000"
     spec:
       restartPolicy: Never
       # 1. Define the shared volume for communication

@@ -6,7 +6,7 @@ metadata:
     app: cpu-batch
   annotations:
     slo.hybrid.io/class: "batch"
-    slo.hybrid.io/deadlineMs: "100000"
+    slo.hybrid.io/deadlineMs: "105000"
 spec:
   backoffLimit: 0
   template:
@@ -16,7 +16,7 @@ spec:
         scheduling.hybrid.io/managed: "true"
       annotations:
         slo.hybrid.io/class: "batch"
-        slo.hybrid.io/deadlineMs: "100000"
+        slo.hybrid.io/deadlineMs: "105000"
     spec:
       restartPolicy: Never
       containers:

@@ -8,7 +8,7 @@ metadata:
     # Cloud has 24GB vs edge's 8GB — large memory workloads risk OOM-kill or
     # aggressive memory pressure on edge, causing slower completion or failure.
     slo.hybrid.io/class: "batch"
-    slo.hybrid.io/deadlineMs: "100000"
+    slo.hybrid.io/deadlineMs: "112000"
     slo.hybrid.io/preferCloud: "true"
 spec:
   backoffLimit: 0
@@ -19,7 +19,7 @@ spec:
         scheduling.hybrid.io/managed: "true"
       annotations:
         slo.hybrid.io/class: "batch"
-        slo.hybrid.io/deadlineMs: "100000"
+        slo.hybrid.io/deadlineMs: "112000"
         slo.hybrid.io/preferCloud: "true"
     spec:
       restartPolicy: Never

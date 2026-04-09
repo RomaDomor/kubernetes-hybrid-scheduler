@@ -8,10 +8,10 @@ metadata:
     # Increased model size (800MB) and matrix (800x800 × 12 reps) so that
     # cloud (24GB RAM, 8 CPUs) finishes well within deadline while edge
     # (8GB RAM, 4 CPUs under contention) struggles more.
-    # Deadline extended to 90s to account for pip install startup overhead.
+    # Deadline 50s: cloud-1 p95=46s (+8% margin), edge/fog p95>115s (fails). Cloud-required workload.
     slo.hybrid.io/class: "batch"
     slo.hybrid.io/latencyTargetMs: "350"
-    slo.hybrid.io/deadlineMs: "90000"
+    slo.hybrid.io/deadlineMs: "50000"
     slo.hybrid.io/preferCloud: "true"
 spec:
   backoffLimit: 0
@@ -23,7 +23,7 @@ spec:
       annotations:
         slo.hybrid.io/class: "batch"
         slo.hybrid.io/latencyTargetMs: "350"
-        slo.hybrid.io/deadlineMs: "90000"
+        slo.hybrid.io/deadlineMs: "50000"
         slo.hybrid.io/preferCloud: "true"
     spec:
       restartPolicy: Never
