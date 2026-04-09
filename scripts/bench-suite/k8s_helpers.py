@@ -96,12 +96,30 @@ def wait_deployment_ready(apps_v1: client.AppsV1Api, ns: str, name: str, timeout
             return
     raise TimeoutError(f"Deployment {name} did not become ready within {timeout_sec}s")
 
+def _is_virtual_node(v1: client.CoreV1Api, node_name: str) -> bool:
+    """Returns True if the node is a Liqo virtual node (remote cluster)."""
+    if not node_name:
+        return False
+    try:
+        node = v1.read_node(node_name)
+        labels = node.metadata.labels or {}
+        return labels.get("liqo.io/type") == "virtual-node"
+    except ApiException:
+        return False
+
+
 def get_job_logs(v1: client.CoreV1Api, ns: str, job_name: str) -> str:
-    """Gets logs from all pods created by a specific job."""
+    """Gets logs from all pods created by a specific job.
+    Skips pods on Liqo virtual nodes — kubelet log streaming does not work
+    cross-cluster and causes TLS handshake timeouts.
+    """
     try:
         pods = v1.list_namespaced_pod(namespace=ns, label_selector=f"job-name={job_name}")
         logs = []
         for pod in pods.items:
+            if _is_virtual_node(v1, pod.spec.node_name):
+                logs.append(f"=== Pod {pod.metadata.name} [logs unavailable: remote node] ===")
+                continue
             containers = [c.name for c in (pod.spec.containers or [])]
             for container in containers:
                 try:

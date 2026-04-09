@@ -17,7 +17,8 @@ SCHEDULER_MODES=("smart" "single-cluster" "liqo-native" "round-robin")
 # Helm args used when deploying the smart scheduler (tuned-aggressive).
 # Only applied for the "smart" mode; the others uninstall the webhook.
 # costFactors format: "local=0,<cluster-id>=<cost>" matching REMOTE_ENDPOINTS IDs.
-SMART_HELM_PARAMS="--set config.costFactors='local=0,cloud-1=1.0,fog-1=0.5' --set config.lyapunovBeta='0.8'"
+COST_FACTORS="local=0,cloud-1=1.0,fog-1=0.5"
+LYAPUNOV_BETA="0.8"
 
 # Remote cluster endpoints passed to the controller: "cloud-1=<ip>,cloud-2=<ip>"
 # These IDs must match the node.cluster/id labels on the virtual nodes.
@@ -290,26 +291,32 @@ configure_scheduler_for_mode() {
     --kubeconfig "${kubeconfig_path}" --ignore-not-found 2>/dev/null || true
 
   if [[ "${mode}" == "smart" ]]; then
-    # Helm --set uses commas to delimit multiple key=value pairs, so commas
-    # inside a value must be escaped as \, to be treated as literals.
-    local escaped_endpoints="${REMOTE_ENDPOINTS//,/\\,}"
-    local escaped_helm_params="${SMART_HELM_PARAMS//,/\\,}"
-    local helm_cmd="helm install smart-scheduler '${HELM_CHART}' \
-      --set image.tag='${image_tag}' \
-      --set logLevel=5 \
-      --set config.remoteEndpoints='${escaped_endpoints}' \
-      -n kube-system \
-      --kubeconfig '${kubeconfig_path}' \
-      ${escaped_helm_params} \
-      --wait"
+    # Use a temp values file — Helm --set treats commas as key=value separators,
+    # so multi-cluster strings like "cloud-1=ip,fog-1=ip" get silently truncated.
+    local tmp_values
+    tmp_values=$(mktemp /tmp/smart-scheduler-values-XXXXXX.yaml)
+    cat > "${tmp_values}" <<VALEOF
+config:
+  remoteEndpoints: "${REMOTE_ENDPOINTS}"
+  costFactors: "${COST_FACTORS}"
+  lyapunovBeta: "${LYAPUNOV_BETA}"
+VALEOF
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-      echo "  - Would run: ${helm_cmd}"
+      echo "  - Would install smart-scheduler with values:"
+      cat "${tmp_values}"
     else
-      echo "  - Installing smart-scheduler with tuned-aggressive params..."
-      eval "${helm_cmd}"
+      echo "  - Installing smart-scheduler..."
+      helm install smart-scheduler "${HELM_CHART}" \
+        --values "${tmp_values}" \
+        --set image.tag="${image_tag}" \
+        --set logLevel=5 \
+        -n kube-system \
+        --kubeconfig "${kubeconfig_path}" \
+        --wait
       echo "✅ Smart scheduler installed."
     fi
+    rm -f "${tmp_values}"
   else
     echo "  - Mode '${mode}': webhook left uninstalled (default k8s + Liqo scheduling)."
   fi
