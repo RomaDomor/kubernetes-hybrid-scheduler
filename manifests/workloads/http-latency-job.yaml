@@ -5,11 +5,20 @@ metadata:
   labels:
     app: http-latency-job
   annotations:
-    # This is a throughput-oriented task with a tight deadline
-    slo.hybrid.io/class: "throughput"
-    slo.hybrid.io/deadlineMs: "50000" # 50 seconds to complete the whole test
+    # Edge-preferred latency workload: makes N sequential HTTP requests to the
+    # edge-resident data server. When scheduled on edge, the server is local
+    # (~0ms RTT) and all N requests complete in seconds. When scheduled on
+    # cloud/fog, each request traverses the WAN link:
+    #   clear:    ~0ms RTT  → N×0ms  + startup ≈ 8s    → PASS 25s
+    #   good:    ~20ms RTT  → N×20ms + startup ≈ 14s   → PASS 25s
+    #   moderate: ~80ms RTT → N×80ms + startup ≈ 32s   → FAIL 25s
+    #   poor:   ~200ms RTT  → N×200ms + startup ≈ 68s  → FAIL 25s
+    # Smart scheduler routes this to edge (cost=0); liqo-native always uses
+    # cloud → fails on moderate and poor WAN profiles.
+    slo.hybrid.io/class: "latency"
+    slo.hybrid.io/deadlineMs: "25000"
+    slo.hybrid.io/preferEdge: "true"
 spec:
-  activeDeadlineSeconds: 120
   backoffLimit: 0
   template:
     metadata:
@@ -17,58 +26,63 @@ spec:
         app: http-latency-job
         scheduling.hybrid.io/managed: "true"
       annotations:
-        slo.hybrid.io/class: "throughput"
-        slo.hybrid.io/deadlineMs: "50000"
+        slo.hybrid.io/class: "latency"
+        slo.hybrid.io/deadlineMs: "25000"
+        slo.hybrid.io/preferEdge: "true"
     spec:
       restartPolicy: Never
-      # 1. Define the shared volume for communication
-      volumes:
-        - name: lifecycle
-          emptyDir: {}
       containers:
-        - name: webserver
+        - name: latency-client
           image: python:3.11-slim
-          ports:
-            - containerPort: 8080
-          # 2. Add a script to start the server and poll for the 'done' file
-          command: ["/bin/bash", "-c"]
-          args:
+          env:
+            - name: EDGE_DATA_SERVER_URL
+              value: ""  # injected by benchmark orchestrator at deploy time
+            - name: N_REQUESTS
+              value: "300"
+          command:
+            - bash
+            - -c
             - |
-              set -e
-              # Start the server in the background
-              python -m http.server 8080 &
-              SERVER_PID=$!
-              echo "Server started with PID $SERVER_PID"
-              
-              # Poll the shared volume until the 'done' file appears
-              while [ ! -f /lifecycle/done ]; do
-                sleep 1
-              done
+              set -euo pipefail
+              python3 - <<'PY'
+              import http.client, os, time
+              from urllib.parse import urlparse
 
-              echo "'done' file found. Shutting down server."
-              kill $SERVER_PID
-              wait $SERVER_PID 2>/dev/null || true
-          resources:
-            requests: { cpu: "50m", memory: "64Mi" }
-          # 3. Mount the shared volume
-          volumeMounts:
-            - name: lifecycle
-              mountPath: /lifecycle
+              url = os.environ.get("EDGE_DATA_SERVER_URL", "http://localhost:8080")
+              p   = urlparse(url)
+              host, port = p.hostname, (p.port or 80)
+              N   = int(os.environ.get("N_REQUESTS", "300"))
 
-        - name: load-generator
-          image: williamyeh/hey:latest
-          command: ["/bin/sh", "-c"]
-          # 4. The command now also creates the 'done' file upon completion
-          args:
-            - |
-              # Wait for the server to be available
-              sleep 2
-              /hey -z 30s -q 50 -c 25 http://localhost:8080
-              # Signal completion by creating the file
-              touch /lifecycle/done
+              print(f"http-latency-job: {N} sequential GETs to {url}", flush=True)
+              t0 = time.time()
+              errors = 0
+
+              conn = http.client.HTTPConnection(host, port, timeout=5)
+              for i in range(N):
+                  try:
+                      conn.request("GET", "/ping")
+                      resp = conn.getresponse()
+                      resp.read()
+                  except Exception:
+                      errors += 1
+                      try:
+                          conn.close()
+                      except Exception:
+                          pass
+                      conn = http.client.HTTPConnection(host, port, timeout=5)
+                  if (i + 1) % 50 == 0:
+                      print(f"  {i+1}/{N} done, elapsed={time.time()-t0:.1f}s errors={errors}",
+                            flush=True)
+              try:
+                  conn.close()
+              except Exception:
+                  pass
+
+              elapsed = time.time() - t0
+              rps = N / elapsed if elapsed > 0 else 0
+              print(f"Done: {N} requests in {elapsed:.2f}s ({rps:.1f} rps, errors={errors})",
+                    flush=True)
+              PY
           resources:
-            requests: { cpu: "400m", memory: "128Mi" }
-          # 5. Mount the shared volume
-          volumeMounts:
-            - name: lifecycle
-              mountPath: /lifecycle
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits:   { cpu: "300m", memory: "128Mi" }

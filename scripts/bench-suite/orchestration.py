@@ -3,6 +3,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+import textwrap
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,11 @@ from kubernetes.client import ApiException
 import k8s_helpers
 from utils import log, file_exists
 
+# ---------------------------------------------------------------------------
+# Edge data server constants
+# ---------------------------------------------------------------------------
+
+_EDGE_DATA_SERVER_NAME = "edge-data-server"
 
 # ---------------------------------------------------------------------------
 # Argument Parsing
@@ -173,23 +179,6 @@ class RoundRobinPlacer:
         node_sel = pod_spec.setdefault("nodeSelector", {})
         node_sel[self.label_key] = cluster
 
-    def apply_file(self, ns_offloaded: str, ns_local: str, manifest_path: Path):
-        """
-        Read *manifest_path*, patch with nodeSelectors, write to a temp file,
-        then apply via k8s_helpers.k_apply.
-        """
-        raw = manifest_path.read_text()
-        patched = self.patch_manifest_yaml(raw)
-        with tempfile.NamedTemporaryFile(
-            suffix=".yaml", mode="w", delete=False
-        ) as tmp:
-            tmp.write(patched)
-            tmp_path = Path(tmp.name)
-        try:
-            k8s_helpers.k_apply(ns_offloaded, ns_local, tmp_path)
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
 
 def make_placer(args: argparse.Namespace) -> Optional[RoundRobinPlacer]:
     """Return a RoundRobinPlacer if the mode requires it, else None."""
@@ -262,6 +251,225 @@ def deploy_local_load(apps_v1: client.AppsV1Api, ns: str, profile: str):
 
 
 # ---------------------------------------------------------------------------
+# Edge Data Server
+# ---------------------------------------------------------------------------
+
+def _discover_edge_node_ip(v1: client.CoreV1Api) -> str:
+    """Return the InternalIP of the local (non-virtual) edge node.
+
+    Liqo virtual nodes are identified by either:
+      - the label  ``liqo.io/type=virtual-node``  (all Liqo versions), or
+      - any taint  whose key contains ``liqo.io`` (e.g. the NoExecute remote-cluster taint).
+
+    We intentionally do NOT filter on ``node.cluster/id`` because the smart-
+    scheduler controller may apply that label to the local node as well.
+    """
+    nodes = v1.list_node()
+    for node in nodes.items:
+        labels = node.metadata.labels or {}
+        taints = node.spec.taints or []
+        name   = node.metadata.name
+
+        if labels.get("liqo.io/type") == "virtual-node":
+            log(f"  [edge-discovery] skipping virtual node {name} (liqo.io/type label)")
+            continue
+        if any("liqo.io" in (t.key or "") for t in taints):
+            log(f"  [edge-discovery] skipping virtual node {name} (liqo taint)")
+            continue
+
+        for addr in (node.status.addresses or []):
+            if addr.type == "InternalIP":
+                log(f"  [edge-discovery] edge node: {name} @ {addr.address}")
+                return addr.address
+
+    # If nothing found, dump node info to help diagnose
+    log("WARNING: no edge node found; dumping all nodes:")
+    for node in nodes.items:
+        lbl_keys = list((node.metadata.labels or {}).keys())
+        tnt_keys = [t.key for t in (node.spec.taints or [])]
+        log(f"  node={node.metadata.name}  labels={lbl_keys}  taints={tnt_keys}")
+    raise RuntimeError(
+        "Could not find edge node InternalIP: no non-virtual node found in cluster"
+    )
+
+
+def deploy_edge_data_server(
+    apps_v1: client.AppsV1Api,
+    v1: client.CoreV1Api,
+    ns_local: str,
+    timeout_sec: int = 120,
+) -> str:
+    """Deploy the edge-resident HTTP data server and return its NodePort URL.
+
+    The server exposes two endpoints:
+      GET /ping          → 200 "pong\\n"   (used by http-latency-job)
+      GET /data?size=N   → 200 <N random bytes>  (used by stream-batch-job)
+
+    It is deployed as a Deployment + NodePort Service in ``ns_local`` so it
+    always runs on the edge cluster.  Remote pods (cloud, fog) reach it via
+    the edge node's NodePort — traffic crosses the WAN and is subject to the
+    active tc-netem shaping profile.
+    """
+    server_code = textwrap.dedent("""\
+        import http.server, os, urllib.parse, sys
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_GET(self):
+                if self.path in ('/', '/ping'):
+                    b = b'pong\\n'
+                elif self.path.startswith('/data'):
+                    q = urllib.parse.urlparse(self.path).query
+                    p = dict(x.split('=', 1) for x in q.split('&') if '=' in x)
+                    b = os.urandom(min(int(p.get('size', '512')), 65536))
+                else:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+        print('edge-data-server listening on :8080', flush=True)
+        http.server.HTTPServer(('', 8080), H).serve_forever()
+    """)
+
+    deploy_body = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": _EDGE_DATA_SERVER_NAME,
+            "labels": {"app": _EDGE_DATA_SERVER_NAME},
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {"matchLabels": {"app": _EDGE_DATA_SERVER_NAME}},
+            "template": {
+                "metadata": {"labels": {"app": _EDGE_DATA_SERVER_NAME}},
+                "spec": {
+                    "restartPolicy": "Always",
+                    "containers": [{
+                        "name": "server",
+                        "image": "python:3.11-slim",
+                        "command": ["python3", "-c", server_code],
+                        "ports": [{"containerPort": 8080}],
+                        "readinessProbe": {
+                            "httpGet": {"path": "/ping", "port": 8080},
+                            "initialDelaySeconds": 5,
+                            "periodSeconds": 3,
+                            "failureThreshold": 20,
+                        },
+                        "resources": {
+                            "requests": {"cpu": "50m",  "memory": "64Mi"},
+                            "limits":   {"cpu": "300m", "memory": "128Mi"},
+                        },
+                    }],
+                },
+            },
+        },
+    }
+
+    svc_body = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": _EDGE_DATA_SERVER_NAME,
+            "labels": {"app": _EDGE_DATA_SERVER_NAME},
+        },
+        "spec": {
+            "type": "NodePort",
+            "selector": {"app": _EDGE_DATA_SERVER_NAME},
+            "ports": [{"port": 8080, "targetPort": 8080, "protocol": "TCP"}],
+        },
+    }
+
+    for create_fn, kind, body in [
+        (lambda b: apps_v1.create_namespaced_deployment(namespace=ns_local, body=b),
+         "Deployment", deploy_body),
+        (lambda b: v1.create_namespaced_service(namespace=ns_local, body=b),
+         "Service", svc_body),
+    ]:
+        try:
+            create_fn(body)
+            log(f"Created edge-data-server {kind} in '{ns_local}'.")
+        except ApiException as e:
+            if e.status == 409:
+                log(f"edge-data-server {kind} already exists, reusing.")
+            else:
+                raise
+
+    k8s_helpers.wait_deployment_ready(apps_v1, ns_local, _EDGE_DATA_SERVER_NAME, timeout_sec)
+
+    svc = v1.read_namespaced_service(name=_EDGE_DATA_SERVER_NAME, namespace=ns_local)
+    node_port = svc.spec.ports[0].node_port
+    edge_ip   = _discover_edge_node_ip(v1)
+    url = f"http://{edge_ip}:{node_port}"
+    log(f"edge-data-server URL (NodePort): {url}")
+    return url
+
+
+# ---------------------------------------------------------------------------
+# Manifest env-var injection helpers
+# ---------------------------------------------------------------------------
+
+def _inject_env_into_containers(doc: dict, env_vars: dict[str, str]):
+    """Set env vars on every container/initContainer in a K8s manifest doc."""
+    def _patch(containers):
+        for c in containers or []:
+            env = c.setdefault("env", [])
+            existing = {e.get("name"): e for e in env}
+            for k, v in env_vars.items():
+                if k in existing:
+                    existing[k]["value"] = v
+                else:
+                    env.append({"name": k, "value": v})
+
+    kind = doc.get("kind", "")
+    if kind in ("Job", "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Pod"):
+        if kind == "Pod":
+            spec = doc.get("spec") or {}
+        else:
+            spec = ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+        _patch(spec.get("containers"))
+        _patch(spec.get("initContainers"))
+    elif kind == "CronJob":
+        spec = (
+            ((doc.get("spec") or {}).get("jobTemplate") or {})
+            .get("spec", {})
+            .get("template", {})
+            .get("spec") or {}
+        )
+        _patch(spec.get("containers"))
+        _patch(spec.get("initContainers"))
+
+
+def _apply_with_env(
+    ns_offloaded: str,
+    ns_local: str,
+    path: Path,
+    env_vars: dict[str, str],
+    placer: Optional[RoundRobinPlacer] = None,
+):
+    """Read *path*, optionally apply round-robin patching, inject env vars,
+    write to a temp file, then apply via k8s_helpers.k_apply."""
+    raw = path.read_text()
+
+    # Round-robin nodeSelector patching (advances the placer counter)
+    if placer is not None:
+        raw = placer.patch_manifest_yaml(raw)
+
+    docs = [d for d in yaml.safe_load_all(raw) if d is not None]
+    for doc in docs:
+        _inject_env_into_containers(doc, env_vars)
+
+    patched = yaml.dump_all(docs, default_flow_style=False)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as tmp:
+        tmp.write(patched)
+        tmp_path = Path(tmp.name)
+    try:
+        k8s_helpers.k_apply(ns_offloaded, ns_local, tmp_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Cluster Preparation & Workload Deployment
 # ---------------------------------------------------------------------------
 
@@ -273,17 +481,27 @@ def deploy_and_prepare_cluster(
     placer: Optional[RoundRobinPlacer] = None,
 ):
     """
-    Deploy the toolbox pod (always local), then launch all batch jobs.
-    If *placer* is provided (round-robin mode), each manifest is patched with
-    a nodeSelector before being applied.
+    1. Deploy the edge-data-server (stays on edge, exposes NodePort).
+    2. Deploy the toolbox pod (always local).
+    3. Launch all batch jobs, injecting EDGE_DATA_SERVER_URL into every
+       container so latency-sensitive workloads can call back to the edge.
+
+    When *placer* is provided (round-robin mode) each manifest is also patched
+    with a nodeSelector before being applied.
     """
     v1, apps_v1 = client.CoreV1Api(), client.AppsV1Api()
 
+    # Step 1: edge-data-server — must be up before jobs start so the URL is known
+    log("Deploying edge-data-server on edge cluster...")
+    edge_url = deploy_edge_data_server(apps_v1, v1, ns_local)
+    env_vars  = {"EDGE_DATA_SERVER_URL": edge_url}
+
+    # Step 2: toolbox (not round-robined, no env injection needed)
     log("Deploying toolbox and waiting for it to be ready...")
-    # Toolbox always runs locally; do not round-robin it
     k8s_helpers.k_apply(ns_offloaded, ns_local, manifests_dir / args.toolbox_file)
     k8s_helpers.wait_pod_ready(v1, ns_local, "toolbox", 180)
 
+    # Step 3: batch jobs
     job_files = [
         args.http_latency_file,
         args.stream_batch_file,
@@ -300,10 +518,7 @@ def deploy_and_prepare_cluster(
         if not file_exists(path):
             continue
         log(f"  Applying {filename}...")
-        if placer is not None:
-            placer.apply_file(ns_offloaded, ns_local, path)
-        else:
-            k8s_helpers.k_apply(ns_offloaded, ns_local, path)
+        _apply_with_env(ns_offloaded, ns_local, path, env_vars, placer)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +583,7 @@ def cleanup_workloads(
 ):
     """Delete all benchmark-related workloads from the cluster."""
     log(f"Cleaning up workloads in {ns_offloaded}, {ns_local}...")
+
     if args.local_load_profile != "none":
         try:
             apps_v1 = client.AppsV1Api()
@@ -375,6 +591,22 @@ def cleanup_workloads(
         except ApiException as e:
             if e.status != 404:
                 log(f"Warning: could not delete local-cpu-load: {e}")
+
+    # Delete edge-data-server Deployment and Service
+    try:
+        client.AppsV1Api().delete_namespaced_deployment(
+            name=_EDGE_DATA_SERVER_NAME, namespace=ns_local
+        )
+    except ApiException as e:
+        if e.status != 404:
+            log(f"Warning: could not delete {_EDGE_DATA_SERVER_NAME} Deployment: {e}")
+    try:
+        client.CoreV1Api().delete_namespaced_service(
+            name=_EDGE_DATA_SERVER_NAME, namespace=ns_local
+        )
+    except ApiException as e:
+        if e.status != 404:
+            log(f"Warning: could not delete {_EDGE_DATA_SERVER_NAME} Service: {e}")
 
     all_files = [
         args.http_latency_file, args.cpu_batch_file, args.ml_infer_file,

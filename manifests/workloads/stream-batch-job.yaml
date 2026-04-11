@@ -5,11 +5,19 @@ metadata:
   labels:
     app: stream-batch-job
   annotations:
-    # Latency-class: should stay on edge to avoid WAN hop overhead.
-    # Under round-robin or single-cluster, this may land on cloud/fog, adding
-    # scheduling overhead and potential resource contention.
+    # Edge-preferred streaming workload: fetches N small data chunks from the
+    # edge-resident data server and processes each with a sha256 checksum,
+    # simulating a sensor-stream consumer that must stay co-located with the
+    # data source. When scheduled on edge the server is local (~0ms RTT);
+    # when scheduled on cloud/fog every chunk fetch crosses the WAN:
+    #   clear:    ~0ms RTT  → N×0ms  + startup ≈  8s   → PASS 40s
+    #   good:    ~20ms RTT  → N×20ms + startup ≈ 18s   → PASS 40s
+    #   moderate: ~80ms RTT → N×80ms + startup ≈ 47s   → FAIL 40s
+    #   poor:   ~200ms RTT  → N×200ms + startup ≈ 107s → FAIL 40s
+    # Smart scheduler routes this to edge (cost=0); liqo-native always uses
+    # cloud → fails on moderate and poor WAN profiles.
     slo.hybrid.io/class: "latency"
-    slo.hybrid.io/deadlineMs: "60000"
+    slo.hybrid.io/deadlineMs: "40000"
     slo.hybrid.io/preferEdge: "true"
 spec:
   backoffLimit: 0
@@ -20,48 +28,69 @@ spec:
         scheduling.hybrid.io/managed: "true"
       annotations:
         slo.hybrid.io/class: "latency"
-        slo.hybrid.io/deadlineMs: "60000"
+        slo.hybrid.io/deadlineMs: "40000"
         slo.hybrid.io/preferEdge: "true"
     spec:
       restartPolicy: Never
       containers:
-        - name: stream-processor
+        - name: stream-consumer
           image: python:3.11-slim
           env:
-            - name: "NUM_MESSAGES"
-              value: "1000"
-            - name: "COMPLEXITY"
-              value: "1000" # Controls CPU work per message
+            - name: EDGE_DATA_SERVER_URL
+              value: ""  # injected by benchmark orchestrator at deploy time
+            - name: N_CHUNKS
+              value: "500"
+            - name: CHUNK_BYTES
+              value: "512"
           command:
             - bash
             - -c
             - |
               set -euo pipefail
-              pip install --no-cache-dir numpy
-              python - <<'PY'
-              import numpy as np, time, os, math
-              
-              num_messages = int(os.getenv("NUM_MESSAGES", "1000"))
-              complexity = int(os.getenv("COMPLEXITY", "1000"))
-              
-              print(f"Starting stream batch job: {num_messages} messages, complexity {complexity}")
-              t0 = time.time()
-              
-              # Simulate processing messages one by one
-              for i in range(num_messages):
-                  # Simulate a small amount of CPU work for each "message"
-                  data = np.random.rand(complexity)
-                  _ = np.sin(data).sum()
-                  if (i+1) % 100 == 0:
-                      print(f"  Processed {i+1}/{num_messages} messages...")
-              
-              duration = time.time() - t0
-              print(f"Finished job in {duration:.2f} seconds.")
+              python3 - <<'PY'
+              import http.client, hashlib, os, time
+              from urllib.parse import urlparse
+
+              url        = os.environ.get("EDGE_DATA_SERVER_URL", "http://localhost:8080")
+              p          = urlparse(url)
+              host, port = p.hostname, (p.port or 80)
+              N          = int(os.environ.get("N_CHUNKS",   "500"))
+              CHUNK      = int(os.environ.get("CHUNK_BYTES", "512"))
+
+              print(f"stream-batch-job: {N} chunks × {CHUNK}B from {url}", flush=True)
+              t0          = time.time()
+              total_bytes = 0
+              errors      = 0
+
+              conn = http.client.HTTPConnection(host, port, timeout=5)
+              for i in range(N):
+                  try:
+                      conn.request("GET", f"/data?size={CHUNK}")
+                      resp = conn.getresponse()
+                      data = resp.read()
+                  except Exception:
+                      errors += 1
+                      try:
+                          conn.close()
+                      except Exception:
+                          pass
+                      conn = http.client.HTTPConnection(host, port, timeout=5)
+                      data = b""
+                  # CPU work: simulate stream processing of each chunk
+                  _ = hashlib.sha256(data).digest()
+                  total_bytes += len(data)
+                  if (i + 1) % 100 == 0:
+                      print(f"  {i+1}/{N} chunks, elapsed={time.time()-t0:.1f}s errors={errors}",
+                            flush=True)
+              try:
+                  conn.close()
+              except Exception:
+                  pass
+
+              elapsed = time.time() - t0
+              print(f"Done: {N} chunks, {total_bytes/1024:.1f}KB, {elapsed:.2f}s, errors={errors}",
+                    flush=True)
               PY
           resources:
-            requests:
-              cpu: "500m"
-              memory: "512Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits:   { cpu: "300m", memory: "128Mi" }
