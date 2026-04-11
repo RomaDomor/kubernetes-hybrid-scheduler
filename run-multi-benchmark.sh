@@ -17,7 +17,7 @@ SCHEDULER_MODES=("smart" "single-cluster" "liqo-native" "round-robin")
 # Helm args used when deploying the smart scheduler (tuned-aggressive).
 # Only applied for the "smart" mode; the others uninstall the webhook.
 # costFactors format: "local=0,<cluster-id>=<cost>" matching REMOTE_ENDPOINTS IDs.
-COST_FACTORS="local=0,cloud-1=1.0,fog-1=0.5"
+COST_FACTORS="local=0,cloud-1=1.0,fog-1=1.5"
 LYAPUNOV_BETA="0.8"
 
 # Remote cluster endpoints passed to the controller: "cloud-1=<ip>,cloud-2=<ip>"
@@ -344,6 +344,7 @@ dump_crd_profiles() {
 # Main benchmark loop
 # ---------------------------------------------------------------------------
 current_combination=0
+prev_mode=""
 
 for mode in "${ACTIVE_MODES[@]}"; do
   for wan_profile in "${PROFILES[@]}"; do
@@ -361,12 +362,23 @@ for mode in "${ACTIVE_MODES[@]}"; do
         echo "  - Applying WAN profile '${wan_profile}'..."
         ssh "${WAN_ROUTER}" "sudo -n /usr/local/sbin/wan/apply_wan.sh '${wan_profile}'"
 
-        configure_scheduler_for_mode "${mode}" "${KUBECONFIG}" "${IMAGE_TAG}"
-
-        echo "  - Sleeping 15s after scheduler reset..."
-        sleep 15
+        # Only reinstall the controller (and reset WorkloadProfile CRDs) when the
+        # scheduler mode changes. Within the same mode, the controller keeps running
+        # so the smart scheduler can accumulate profiles across WAN/load combos.
+        if [[ "${mode}" != "${prev_mode}" ]]; then
+          configure_scheduler_for_mode "${mode}" "${KUBECONFIG}" "${IMAGE_TAG}"
+          prev_mode="${mode}"
+          echo "  - Sleeping 15s after scheduler reconfiguration..."
+          sleep 15
+        fi
       else
-        echo "  - Would apply WAN '${wan_profile}' and configure mode '${mode}'."
+        if [[ "${mode}" != "${prev_mode}" ]]; then
+          echo "  - Would configure mode '${mode}' (mode changed from '${prev_mode}')."
+          prev_mode="${mode}"
+        else
+          echo "  - Keeping existing '${mode}' scheduler (mode unchanged)."
+        fi
+        echo "  - Would apply WAN '${wan_profile}'."
       fi
 
       PROFILE_RESULTS_BASE="${BASE_RESULTS}/scheduler-${mode}_wan-${wan_profile}_load-${local_load}"
