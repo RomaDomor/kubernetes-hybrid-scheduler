@@ -63,6 +63,8 @@ def parse_args() -> argparse.Namespace:
     manifests.add_argument("--memory-intensive-file", default="memory-intensive.yaml")
     manifests.add_argument("--stream-batch-file",    default="stream-batch-job.yaml")
     manifests.add_argument("--build-job-file",       default="build-job.yaml")
+    manifests.add_argument("--data-batch-file",      default="data-batch-job.yaml")
+    manifests.add_argument("--cpu-burst-file",       default="cpu-burst-job.yaml")
 
     # Benchmark Parameters
     params = parser.add_argument_group("Benchmark Parameters")
@@ -503,8 +505,14 @@ def deploy_and_prepare_cluster(
 
     # Step 3: batch jobs
     job_files = [
+        # Submit adversarial batch jobs first so they get edge placement
+        # before large-CPU jobs (cpu-batch, ml-infer) fill the 90% util limit.
+        args.data_batch_file,
+        args.cpu_burst_file,
+        # Latency-class jobs always go to edge via cost=0 regardless of order.
         args.http_latency_file,
         args.stream_batch_file,
+        # Large batch jobs — fill remaining edge capacity then spill to cloud/fog.
         args.cpu_batch_file,
         args.ml_infer_file,
         args.io_job_file,
@@ -563,6 +571,7 @@ def wait_for_all_jobs(
     offloaded_jobs = [
         "http-latency-job", "stream-batch-job", "cpu-batch",
         "ml-infer", "io-job", "memory-intensive", "build-job",
+        "data-batch-job", "cpu-burst-job",
     ]
     for job_name in offloaded_jobs:
         try:
@@ -611,7 +620,8 @@ def cleanup_workloads(
     all_files = [
         args.http_latency_file, args.cpu_batch_file, args.ml_infer_file,
         args.io_job_file, args.memory_intensive_file, args.stream_batch_file,
-        args.build_job_file, args.toolbox_file,
+        args.build_job_file, args.data_batch_file, args.cpu_burst_file,
+        args.toolbox_file,
     ]
     for filename in reversed(all_files):
         path = manifests_dir / filename

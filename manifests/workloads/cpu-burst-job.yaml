@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cpu-burst-job
+  labels:
+    app: cpu-burst-job
+  annotations:
+    # Adversarial workload for scheduler evaluation: intentionally carries NO
+    # preferEdge / preferCloud hint. The job does a fixed amount of CPU work
+    # (stress-ng --cpu-ops) whose wall time scales inversely with available CPUs.
+    #
+    # Hardware note: edge nodes expose 1950m allocatable CPU each (~2 physical
+    # cores after system overhead). The job uses 2 workers limited to 1900m so
+    # each worker gets ~1 CPU on any cluster, giving predictable timing.
+    #
+    # Optimal cluster depends on local CPU load (measured on actual hardware):
+    #   edge + no load:    ~2 CPUs free  → ~12s   PASS  (deadline 20s)
+    #   edge + low load:   ~1.45 CPUs    → ~17s   PASS
+    #   edge + medium:     ~0.6-1.2 CPUs → ~21-56s FAIL  ← deadline
+    #   cloud (any load):  ~2 CPUs*      → ~12s   PASS  (* no local load on cloud)
+    #
+    # A naive class-based router (batch → cloud) always passes because cloud
+    # has no local load generator. The Lyapunov scheduler starts on edge
+    # (cost=0 with empty profiles); after Z-queue grows from load-induced
+    # failures it routes to cloud, recovering to near-100% pass rate.
+    #
+    # Calibration: measured ~160 bogo-ops/s per worker per CPU on this hardware
+    # (cloud-1 8-CPU node: 80000 ops / 125s / 4 workers = 160 ops/s/worker).
+    # CPU_OPS=4000 targets ~12s on 2 unloaded CPUs (2×160×12=3840).
+    # Adjust CPU_OPS if the unloaded edge wall time deviates from the 12s target.
+    slo.hybrid.io/class: "batch"
+    slo.hybrid.io/deadlineMs: "20000"
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: cpu-burst-job
+        scheduling.hybrid.io/managed: "true"
+      annotations:
+        slo.hybrid.io/class: "batch"
+        slo.hybrid.io/deadlineMs: "20000"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: cpu-worker
+          image: wdhif/stress-ng:latest
+          env:
+            - name: CPU_WKRS
+              value: "2"
+            - name: CPU_OPS
+              value: "4000"   # bogo-ops total; ~12s on 2 unloaded CPUs; tune if hardware differs
+          command:
+            - /bin/sh
+            - -c
+            - "exec stress-ng --cpu ${CPU_WKRS} --cpu-ops ${CPU_OPS} --metrics-brief"
+          resources:
+            requests: { cpu: "200m",  memory: "128Mi" }
+            limits:   { cpu: "1900m", memory: "256Mi" }

@@ -1,0 +1,101 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-batch-job
+  labels:
+    app: data-batch-job
+  annotations:
+    # Adversarial workload for scheduler evaluation: intentionally carries NO
+    # preferEdge / preferCloud hint. The job fetches N chunks from the edge-
+    # resident data server and applies a checksum + modular reduction per chunk.
+    #
+    # Optimal cluster depends on WAN conditions:
+    #   edge (any WAN): local fetch ~0ms, full CPU budget  → ~9s  PASS
+    #   cloud + clear:  fetch ~0ms WAN,   2× more CPUs    → ~9s  PASS
+    #   cloud + good:   fetch 300×20ms=6s + startup        → 15s  PASS
+    #   cloud + moderate: fetch 300×80ms=24s + startup     → 32s  FAIL  ← deadline
+    #   cloud + poor:   fetch 300×200ms=60s + startup      → 68s  FAIL
+    #
+    # A naive class-based router (batch → cloud) fails under moderate and poor
+    # WAN because it cannot reason about data locality.  The Lyapunov scheduler
+    # routes to edge from the first run (cost=0 dominates with empty profiles)
+    # and the edge profile (≈9s << 30s) keeps it there permanently.
+    slo.hybrid.io/class: "batch"
+    slo.hybrid.io/deadlineMs: "30000"
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: data-batch-job
+        scheduling.hybrid.io/managed: "true"
+      annotations:
+        slo.hybrid.io/class: "batch"
+        slo.hybrid.io/deadlineMs: "30000"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: data-processor
+          image: python:3.11-slim
+          env:
+            - name: EDGE_DATA_SERVER_URL
+              value: ""   # injected by benchmark orchestrator at deploy time
+            - name: N_CHUNKS
+              value: "300"
+            - name: CHUNK_BYTES
+              value: "10240"   # 10 KB per chunk  →  3 MB total transfer
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              python3 - <<'PY'
+              import http.client, hashlib, os, time
+              from urllib.parse import urlparse
+
+              url   = os.environ.get("EDGE_DATA_SERVER_URL", "http://localhost:8080")
+              p     = urlparse(url)
+              host, port = p.hostname, (p.port or 80)
+              N     = int(os.environ.get("N_CHUNKS",   "300"))
+              CHUNK = int(os.environ.get("CHUNK_BYTES", "10240"))
+
+              print(f"data-batch-job: {N} × {CHUNK}B chunks from {url}", flush=True)
+              t0 = time.time()
+              total_bytes = 0
+              errors      = 0
+
+              conn = http.client.HTTPConnection(host, port, timeout=8)
+              for i in range(N):
+                  try:
+                      conn.request("GET", f"/data?size={CHUNK}")
+                      resp = conn.getresponse()
+                      chunk = resp.read()
+                  except Exception:
+                      errors += 1
+                      try:
+                          conn.close()
+                      except Exception:
+                          pass
+                      conn = http.client.HTTPConnection(host, port, timeout=8)
+                      chunk = b""
+                  # Batch-style processing: checksum + modular reduction
+                  digest = hashlib.sha256(chunk).digest()
+                  val    = int.from_bytes(digest[:8], "little")
+                  _      = pow(val, 65537, 2**61 - 1)   # modular exponentiation
+                  total_bytes += len(chunk)
+                  if (i + 1) % 60 == 0:
+                      print(f"  {i+1}/{N} chunks processed, "
+                            f"elapsed={time.time()-t0:.1f}s errors={errors}", flush=True)
+
+              try:
+                  conn.close()
+              except Exception:
+                  pass
+
+              elapsed = time.time() - t0
+              print(f"Done: {N} chunks, {total_bytes/1024:.0f} KB, "
+                    f"{elapsed:.2f}s, errors={errors}", flush=True)
+              PY
+          resources:
+            requests: { cpu: "200m",  memory: "64Mi" }
+            limits:   { cpu: "1000m", memory: "128Mi" }
