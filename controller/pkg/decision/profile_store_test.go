@@ -17,13 +17,18 @@ import (
 const cloudCluster = constants.ClusterID("cloud-1")
 
 func testPod(cpuMillis, memMi int64, class string) *corev1.Pod {
+	return testPodWithDeadline(cpuMillis, memMi, class, "120000")
+}
+
+func testPodWithDeadline(cpuMillis, memMi int64, class, deadlineMs string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 			Name:      "p",
 			UID:       uuid.NewUUID(),
 			Annotations: map[string]string{
-				constants.AnnotationSLOClass: class,
+				constants.AnnotationSLOClass:    class,
+				constants.AnnotationSLODeadline: deadlineMs,
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -50,15 +55,26 @@ func resourceMi(mi int64) resource.Quantity {
 }
 
 func TestProfileKey_TieringAndClass(t *testing.T) {
-	p := testPod(250, 128, "latency")
+	p := testPodWithDeadline(250, 128, "latency", "25000")
 	key := apis.GetProfileKey(p, constants.LocalCluster)
 	if key.CPUTier != "small" || key.Class != "latency" || key.ClusterID != constants.LocalCluster {
 		t.Fatalf("unexpected key: %+v", key)
 	}
-	p2 := testPod(2500, 1024, "unknown")
+	if key.DeadlineBucket != "tight" {
+		t.Fatalf("expected tight deadline bucket, got %q", key.DeadlineBucket)
+	}
+	p2 := testPod(2500, 1024, "unknown") // default deadline 120000ms → loose
 	key2 := apis.GetProfileKey(p2, cloudCluster)
 	if key2.CPUTier != "large" || key2.Class != "batch" {
 		t.Fatalf("class normalization failed: %+v", key2)
+	}
+	if key2.DeadlineBucket != "loose" {
+		t.Fatalf("expected loose deadline bucket, got %q", key2.DeadlineBucket)
+	}
+	p3 := testPodWithDeadline(1500, 256, "batch", "50000")
+	key3 := apis.GetProfileKey(p3, cloudCluster)
+	if key3.DeadlineBucket != "medium" {
+		t.Fatalf("expected medium deadline bucket, got %q", key3.DeadlineBucket)
 	}
 }
 

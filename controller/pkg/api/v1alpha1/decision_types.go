@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,13 +24,14 @@ type Result struct {
 
 // ProfileKey uniquely identifies a workload profile.
 type ProfileKey struct {
-	Class     string
-	CPUTier   string
-	ClusterID constants.ClusterID
+	Class          string
+	CPUTier        string
+	DeadlineBucket string
+	ClusterID      constants.ClusterID
 }
 
 func (pk ProfileKey) String() string {
-	return fmt.Sprintf("%s-%s-%s", pk.Class, pk.CPUTier, pk.ClusterID)
+	return fmt.Sprintf("%s-%s-%s-%s", pk.Class, pk.CPUTier, pk.DeadlineBucket, pk.ClusterID)
 }
 
 // ProfileStats holds the statistical data for a workload profile.
@@ -98,10 +100,23 @@ func GetProfileKey(pod *corev1.Pod, clusterID constants.ClusterID) ProfileKey {
 	}
 	class = normalizeClass(class)
 
+	deadlineBucket := "loose"
+	if dlStr := pod.Annotations[constants.AnnotationSLODeadline]; dlStr != "" {
+		if dlMs, err := strconv.ParseInt(dlStr, 10, 64); err == nil {
+			switch {
+			case dlMs <= 25000:
+				deadlineBucket = "tight"
+			case dlMs <= 60000:
+				deadlineBucket = "medium"
+			}
+		}
+	}
+
 	return ProfileKey{
-		Class:     class,
-		CPUTier:   tier,
-		ClusterID: clusterID,
+		Class:          class,
+		CPUTier:        tier,
+		DeadlineBucket: deadlineBucket,
+		ClusterID:      clusterID,
 	}
 }
 

@@ -26,8 +26,8 @@ func TestEngine_ProbabilityBasedDecision(t *testing.T) {
 	wan := &apis.WANState{RTTMs: 20, LossPct: 0.5}
 
 	ps := e.GetProfileStore()
-	localKey := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: constants.LocalCluster}
-	cloudKey := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: cloudCluster}
+	localKey := apis.GetProfileKey(p, constants.LocalCluster)
+	cloudKey := apis.GetProfileKey(p, cloudCluster)
 
 	// Local: fast but risky (high variance)
 	for i := 0; i < 50; i++ {
@@ -73,8 +73,8 @@ func TestEngine_ProfilesInfluenceDecision(t *testing.T) {
 	local := localStateWithDefaults()
 	wan := &apis.WANState{RTTMs: 30, LossPct: 0.5}
 
-	localKey := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: constants.LocalCluster}
-	cloudKey := apis.ProfileKey{Class: "latency", CPUTier: "small", ClusterID: cloudCluster}
+	localKey := apis.GetProfileKey(p, constants.LocalCluster)
+	cloudKey := apis.GetProfileKey(p, cloudCluster)
 
 	// Scenario: Local historically violates, cloud is safe
 	for i := 0; i < 100; i++ {
