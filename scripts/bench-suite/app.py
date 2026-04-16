@@ -61,7 +61,7 @@ def main():
     manifest_files = [
         args.http_latency_file, args.cpu_batch_file, args.ml_infer_file,
         args.io_job_file, args.memory_intensive_file, args.stream_batch_file,
-        args.build_job_file, args.data_batch_file, args.cpu_burst_file,
+        args.build_job_file,
     ]
     catalog = slo.build_catalog_from_manifests(ns_offloaded, manifests_dir, manifest_files)
     slo.save_catalog(catalog, results_dir)
@@ -103,7 +103,6 @@ def main():
     job_names = [
         "http-latency-job", "stream-batch-job", "cpu-batch",
         "ml-infer", "io-job", "memory-intensive", "build-job",
-        "data-batch-job", "cpu-burst-job",
     ]
     job_meas = telemetry.measure_jobs_via_api(batch_v1, ns_offloaded, job_names)
     measures = {**job_meas}
