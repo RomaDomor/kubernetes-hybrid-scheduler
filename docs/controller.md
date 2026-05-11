@@ -121,7 +121,7 @@ spec:
 - No taint (schedulable by default).
 
 **Cloud Virtual Node(s):**
-- Label: `node.role/cloud: "true"`
+- Label: `node.cluster/id: "<cluster-id>"` (e.g., `cloud-1`)
 - Taint: `cloud=cloud:NoSchedule`  
   (Ensures only explicitly tolerated pods can be offloaded.)
 
@@ -131,7 +131,7 @@ spec:
 kubectl label nodes <edge-node-name> node.role/edge=true
 
 # Label and taint cloud virtual node
-kubectl label nodes <cloud-virtual-node> node.role/cloud=true
+kubectl label nodes <cloud-virtual-node> node.cluster/id=cloud-1
 kubectl taint nodes <cloud-virtual-node> cloud=cloud:NoSchedule
 ```
 
@@ -344,7 +344,7 @@ def decide(pod, slo, localState, wanState):
   },
   "spec": {
     "nodeSelector": {
-      "node.role/cloud": "true"
+      "node.cluster/id": "cloud-1"
     },
     "tolerations": [
       {

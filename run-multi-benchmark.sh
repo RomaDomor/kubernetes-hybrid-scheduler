@@ -5,14 +5,11 @@ set -euo pipefail
 
 # The four scheduler strategies under comparison:
 #   smart        - Our hybrid Lyapunov scheduler (the algorithm under test)
-#   single-cluster - No smart scheduler; default k8s places pods across all
-#                    Liqo virtual nodes treating the federation as one cluster.
-#                    This simulates WAN-unaware "big cluster" scheduling.
 #   liqo-native  - No smart scheduler; Liqo's default namespace-level offloading
 #                    decides placement without SLO awareness.
 #   round-robin  - No smart scheduler; benchmark Python script forces placements
 #                    to cycle deterministically: edge → fog → cloud → edge …
-SCHEDULER_MODES=("smart" "single-cluster" "liqo-native" "round-robin")
+SCHEDULER_MODES=("smart" "liqo-native" "round-robin")
 
 # Helm args used when deploying the smart scheduler (tuned-aggressive).
 # Only applied for the "smart" mode; the others uninstall the webhook.
@@ -56,7 +53,6 @@ Usage: $0 [OPTIONS]
 
 Run multi-scheduler Kubernetes SLO benchmarks against four scheduling strategies:
   smart          - Hybrid Lyapunov scheduler (the algorithm under test)
-  single-cluster - Default k8s across all Liqo virtual nodes (WAN-unaware)
   liqo-native    - Liqo namespace-level offloading without SLO awareness
   round-robin    - Deterministic edge→fog→cloud rotation
 
@@ -156,7 +152,7 @@ for load in "${LOCAL_LOAD_PROFILES[@]}"; do
     fi
 done
 
-valid_modes=("smart" "single-cluster" "liqo-native" "round-robin")
+valid_modes=("smart" "liqo-native" "round-robin")
 for mode in "${ACTIVE_MODES[@]}"; do
     if [[ ! " ${valid_modes[*]} " =~ " ${mode} " ]]; then
         echo "Error: Invalid scheduler mode '${mode}'. Must be one of: ${valid_modes[*]}"
@@ -273,7 +269,7 @@ cleanup_namespace() {
 # ---------------------------------------------------------------------------
 # Helper: configure the smart-scheduler for a given mode
 #   smart        → uninstall + reinstall with tuned params
-#   single-cluster, liqo-native, round-robin → uninstall only (no webhook)
+#   liqo-native, round-robin → uninstall only (no webhook)
 # ---------------------------------------------------------------------------
 configure_scheduler_for_mode() {
   local mode="$1" kubeconfig_path="$2" image_tag="$3"
